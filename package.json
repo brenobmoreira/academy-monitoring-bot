@@ -1,0 +1,10 @@
+{
+  "name": "academy-monitoring-bot",
+  "private": true,
+  "description": "Personal Telegram bots backed by Google Apps Script and Sheets",
+  "scripts": {
+    "test": "node --test \"apps/**/test/*.test.js\"",
+    "check": "node --check apps/daily-log/src/*.js"
+  },
+  "engines": { "node": ">=20" }
+}

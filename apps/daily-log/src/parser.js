@@ -1,19 +1,22 @@
 /**
- * Turns free text into a partial log entry. Fields not found are left undefined so the
- * upsert preserves whatever was already stored for the day.
+ * Turns free text into a partial entry: `date` plus any subset of Schema.FIELDS.
+ * Fields not found are left undefined so the upsert preserves what is already stored.
  *
- * F0: returns only the raw text. F1 adds the regex extraction; F3 adds an LLM fallback.
+ * F0: only `date` and `notes` (the raw text). F1 adds regex extraction; F3 an LLM fallback.
  */
 const Parser = {
-  /** @returns {{date: string, raw: string, weightKg?: number, sleepH?: number, load?: number, trained?: boolean}} */
+  /** @returns {{date: Date, notes?: string, weightKg?: number, sleepH?: number, ...}} */
   parse(text) {
     return {
       date: Parser.today_(),
-      raw: text,
+      notes: text,
     };
   },
 
+  /** Local midnight so the cell holds a pure date, matching rows typed by hand. */
   today_() {
-    return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    const tz = Session.getScriptTimeZone();
+    const ymd = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    return new Date(`${ymd}T00:00:00`);
   },
 };

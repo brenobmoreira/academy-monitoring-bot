@@ -11,10 +11,29 @@ ids or secrets; you will store yours in Script Properties.
 
 ## 2. Google Sheet
 
-1. Create a spreadsheet. Note its **id** from the URL (`/spreadsheets/d/<ID>/edit`).
-2. The `log` sheet and its header row are created automatically on first write.
+The bot writes into a sheet **you already own**; it never creates tabs or columns. Note the
+spreadsheet **id** from the URL (`/spreadsheets/d/<ID>/edit`).
 
-Columns: `date` (key, `yyyy-MM-dd`), `weight_kg`, `sleep_h`, `load`, `trained`, `raw`, `updated_at`.
+Requirements on the target tab (defaults: tab `Diário`, header on row 5, both configurable):
+
+- A header row containing a `Data` column (the key, one row per day, real date cells).
+- Any subset of these input headers; columns that are missing are simply skipped:
+
+| Header | Field | Type |
+|--------|-------|------|
+| `Peso kg` | weight | number |
+| `Sono h` | sleep | number |
+| `Passos` | steps | number |
+| `Cardio min` | cardio | number |
+| `Muay Thai` | trained Muay Thai | `Sim` / `Não` |
+| `Dieta completa` | diet complete | `Sim` / `Não` |
+| `Cintura cm` | waist | number |
+| `Fome 1–5` | hunger | 1–5 |
+| `Cansaço 1–5` | fatigue | 1–5 |
+| `Observações` | notes | text |
+
+Every other column in the row (targets, kcal, `Treinos`, 7-day averages, adherence) is left
+untouched, so formulas keep working. To rename a header, edit `src/schema.js`.
 
 ## 3. Apps Script project
 
@@ -39,7 +58,8 @@ In the editor: Project Settings → Script Properties. Add:
 | `WEBHOOK_SECRET` | any long random string (`openssl rand -hex 24`) |
 | `ALLOWED_CHAT_IDS` | your chat id (comma-separated if more than one) |
 | `SPREADSHEET_ID` | spreadsheet id |
-| `SHEET_NAME` | optional, default `log` |
+| `SHEET_NAME` | optional, default `Diário` |
+| `HEADER_ROW` | optional, default `5` |
 | `REMINDER_HOUR` | optional, default `21` |
 
 ## 4. Deploy the Web App
@@ -76,8 +96,8 @@ export WEBHOOK_SECRET=...        # same value as the Script Property
 
 ## 6. Smoke test (F0)
 
-Send any text to the bot. Expect a reply `Logged for <date>: <your text>` and a new row in the
-sheet. If nothing comes back, check Executions in the Apps Script editor for `doPost` errors.
+Send any text to the bot. Expect a reply `<dd/MM> · Observações <your text>` and today's row in
+the target tab with the text in `Observações` (created if the day did not exist yet). If nothing comes back, check Executions in the Apps Script editor for `doPost` errors.
 
 ## 7. Reminder trigger (F2)
 
@@ -91,4 +111,9 @@ In the editor, run `setupTriggers` once. It schedules `sendDailyReminder` daily 
 - **F2** daily reminder trigger
 - **F3** LLM fallback when the regex extracts nothing
 
-Open decisions: what `load` means (tonnage, RPE 1-10 or minutes) and which LLM provider F3 uses.
+Open decisions:
+
+- The sheet's `Treinos` column is a formula over `Registro de treino` (one row per exercise and
+  set). "Trained yes/no" from chat therefore maps to `Muay Thai` today; logging gym sessions
+  would mean writing to `Registro de treino`, a different shape (F4 candidate).
+- Which LLM provider F3 uses.

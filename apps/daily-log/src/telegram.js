@@ -1,5 +1,5 @@
 /**
- * Outbound Telegram Bot API calls.
+ * Outbound Telegram Bot API calls and message formatting.
  */
 const Telegram = {
   sendMessage(chatId, text) {
@@ -16,10 +16,16 @@ const Telegram = {
   },
 
   /**
-   * The confirmation is how the user notices a misparse (82.4 read as 8.24).
-   * F0: echoes the raw text. F1 renders the parsed fields.
+   * The confirmation is how the user notices a misparse (82.4 read as 8.24),
+   * so it echoes exactly what was written, field by field.
    */
-  formatConfirmation(entry) {
-    return `Logged for ${entry.date}: ${entry.raw}`;
+  formatConfirmation(entry, result) {
+    const day = Utilities.formatDate(entry.date, Session.getScriptTimeZone(), 'dd/MM');
+    if (result.written.length === 0) return `${day}: nothing recognized`;
+    const parts = result.written.map((field) => {
+      const header = Schema.FIELDS[field].header;
+      return `${header} ${Schema.toCell(field, entry[field])}`;
+    });
+    return `${day} · ${parts.join(' · ')}`;
   },
 };

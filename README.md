@@ -12,7 +12,7 @@ Follow the app's setup guide to run your own copy from scratch.
 
 | App | What it does | Setup |
 |-----|--------------|-------|
-| [`apps/daily-log`](apps/daily-log) | Logs daily weight, sleep, training load and trained yes/no from a Telegram chat into a sheet, with a 21h reminder. | [apps/daily-log/docs/setup.md](apps/daily-log/docs/setup.md) |
+| [`apps/daily-log`](apps/daily-log) | Logs the daily row of a fitness sheet (weight, sleep, steps, cardio, Muay Thai, diet, waist, hunger, fatigue, notes) from a Telegram chat, with a 21h reminder. | [apps/daily-log/docs/setup.md](apps/daily-log/docs/setup.md) |
 
 ## Architecture (shared by every app)
 
@@ -48,7 +48,7 @@ apps/<name>/
 ```
 
 Apps Script has no modules: every file shares one global scope. To keep it maintainable each file
-exposes exactly one namespace object (`Config`, `Parser`, `SheetRepo`, `Telegram`, ...) and only
+exposes exactly one namespace object (`Config`, `Schema`, `Parser`, `SheetRepo`, `Telegram`, ...) and only
 platform entry points are bare global functions (`doPost`, trigger handlers, `setupTriggers`).
 
 ## Deploying

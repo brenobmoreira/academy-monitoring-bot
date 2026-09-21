@@ -33,14 +33,10 @@ const Webhook = {
     return Config.allowedChatIds().includes(chatId);
   },
 
-  /**
-   * F0: prove the round trip works by writing a fixed row and echoing back.
-   * F1 replaces this with Parser.parse -> SheetRepo.upsert -> confirmation.
-   */
   handleMessage_(chatId, text) {
     const entry = Parser.parse(text);
-    SheetRepo.upsert(entry);
-    Telegram.sendMessage(chatId, Telegram.formatConfirmation(entry));
+    const result = SheetRepo.upsert(entry);
+    Telegram.sendMessage(chatId, Telegram.formatConfirmation(entry, result));
   },
 
   ok_() {

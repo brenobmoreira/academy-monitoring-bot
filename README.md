@@ -48,8 +48,7 @@ Requests failing either check are ignored with `200 OK` so Telegram does not ret
 ```
 apps/<name>/
 ├── .clasp.json.example   # copy to .clasp.json and fill in your scriptId (gitignored)
-├── appsscript.json       # manifest: timeZone, runtime, webapp access
-├── src/                  # .js files pushed by clasp
+├── src/                  # pushed by clasp: appsscript.json manifest + .js files
 ├── test/                 # node:test suites + Apps Script fakes (npm test)
 └── docs/setup.md         # zero-to-running guide for that app
 ```

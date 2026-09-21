@@ -1,0 +1,10 @@
+# clasp: carries the scriptId of YOUR Apps Script project
+.clasp.json
+# local-only files (env, notes, scratch)
+*.local
+*.local.*
+.env
+.env.*
+!.env.example
+.DS_Store
+node_modules/

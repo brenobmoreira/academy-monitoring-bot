@@ -16,16 +16,38 @@ const Telegram = {
   },
 
   /**
-   * The confirmation is how the user notices a misparse (82.4 read as 8.24),
-   * so it echoes exactly what was written, field by field.
+   * The confirmation is how the user notices a misparse (82.4 read as 8.24), so it echoes
+   * exactly what was written, field by field, one line per part.
    */
   formatConfirmation(entry, result) {
     const day = Utilities.formatDate(entry.date, Session.getScriptTimeZone(), 'dd/MM');
-    if (result.written.length === 0) return `${day}: nothing recognized`;
-    const parts = result.written.map((field) => {
-      const header = Schema.FIELDS[field].header;
-      return `${header} ${Schema.toCell(field, entry[field])}`;
-    });
-    return `${day} · ${parts.join(' · ')}`;
+    const lines = [];
+    if (result.diary && result.diary.written.length) {
+      const parts = result.diary.written.map((field) => {
+        const header = Schema.DIARY_FIELDS[field].header.replace(/ \d–\d$/, '');
+        return `${header} ${Telegram.cell_(Schema.toCell(field, entry.diary[field]))}`;
+      });
+      lines.push(`${day} · ${parts.join(' · ')}`);
+    }
+    if (result.workout) {
+      lines.push(`${day} · ${entry.workout.session}${entry.workout.phase ? ` (${entry.workout.phase})` : ''}:`);
+      result.workout.exercises.forEach((ex) => {
+        const sets = ex.sets.map((s) => `${Telegram.cell_(s.kg)}×${s.reps}`).join(' ');
+        const extras = [];
+        const src = entry.workout.exercises.find((e) => WorkoutPlan.normalize(e.name) === WorkoutPlan.normalize(ex.name))
+          || entry.workout.exercises[result.workout.exercises.indexOf(ex)];
+        if (src && src.rir !== undefined) extras.push(`RIR ${src.rir}`);
+        if (src && src.pain !== undefined) extras.push(`dor ${src.pain}`);
+        const flag = ex.known ? '' : ' ⚠ não está no cadastro';
+        lines.push(`• ${ex.name} ${sets}${extras.length ? ` (${extras.join(', ')})` : ''}${flag}`);
+      });
+    }
+    if (!lines.length) return `${day}: nada reconhecido`;
+    if (entry.warning) lines.push(`⚠ ${entry.warning}`);
+    return lines.join('\n');
+  },
+
+  cell_(v) {
+    return typeof v === 'number' ? String(v).replace('.', ',') : String(v);
   },
 };

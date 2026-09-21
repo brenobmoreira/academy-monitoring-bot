@@ -34,9 +34,16 @@ const Webhook = {
   },
 
   handleMessage_(chatId, text) {
-    const entry = Parser.parse(text);
-    const result = SheetRepo.upsert(entry);
-    Telegram.sendMessage(chatId, Telegram.formatConfirmation(entry, result));
+    let reply;
+    try {
+      const entry = Parser.parse(text, { phase: HojeScreen.currentPhase() });
+      const result = EntryService.apply(entry);
+      reply = Telegram.formatConfirmation(entry, result);
+    } catch (err) {
+      console.error(err);
+      reply = `⚠ não gravei: ${err.message}`;
+    }
+    Telegram.sendMessage(chatId, reply);
   },
 
   ok_() {

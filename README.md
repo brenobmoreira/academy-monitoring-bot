@@ -1,8 +1,8 @@
 # academy-monitoring-bot
 
 Personal Telegram bots that write to Google Sheets, with no server: the whole backend is a
-Google Apps Script Web App. Each bot lives in `apps/<name>` and is deployed independently
-with [clasp](https://github.com/google/clasp).
+Google Apps Script project bound to the spreadsheet, exposed as a Web App. Each bot lives in
+`apps/<name>` and is deployed independently with [clasp](https://github.com/google/clasp).
 
 Nothing here is tied to a specific account. All secrets and ids (bot token, chat id, spreadsheet
 id) live in the Apps Script **Script Properties** of your own project, never in this repo.
@@ -17,15 +17,21 @@ Follow the app's setup guide to run your own copy from scratch.
 ## Architecture (shared by every app)
 
 ```
-Telegram ──webhook──▶ Apps Script Web App (doPost) ──▶ Google Sheet
-   ▲                          │
-   └──── sendMessage ─────────┘   + time-based trigger for reminders
+Telegram ─webhook─▶ doPost ─▶ Parser (LLM | regex) ─┐
+                                                     ├─▶ Entry ─▶ DiaryRepo / WorkoutRepo ─▶ tabs
+Sheet menu ─▶ HojeScreen.read ───────────────────────┘
+Trigger (daily) ─▶ Telegram.sendMessage
 ```
 
 - **Telegram bot**: only a token from BotFather. Runs no code.
-- **Apps Script Web App**: receives the webhook, parses, writes to the sheet, replies.
+- **Apps Script (bound)**: receives the webhook, parses, writes to the sheet, replies; the same
+  code backs the spreadsheet's menu.
+- **Parser**: LLM-first through any OpenAI-compatible endpoint (Gemini by default), keyword regex
+  fallback. See `docs/adr/0002`.
 - **Google Sheet**: storage and the read interface. No dashboard in scope.
-- **Trigger**: `ScriptApp.newTrigger(...).timeBased()` for scheduled messages.
+- **Trigger**: `ScriptApp.newTrigger(...).timeBased()` for the reminder.
+
+Design and decisions: [`docs/specs`](docs/specs), [`docs/adr`](docs/adr).
 
 ## Security model
 
@@ -44,11 +50,12 @@ apps/<name>/
 ├── .clasp.json.example   # copy to .clasp.json and fill in your scriptId (gitignored)
 ├── appsscript.json       # manifest: timeZone, runtime, webapp access
 ├── src/                  # .js files pushed by clasp
+├── test/                 # node:test suites + Apps Script fakes (npm test)
 └── docs/setup.md         # zero-to-running guide for that app
 ```
 
 Apps Script has no modules: every file shares one global scope. To keep it maintainable each file
-exposes exactly one namespace object (`Config`, `Schema`, `Parser`, `SheetRepo`, `Telegram`, ...) and only
+exposes exactly one namespace object (`Config`, `Schema`, `Parser`, `DiaryRepo`, `Telegram`, ...) and only
 platform entry points are bare global functions (`doPost`, trigger handlers, `setupTriggers`).
 
 ## Deploying
@@ -62,3 +69,9 @@ clasp deploy -i <deploymentId> -d "short note"
 ```
 
 `scripts/set-webhook.sh` registers the Web App URL with Telegram using environment variables only.
+
+## Testing
+
+`npm test` runs every `apps/*/test/*.test.js` with Node's built-in runner. Sources are loaded
+into a VM with in-memory fakes of the Apps Script services, so tests need no network and no
+Google account.

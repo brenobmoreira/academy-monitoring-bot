@@ -3,64 +3,63 @@
 Everything below creates resources in **your** Google and Telegram accounts. The repo holds no
 ids or secrets; you will store yours in Script Properties.
 
-## 1. Telegram bot
+## 1. Spreadsheet
+
+The script is **bound** to a spreadsheet and expects these tabs, each with its header row on
+row 5 (except `Progressão`, whose header is row 9):
+
+| Tab | Used for | Headers the code relies on |
+|-----|----------|----------------------------|
+| `Diário` | one row per day | `Data` plus any of: `Peso kg`, `Sono h`, `Passos`, `Cardio min`, `Muay Thai`, `Dieta completa`, `Cintura cm`, `Fome 1–5`, `Cansaço 1–5`, `Observações` |
+| `Registro de treino` | one row per exercise per session | `Data`, `Sessão`, `Exercício`, `Equipamento / carga`, `kg série 1..4`, `Reps 1..4`, `Séries feitas`, `Volume kg×reps`, `RIR final`, `Dor 0–10`, `Técnica / adaptação`, `Ficha`, `Séries prescritas`, `Reps mín`, `Reps máx`, `Fase`, `ID sessão` |
+| `Ficha de treino` | prescription | `Sessão`, `Exercício proposto`, `Séries adaptação`, `Séries após adaptação`, `Reps mín.`, `Reps máx.` |
+| `Exercícios` | canonical names | `Exercício`, `Grupo` |
+| `Histórico de fichas` | plan version | `Versão` |
+| `Progressão` | per-exercise history | picker in `B5`; headers on row 9: `Data`, `Ficha`, `Exercício`, `kg 1..4`, `reps 1..4`, `Volume`, `Séries válidas`, `RIR final` |
+| `Hoje` | manual entry screen | fixed cells, see `src/sheet_ui.js` (`HojeScreen.CELLS` and `TABLE`) |
+
+Only input columns are written; formula columns are preserved. Header text is what matters,
+not position. Yes/no cells receive `Sim` / `Não`.
+
+## 2. Telegram bot
 
 1. Talk to [@BotFather](https://t.me/BotFather) → `/newbot` → note the **token**.
 2. Send any message to your new bot, then find your **chat id**: open
    `https://api.telegram.org/bot<TOKEN>/getUpdates` and read `message.chat.id`.
 
-## 2. Google Sheet
+## 3. Apps Script project (bound)
 
-The bot writes into a sheet **you already own**; it never creates tabs or columns. Note the
-spreadsheet **id** from the URL (`/spreadsheets/d/<ID>/edit`).
-
-Requirements on the target tab (defaults: tab `Diário`, header on row 5, both configurable):
-
-- A header row containing a `Data` column (the key, one row per day, real date cells).
-- Any subset of these input headers; columns that are missing are simply skipped:
-
-| Header | Field | Type |
-|--------|-------|------|
-| `Peso kg` | weight | number |
-| `Sono h` | sleep | number |
-| `Passos` | steps | number |
-| `Cardio min` | cardio | number |
-| `Muay Thai` | trained Muay Thai | `Sim` / `Não` |
-| `Dieta completa` | diet complete | `Sim` / `Não` |
-| `Cintura cm` | waist | number |
-| `Fome 1–5` | hunger | 1–5 |
-| `Cansaço 1–5` | fatigue | 1–5 |
-| `Observações` | notes | text |
-
-Every other column in the row (targets, kcal, `Treinos`, 7-day averages, adherence) is left
-untouched, so formulas keep working. To rename a header, edit `src/schema.js`.
-
-## 3. Apps Script project
+In the spreadsheet: Extensions → Apps Script. Project Settings shows the **Script ID**.
 
 ```bash
 npm i -g @google/clasp
 clasp login
 cd apps/daily-log
-clasp create --type webapp --title "daily-log" --rootDir src   # writes .clasp.json (gitignored)
-clasp push
+cp .clasp.json.example .clasp.json      # paste the scriptId; file is gitignored
+clasp push -f                            # replaces the empty Code.gs
 ```
-
-If you prefer, create the project in the browser and `cp .clasp.json.example .clasp.json` with its
-`scriptId`.
 
 ### Script Properties
 
-In the editor: Project Settings → Script Properties. Add:
+Project Settings → Script Properties:
 
 | Key | Value |
 |-----|-------|
 | `TELEGRAM_BOT_TOKEN` | token from BotFather |
 | `WEBHOOK_SECRET` | any long random string (`openssl rand -hex 24`) |
 | `ALLOWED_CHAT_IDS` | your chat id (comma-separated if more than one) |
-| `SPREADSHEET_ID` | spreadsheet id |
-| `SHEET_NAME` | optional, default `Diário` |
+| `LLM_BASE_URL` | optional. Gemini: `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `LLM_API_KEY` | required when `LLM_BASE_URL` is set |
+| `LLM_MODEL` | optional, default `gemini-2.5-flash` |
+| `DIARY_SHEET` | optional, default `Diário` |
 | `HEADER_ROW` | optional, default `5` |
 | `REMINDER_HOUR` | optional, default `21` |
+
+Without `LLM_BASE_URL` the bot still works for the diary with keywords
+(`peso 82,4 sono 7h30 passos 8k muay sim`), but workouts need the LLM.
+
+Reload the spreadsheet: a **Registro** menu appears (Salvar dia, Salvar treino, Atualizar
+progressão). The first use asks you to authorize the script.
 
 ## 4. Deploy the Web App
 
@@ -72,7 +71,7 @@ clasp deployments
 ```
 
 Deploy → Web App must run as **Me** with access **Anyone** (that is what `appsscript.json`
-declares). The first deploy asks you to authorize the scopes in the browser.
+declares).
 
 Every later change:
 
@@ -94,26 +93,21 @@ export WEBHOOK_SECRET=...        # same value as the Script Property
 ../../scripts/set-webhook.sh info
 ```
 
-## 6. Smoke test (F0)
+## 6. Smoke test
 
-Send any text to the bot. Expect a reply `<dd/MM> · Observações <your text>` and today's row in
-the target tab with the text in `Observações` (created if the day did not exist yet). If nothing comes back, check Executions in the Apps Script editor for `doPost` errors.
+Send `peso 82,4 sono 7h30` to the bot. Expect `21/09 · Peso kg 82,4 · Sono h 7,5` and today's
+row in `Diário`. With the LLM configured, send
+`upper: supino inclinado 60x8 62x8 rir 2` and expect a row in `Registro de treino`.
+If nothing comes back, check Executions in the Apps Script editor for `doPost` errors.
 
-## 7. Reminder trigger (F2)
+## 7. Reminder trigger
 
 In the editor, run `setupTriggers` once. It schedules `sendDailyReminder` daily at
 `REMINDER_HOUR` in the project time zone (`America/Sao_Paulo`).
 
-## Roadmap
+## Development
 
-- **F0** webhook round trip + fixed row (this guide)
-- **F1** regex parser + upsert + confirmation of parsed fields
-- **F2** daily reminder trigger
-- **F3** LLM fallback when the regex extracts nothing
-
-Open decisions:
-
-- The sheet's `Treinos` column is a formula over `Registro de treino` (one row per exercise and
-  set). "Trained yes/no" from chat therefore maps to `Muay Thai` today; logging gym sessions
-  would mean writing to `Registro de treino`, a different shape (F4 candidate).
-- Which LLM provider F3 uses.
+```bash
+npm test        # Node built-in test runner against Apps Script fakes (no network, no Google)
+npm run check   # syntax check of src/
+```

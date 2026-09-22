@@ -42,7 +42,13 @@ async def test_runs_the_bot_and_replies_in_the_same_chat():
 
 @pytest.mark.parametrize(
     "u",
-    [update(chat_id=7), {"update_id": 1, "message": {"chat": {"id": 42}}}, {"update_id": 1}, {}],
+    [
+        update(chat_id=7),
+        update(text="   "),
+        {"update_id": 1, "message": {"chat": {"id": 42}}},
+        {"update_id": 1},
+        {},
+    ],
 )
 async def test_ignores_other_chats_and_non_text_updates(u):
     bot, tg = FakeBot(), FakeTelegram()
@@ -54,8 +60,9 @@ async def test_ignores_other_chats_and_non_text_updates(u):
 async def test_start_and_help_answer_without_the_model():
     bot, tg = FakeBot(), FakeTelegram()
     await Handler({42}, bot, tg).handle_update(update("/start"))
+    await Handler({42}, bot, tg).handle_update(update("/help@fitness_bot"))
     assert bot.texts == []
-    assert tg.sent == [(42, HELP)]
+    assert tg.sent == [(42, HELP), (42, HELP)]
 
 
 async def test_bot_failures_become_a_short_warning():

@@ -44,9 +44,9 @@ class Handler:
         message = update.get("message") or {}
         text = message.get("text")
         chat_id = (message.get("chat") or {}).get("id")
-        if not text or chat_id not in self._allowed:
+        if not isinstance(text, str) or not text.strip() or chat_id not in self._allowed:
             return
-        if text.split()[0] in ("/start", "/help"):
+        if text.split()[0].split("@")[0] in ("/start", "/help"):
             reply = HELP
         else:
             try:

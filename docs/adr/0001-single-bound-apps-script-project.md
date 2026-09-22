@@ -1,6 +1,6 @@
 # 0001 — One Apps Script project bound to the spreadsheet
 
-Date: 2026-09-21 · Status: accepted
+Date: 2026-09-21 · Status: accepted, amended by 0003 (the bound project is now the sheet API, not the bot)
 
 ## Context
 

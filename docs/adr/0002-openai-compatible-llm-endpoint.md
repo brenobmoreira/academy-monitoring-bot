@@ -1,6 +1,6 @@
 # 0002 — LLM through an OpenAI-compatible endpoint
 
-Date: 2026-09-21 · Status: accepted
+Date: 2026-09-21 · Status: superseded by 0003
 
 ## Context
 

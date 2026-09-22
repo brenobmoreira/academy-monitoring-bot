@@ -8,6 +8,8 @@ Nothing here is tied to a specific account. Secrets and ids live in Script Prope
 agent's environment (Secret Manager on Cloud Run) or in gitignored `.env` files, never in this
 repo.
 
+**Setting it up from zero:** [`docs/setup/README.md`](docs/setup/README.md).
+
 ## Parts
 
 | Part | Language | What it does | Setup |

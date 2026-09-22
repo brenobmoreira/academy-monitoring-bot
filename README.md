@@ -1,76 +1,56 @@
 # academy-monitoring-bot
 
-Personal Telegram bots that write to Google Sheets, with no server: the whole backend is a
-Google Apps Script project bound to the spreadsheet, exposed as a Web App. Each bot lives in
-`apps/<name>` and is deployed independently with [clasp](https://github.com/google/clasp).
+A personal Telegram bot that fills a fitness spreadsheet in Google Sheets. A Python agent
+(Google ADK + Gemini) understands the messages; a Google Apps Script project bound to the
+spreadsheet is the only thing that writes to it, through a strict JSON API.
 
-Nothing here is tied to a specific account. All secrets and ids (bot token, chat id, spreadsheet
-id) live in the Apps Script **Script Properties** of your own project, never in this repo.
-Follow the app's setup guide to run your own copy from scratch.
+Nothing here is tied to a specific account. Secrets and ids live in Script Properties, in the
+agent's environment (Secret Manager on Cloud Run) or in gitignored `.env` files, never in this
+repo.
 
-## Apps
+## Parts
 
-| App | What it does | Setup |
-|-----|--------------|-------|
-| [`apps/daily-log`](apps/daily-log) | Logs the daily row of a fitness sheet (weight, sleep, steps, cardio, Muay Thai, diet, waist, hunger, fatigue, notes) from a Telegram chat, with a 21h reminder. | [apps/daily-log/docs/setup.md](apps/daily-log/docs/setup.md) |
+| Part | Language | What it does | Setup |
+|------|----------|--------------|-------|
+| [`services/agent`](services/agent) | Python 3.12, Google ADK | Telegram webhook (Cloud Run function), Gemini agent with sheet tools, confirmation replies | [README](services/agent/README.md) |
+| [`apps/sheet`](apps/sheet) | Apps Script (JS) | Validated JSON API over the spreadsheet, the **Registro** sheet menu, the `Progressão` tab | [setup](apps/sheet/docs/setup.md) |
 
-## Architecture (shared by every app)
+## Architecture
 
 ```
-Telegram ─webhook─▶ doPost ─▶ Parser (LLM | regex) ─┐
-                                                     ├─▶ Entry ─▶ DiaryRepo / WorkoutRepo ─▶ tabs
-Sheet menu ─▶ HojeScreen.read ───────────────────────┘
-Trigger (daily) ─▶ Telegram.sendMessage
+Telegram ──webhook──▶ Cloud Run function (Python, ADK agent + Gemini)
+                         │ tools: get_catalog, save_diary, save_workout, get_exercise_history
+                         │        └──POST JSON──▶ Apps Script Web App ──▶ Sheets
+                         │             ◀── {ok, result} | {ok:false, errors[]}
+                         └──▶ Telegram reply
+
+Sheet menu "Registro" ──▶ Hoje screen ──▶ same validator ──▶ same repos ──▶ Sheets
 ```
 
-- **Telegram bot**: only a token from BotFather. Runs no code.
-- **Apps Script (bound)**: receives the webhook, parses, writes to the sheet, replies; the same
-  code backs the spreadsheet's menu.
-- **Parser**: LLM-first through any OpenAI-compatible endpoint (Gemini by default), keyword regex
-  fallback. See `docs/adr/0002`.
-- **Google Sheet**: storage and the read interface. No dashboard in scope.
-- **Trigger**: `ScriptApp.newTrigger(...).timeBased()` for the reminder.
+- **Agent**: never touches the sheet. When the API rejects a payload, the error list (path,
+  message, suggestions) goes back to the model, which fixes it and calls again. The reply echoes
+  what the sheet says it wrote.
+- **Sheet API**: accepts exact JSON only, checks names against the `Exercícios` and
+  `Ficha de treino` tabs, reports every error at once and writes nothing unless the whole
+  request is valid.
 
-Design and decisions: [`docs/specs`](docs/specs), [`docs/adr`](docs/adr).
+Design and decisions: [`docs/specs`](docs/specs), [`docs/adr`](docs/adr), [`docs/plans`](docs/plans).
 
 ## Security model
 
-Apps Script Web Apps are public and anonymous, and request headers are not exposed to the script,
-so Telegram's `secret_token` header cannot be checked. Every app therefore uses two layers:
-
-1. A **secret in the webhook URL query string** (`?secret=...`) compared against Script Properties.
-2. An **allowlist of chat ids** compared against Script Properties.
-
-Requests failing either check are ignored with `200 OK` so Telegram does not retry.
-
-## Layout conventions
-
-```
-apps/<name>/
-├── .clasp.json.example   # copy to .clasp.json and fill in your scriptId (gitignored)
-├── src/                  # pushed by clasp: appsscript.json manifest + .js files
-├── test/                 # node:test suites + Apps Script fakes (npm test)
-└── docs/setup.md         # zero-to-running guide for that app
-```
-
-Apps Script has no modules: every file shares one global scope. To keep it maintainable each file
-exposes exactly one namespace object (`Config`, `Schema`, `Parser`, `DiaryRepo`, `Telegram`, ...) and only
-platform entry points are bare global functions (`doPost`, trigger handlers, `setupTriggers`).
-
-## Deploying
-
-`clasp push` uploads code but does **not** change what the public URL serves. Always redeploy the
-existing deployment so the webhook URL stays the same:
-
-```bash
-clasp push
-clasp deploy -i <deploymentId> -d "short note"
-```
-
-`scripts/set-webhook.sh` registers the Web App URL with Telegram using environment variables only.
+- Telegram → agent: the webhook is registered with a `secret_token`; the function rejects
+  requests without the matching `X-Telegram-Bot-Api-Secret-Token` header and ignores chats
+  outside `ALLOWED_CHAT_IDS`.
+- Agent → Apps Script: the Web App is public (Apps Script cannot check Google identities for
+  a server caller without OAuth), so every request carries `SHEET_API_KEY` in the JSON body,
+  compared with the Script Property of the same name.
+- Gemini runs through Vertex AI with the function's service account; no API key.
 
 ## Testing
 
-`npm test` runs every `apps/*/test/*.test.js` with Node's built-in runner. Sources are loaded
-into a VM with in-memory fakes of the Apps Script services, so tests need no network and no
-Google account.
+```bash
+npm test                                   # Apps Script, Node runner with in-memory fakes
+cd services/agent && uv run pytest         # agent, fake sheet API and scripted LLM
+```
+
+Neither suite needs network or a Google account.

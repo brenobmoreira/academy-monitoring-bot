@@ -1,7 +1,11 @@
-# daily-log — setup from zero
+# sheet — setup from zero
 
-Everything below creates resources in **your** Google and Telegram accounts. The repo holds no
-ids or secrets; you will store yours in Script Properties.
+The Apps Script project bound to the spreadsheet. It is the only write path into the sheet:
+a strict JSON API (`doPost`) used by the agent in [`services/agent`](../../../services/agent),
+and the **Registro** menu used inside the spreadsheet. It does not talk to Telegram or to an LLM.
+
+Everything below creates resources in **your** Google account. The repo holds no ids or
+secrets; yours go in Script Properties.
 
 ## 1. Spreadsheet
 
@@ -12,8 +16,8 @@ row 5 (except `Progressão`, whose header is row 9):
 |-----|----------|----------------------------|
 | `Diário` | one row per day | `Data` plus any of: `Peso kg`, `Sono h`, `Passos`, `Cardio min`, `Muay Thai`, `Dieta completa`, `Cintura cm`, `Fome 1–5`, `Cansaço 1–5`, `Observações` |
 | `Registro de treino` | one row per exercise per session | `Data`, `Sessão`, `Exercício`, `Equipamento / carga`, `kg série 1..4`, `Reps 1..4`, `Séries feitas`, `Volume kg×reps`, `RIR final`, `Dor 0–10`, `Técnica / adaptação`, `Ficha`, `Séries prescritas`, `Reps mín`, `Reps máx`, `Fase`, `ID sessão` |
-| `Ficha de treino` | prescription | `Sessão`, `Exercício proposto`, `Séries adaptação`, `Séries após adaptação`, `Reps mín.`, `Reps máx.` |
-| `Exercícios` | canonical names | `Exercício`, `Grupo` |
+| `Ficha de treino` | prescription; its `Sessão` values are the accepted sessions | `Sessão`, `Exercício proposto`, `Séries adaptação`, `Séries após adaptação`, `Reps mín.`, `Reps máx.` |
+| `Exercícios` | the accepted exercise names | `Exercício`, `Grupo` |
 | `Histórico de fichas` | plan version | `Versão` |
 | `Progressão` | per-exercise history | picker in `B5`; headers on row 9: `Data`, `Ficha`, `Exercício`, `kg 1..4`, `reps 1..4`, `Volume`, `Séries válidas`, `RIR final` |
 | `Hoje` | manual entry screen | fixed cells, see `src/sheet_ui.js` (`HojeScreen.CELLS` and `TABLE`) |
@@ -21,57 +25,40 @@ row 5 (except `Progressão`, whose header is row 9):
 Only input columns are written; formula columns are preserved. Header text is what matters,
 not position. Yes/no cells receive `Sim` / `Não`.
 
-## 2. Telegram bot
-
-1. Talk to [@BotFather](https://t.me/BotFather) → `/newbot` → note the **token**.
-2. Send any message to your new bot, then find your **chat id**: open
-   `https://api.telegram.org/bot<TOKEN>/getUpdates` and read `message.chat.id`.
-
-## 3. Apps Script project (bound)
+## 2. Apps Script project
 
 In the spreadsheet: Extensions → Apps Script. Project Settings shows the **Script ID**.
 
 ```bash
 npm i -g @google/clasp
 clasp login
-cd apps/daily-log
+cd apps/sheet
 cp .clasp.json.example .clasp.json      # paste the scriptId; file is gitignored
 clasp push -f                            # replaces the empty Code.gs
 ```
 
-### Script Properties
-
-Project Settings → Script Properties:
+Script Properties (Project Settings → Script Properties):
 
 | Key | Value |
 |-----|-------|
-| `TELEGRAM_BOT_TOKEN` | token from BotFather |
-| `WEBHOOK_SECRET` | any long random string (`openssl rand -hex 24`) |
-| `ALLOWED_CHAT_IDS` | your chat id (comma-separated if more than one) |
-| `LLM_BASE_URL` | optional. Gemini: `https://generativelanguage.googleapis.com/v1beta/openai` |
-| `LLM_API_KEY` | required when `LLM_BASE_URL` is set |
-| `LLM_MODEL` | optional, default `gemini-2.5-flash` |
+| `SHEET_API_KEY` | long random string (`openssl rand -hex 24`); the agent sends the same value |
 | `DIARY_SHEET` | optional, default `Diário` |
 | `HEADER_ROW` | optional, default `5` |
-| `REMINDER_HOUR` | optional, default `21` |
 
-Without `LLM_BASE_URL` the bot still works for the diary with keywords
-(`peso 82,4 sono 7h30 passos 8k muay sim`), but workouts need the LLM.
-
-Reload the spreadsheet: a **Registro** menu appears (Salvar dia, Salvar treino, Atualizar
+Reload the spreadsheet: the **Registro** menu appears (Salvar dia, Salvar treino, Atualizar
 progressão). The first use asks you to authorize the script.
 
-## 4. Deploy the Web App
+## 3. Deploy the Web App
 
 First time:
 
 ```bash
 clasp deploy -d "v0"          # prints a deploymentId; keep it
-clasp deployments
 ```
 
-Deploy → Web App must run as **Me** with access **Anyone** (that is what `appsscript.json`
-declares).
+The manifest declares **Execute as: Me** and **Access: Anyone**; the agent has no Google
+credentials, so the API key in the body is what authenticates it. The URL is
+`https://script.google.com/macros/s/<deploymentId>/exec` → the agent's `SHEET_API_URL`.
 
 Every later change:
 
@@ -80,30 +67,32 @@ clasp push
 clasp deploy -i <deploymentId> -d "note"   # same URL, new code
 ```
 
-A plain `clasp push` does not change what the URL serves. If "I edited and nothing changed", you
-skipped the redeploy.
+A plain `clasp push` does not change what the URL serves.
 
-## 5. Register the webhook
+## 4. API
+
+`POST` JSON `{"key": "...", "op": "...", "args": {...}}`. The answer is always HTTP 200 (after a
+302 redirect that clients must follow) with `{"ok": true, "result": ...}` or
+`{"ok": false, "errors": [{"path", "code", "message", "suggestions?"}]}`.
+
+| op | args |
+|----|------|
+| `catalog` | `{}` → today, time zone, current phase, sessions, exercises, plan |
+| `diary.upsert` | `{"date": "2026-09-21", "fields": {"weightKg": 82.4, "sleepH": 7.5, "muayThai": true}}` |
+| `workout.upsert` | `{"date": "2026-09-21", "session": "Upper", "exercises": [{"name": "Supino inclinado", "sets": [{"kg": 60, "reps": 8}], "rir": 2}]}` |
+| `exercise.history` | `{"name": "Supino inclinado", "limit": 10}` |
+
+Nothing is coerced (`"82,4"` and `"sim"` are rejected), every error is reported at once, and a
+request with any error writes nothing. The full rules are in
+[`docs/specs/2026-09-22-python-agent-sheet-api-design.md`](../../../docs/specs/2026-09-22-python-agent-sheet-api-design.md).
+
+Quick check from a terminal:
 
 ```bash
-export TELEGRAM_BOT_TOKEN=...
-export WEBAPP_URL=https://script.google.com/macros/s/<deploymentId>/exec
-export WEBHOOK_SECRET=...        # same value as the Script Property
-../../scripts/set-webhook.sh set
-../../scripts/set-webhook.sh info
+curl -sL -H 'Content-Type: application/json' \
+  -d '{"key":"<SHEET_API_KEY>","op":"catalog","args":{}}' \
+  https://script.google.com/macros/s/<deploymentId>/exec
 ```
-
-## 6. Smoke test
-
-Send `peso 82,4 sono 7h30` to the bot. Expect `21/09 · Peso kg 82,4 · Sono h 7,5` and today's
-row in `Diário`. With the LLM configured, send
-`upper: supino inclinado 60x8 62x8 rir 2` and expect a row in `Registro de treino`.
-If nothing comes back, check Executions in the Apps Script editor for `doPost` errors.
-
-## 7. Reminder trigger
-
-In the editor, run `setupTriggers` once. It schedules `sendDailyReminder` daily at
-`REMINDER_HOUR` in the project time zone (`America/Sao_Paulo`).
 
 ## Development
 

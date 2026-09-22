@@ -14,29 +14,28 @@ const DiaryRepo = {
   },
 
   /**
+   * Every column is resolved before the first write, so a renamed header fails the whole call.
    * @param {Date} date
-   * @param {Object} diary  normalized diary fields (see Schema.normalizeDiary)
+   * @param {Object} fields  validated diary fields (see Validator.diaryUpsert)
    * @returns {{row: number, written: string[]}}
    */
-  upsert(date, diary) {
+  upsert(date, fields) {
     const sheet = DiaryRepo.sheet_();
-    const columns = Sheets.columnIndex(sheet, Config.headerRow());
+    const headerRow = Config.headerRow();
+    const columns = Sheets.columnIndex(sheet, headerRow);
     const dateCol = columns[Schema.DATE_HEADER];
-    if (!dateCol) throw new Error(`Header "${Schema.DATE_HEADER}" not found on row ${Config.headerRow()}`);
+    if (!dateCol) throw new Error(`Header "${Schema.DATE_HEADER}" not found on row ${headerRow}`);
+    const written = Object.keys(Schema.DIARY_FIELDS).filter((field) => fields[field] !== undefined);
+    const missing = written.map((f) => Schema.DIARY_FIELDS[f].header).filter((h) => !columns[h]);
+    if (missing.length) throw new Error(`Header ${missing.map((h) => `"${h}"`).join(', ')} not found on row ${headerRow} of "${sheet.getName()}"`);
 
-    let row = Sheets.findRowByDate(sheet, Config.headerRow() + 1, dateCol, date);
+    let row = Sheets.findRowByDate(sheet, headerRow + 1, dateCol, date);
     if (!row) {
-      row = Sheets.nextEmptyRow(sheet, Config.headerRow() + 1, dateCol);
+      row = Sheets.nextEmptyRow(sheet, headerRow + 1, dateCol);
       sheet.getRange(row, dateCol).setValue(date);
     }
-
-    const written = [];
-    Object.keys(Schema.DIARY_FIELDS).forEach((field) => {
-      if (diary[field] === undefined) return;
-      const col = columns[Schema.DIARY_FIELDS[field].header];
-      if (!col) return; // column absent in this sheet: skip silently
-      sheet.getRange(row, col).setValue(Schema.toCell(field, diary[field]));
-      written.push(field);
+    written.forEach((field) => {
+      sheet.getRange(row, columns[Schema.DIARY_FIELDS[field].header]).setValue(Schema.toCell(field, fields[field]));
     });
     return { row, written };
   },

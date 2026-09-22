@@ -4,7 +4,7 @@
   "description": "Personal Telegram bots backed by Google Apps Script and Sheets",
   "scripts": {
     "test": "node --test \"apps/**/test/*.test.js\"",
-    "check": "node --check apps/daily-log/src/*.js"
+    "check": "for f in apps/*/src/*.js; do node --check \"$f\" || exit 1; done"
   },
   "engines": { "node": ">=20" }
 }

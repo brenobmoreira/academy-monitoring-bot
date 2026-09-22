@@ -24,34 +24,37 @@ const WorkoutPlan = {
       .map((r) => ({ name: String(r['Exercício']).trim(), group: String(r['Grupo'] || '').trim() }));
   },
 
-  /**
-   * Maps a typed name to the catalogue: exact normalized match, else a unique partial match.
-   * @returns {{name: string, known: boolean}}
-   */
-  resolveExercise(typed) {
-    const wanted = WorkoutPlan.normalize(typed);
-    const entries = WorkoutPlan.catalogue().map((e) => ({ ...e, key: WorkoutPlan.normalize(e.name) }));
-    const exact = entries.find((e) => e.key === wanted);
-    if (exact) return { name: exact.name, known: true };
-    const partial = entries.filter((e) => e.key.includes(wanted) || wanted.includes(e.key));
-    if (partial.length === 1) return { name: partial[0].name, known: true };
-    return { name: String(typed).trim(), known: false };
+  /** Session names in plan order ("Ficha de treino"), or the sheet defaults when it is empty. */
+  sessions() {
+    const seen = [];
+    WorkoutPlan.planRows().forEach((r) => { if (!seen.includes(r.session)) seen.push(r.session); });
+    return seen.length ? seen : Schema.DEFAULT_SESSIONS.slice();
+  },
+
+  /** @returns {{session, exercise, setsAdaptation, setsRegular, repsMin, repsMax}[]} */
+  planRows() {
+    return Sheets.readRows(WorkoutPlan.sheet_(Config.SHEETS.PLAN), Config.headerRow())
+      .filter((r) => String(r['Sessão'] || '').trim() && String(r['Exercício proposto'] || '').trim())
+      .map((r) => ({
+        session: String(r['Sessão']).trim(),
+        exercise: String(r['Exercício proposto']).trim(),
+        setsAdaptation: Number(r['Séries adaptação']) || 0,
+        setsRegular: Number(r['Séries após adaptação']) || 0,
+        repsMin: Number(r['Reps mín.']) || 0,
+        repsMax: Number(r['Reps máx.']) || 0,
+      }));
   },
 
   /** @returns {{setsAdaptation: number, setsRegular: number, repsMin: number, repsMax: number} | null} */
   prescription(session, exercise) {
-    const rows = Sheets.readRows(WorkoutPlan.sheet_(Config.SHEETS.PLAN), Config.headerRow());
+    const rows = WorkoutPlan.planRows();
     const s = WorkoutPlan.normalize(session);
     const e = WorkoutPlan.normalize(exercise);
-    const row = rows.find((r) => WorkoutPlan.normalize(r['Sessão']) === s && WorkoutPlan.normalize(r['Exercício proposto']) === e)
-      || rows.find((r) => WorkoutPlan.normalize(r['Exercício proposto']) === e);
+    const row = rows.find((r) => WorkoutPlan.normalize(r.session) === s && WorkoutPlan.normalize(r.exercise) === e)
+      || rows.find((r) => WorkoutPlan.normalize(r.exercise) === e);
     if (!row) return null;
-    return {
-      setsAdaptation: Number(row['Séries adaptação']) || 0,
-      setsRegular: Number(row['Séries após adaptação']) || 0,
-      repsMin: Number(row['Reps mín.']) || 0,
-      repsMax: Number(row['Reps máx.']) || 0,
-    };
+    const { setsAdaptation, setsRegular, repsMin, repsMax } = row;
+    return { setsAdaptation, setsRegular, repsMin, repsMax };
   },
 
   prescribedSets(prescription, phase) {
@@ -90,13 +93,12 @@ const WorkoutRepo = {
   },
 
   /**
+   * Names are expected to be exact catalogue names (see Validator.workoutUpsert).
    * @param {Date} date
    * @param {{session: string, phase?: string, exercises: Array}} workout
-   * @returns {{rows: number[], exercises: {name: string, known: boolean, setsDone: number, volume: number}[]}}
+   * @returns {{phase: string, sessionId: string, rows: number[], exercises: Object[]}}
    */
   saveSession(date, workout) {
-    if (!workout.session) throw new Error('workout.session is required');
-    if (!workout.exercises || workout.exercises.length === 0) throw new Error('workout.exercises is empty');
     const sheet = WorkoutRepo.sheet_();
     const headerRow = Config.headerRow();
     const columns = Sheets.columnIndex(sheet, headerRow);
@@ -106,11 +108,11 @@ const WorkoutRepo = {
     const phase = workout.phase || WorkoutPlan.PHASE_REGULAR;
     const planVersion = WorkoutPlan.currentPlanVersion();
     const existing = Sheets.readRows(sheet, headerRow);
-    const result = { rows: [], exercises: [] };
+    const sessionId = WorkoutRepo.sessionId(date, workout.session);
+    const result = { phase, sessionId, rows: [], exercises: [] };
 
     workout.exercises.forEach((ex) => {
-      const resolved = WorkoutPlan.resolveExercise(ex.name);
-      const prescription = WorkoutPlan.prescription(workout.session, resolved.name);
+      const prescription = WorkoutPlan.prescription(workout.session, ex.name);
       const sets = (ex.sets || []).slice(0, Schema.MAX_SETS);
       const setsDone = sets.filter((s) => Number(s.reps) > 0).length;
       const volume = sets.reduce((sum, s) => sum + (Number(s.kg) || 0) * (Number(s.reps) || 0), 0);
@@ -118,7 +120,7 @@ const WorkoutRepo = {
       const cells = {
         [H.date]: date,
         [H.session]: workout.session,
-        [H.exercise]: resolved.name,
+        [H.exercise]: ex.name,
         [H.equipment]: ex.equipment || '',
         [H.setsDone]: setsDone,
         [H.volume]: volume,
@@ -130,7 +132,7 @@ const WorkoutRepo = {
         [H.repsMin]: prescription ? prescription.repsMin : '',
         [H.repsMax]: prescription ? prescription.repsMax : '',
         [H.phase]: phase,
-        [H.sessionId]: WorkoutRepo.sessionId(date, workout.session),
+        [H.sessionId]: sessionId,
       };
       for (let n = 1; n <= Schema.MAX_SETS; n++) {
         const s = sets[n - 1];
@@ -138,16 +140,28 @@ const WorkoutRepo = {
         cells[WorkoutRepo.repsHeader(n)] = s ? Number(s.reps) || '' : '';
       }
 
-      const row = WorkoutRepo.findExisting_(existing, date, workout.session, resolved.name)
+      const row = WorkoutRepo.findExisting_(existing, date, workout.session, ex.name)
         || Sheets.nextEmptyRow(sheet, headerRow + 1, columns[H.date]);
       Object.keys(cells).forEach((header) => {
         if (columns[header]) sheet.getRange(row, columns[header]).setValue(cells[header]);
       });
-      existing.push({ __row: row, [H.date]: date, [H.session]: workout.session, [H.exercise]: resolved.name });
+      existing.push({ __row: row, [H.date]: date, [H.session]: workout.session, [H.exercise]: ex.name });
       result.rows.push(row);
-      result.exercises.push({ name: resolved.name, known: resolved.known, setsDone, volume, sets });
+      const saved = { name: ex.name, row, sets: sets.map((set) => ({ kg: set.kg, reps: set.reps })), setsDone, volume };
+      ['rir', 'pain', 'note', 'equipment'].forEach((k) => { if (ex[k] !== undefined) saved[k] = ex[k]; });
+      result.exercises.push(saved);
     });
     return result;
+  },
+
+  /** Log rows (keyed by header) of one exercise, newest date first. */
+  history(exercise, limit) {
+    const H = WorkoutRepo.HEADERS;
+    const key = WorkoutPlan.normalize(exercise);
+    return Sheets.readRows(WorkoutRepo.sheet_(), Config.headerRow())
+      .filter((r) => r[H.date] instanceof Date && WorkoutPlan.normalize(r[H.exercise]) === key)
+      .sort((a, b) => b[H.date] - a[H.date])
+      .slice(0, limit);
   },
 
   findExisting_(rows, date, session, exercise) {

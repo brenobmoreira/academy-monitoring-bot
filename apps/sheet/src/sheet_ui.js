@@ -1,5 +1,6 @@
 /**
- * The "Hoje" screen: fixed cells the user fills by hand, read into an Entry by the sheet menu.
+ * The "Hoje" screen: fixed cells the user fills by hand, read into the same arguments the API
+ * accepts, so the menu and the agent share one validator and one write path.
  * Cell addresses mirror the spreadsheet model; change here if the layout changes.
  */
 const HojeScreen = {
@@ -29,32 +30,34 @@ const HojeScreen = {
     return HojeScreen.text_(sheet.getRange(HojeScreen.CELLS.phase).getValue());
   },
 
+  /** yyyy-MM-dd of the screen's date cell, today when it is empty. */
   date() {
     const v = HojeScreen.sheet_().getRange(HojeScreen.CELLS.date).getValue();
-    return v instanceof Date ? Sheets.localDate(Sheets.dayKey(v)) : Sheets.today();
+    return v instanceof Date ? Sheets.dayKey(v) : Sheets.todayKey();
   },
 
-  /** @returns {{date: Date, diary?: Object}} */
-  readDiary() {
+  /**
+   * Cell values go through as the sheet holds them; a number typed as text reaches the validator
+   * as text and is reported, never guessed. Yes/no cells default to "Não", so only "Sim" counts.
+   * @returns {{date: string, fields: Object}} arguments for diary.upsert
+   */
+  readDiaryArgs() {
     const sheet = HojeScreen.sheet_();
-    const raw = {};
+    const fields = {};
     Object.keys(HojeScreen.CELLS.diary).forEach((field) => {
-      raw[field] = sheet.getRange(HojeScreen.CELLS.diary[field]).getValue();
+      const v = sheet.getRange(HojeScreen.CELLS.diary[field]).getValue();
+      const type = Schema.DIARY_FIELDS[field].type;
+      if (type === 'boolean') { if (v === Schema.YES) fields[field] = true; return; }
+      if (v === '' || v === null) return;
+      fields[field] = type === 'text' ? String(v) : v;
     });
-    // yes/no cells default to "Não" on the screen; only an explicit "Sim" is a statement
-    ['dietComplete', 'muayThai'].forEach((f) => { if (!Schema.toBoolean_(raw[f])) delete raw[f]; });
-    const diary = Schema.normalizeDiary(raw);
-    const entry = { date: HojeScreen.date() };
-    if (Object.keys(diary).length) entry.diary = diary;
-    return entry;
+    return { date: HojeScreen.date(), fields };
   },
 
-  /** @returns {{date: Date, workout?: Object}} */
-  readWorkout() {
+  /** @returns {{date: string, session?: string, phase?: string, exercises: Object[]}} arguments for workout.upsert */
+  readWorkoutArgs() {
     const sheet = HojeScreen.sheet_();
     const T = HojeScreen.TABLE;
-    const session = HojeScreen.text_(sheet.getRange(HojeScreen.CELLS.session).getValue());
-    const phase = HojeScreen.currentPhase();
     const table = sheet.getRange(T.firstRow, T.firstCol, T.rows, T.cols).getValues();
     const exercises = [];
     table.forEach((line) => {
@@ -64,29 +67,28 @@ const HojeScreen = {
       for (let n = 0; n < Schema.MAX_SETS; n++) {
         const kg = line[1 + n * 2];
         const reps = line[2 + n * 2];
-        if (Number(reps) > 0) sets.push({ kg: Number(kg) || 0, reps: Number(reps) });
+        if (reps !== '') sets.push({ kg: kg === '' ? 0 : kg, reps });
       }
       if (!sets.length) return;
       const ex = { name, sets };
-      if (line[9] !== '') ex.rir = Number(line[9]);
-      if (line[10] !== '') ex.pain = Number(line[10]);
+      if (line[9] !== '') ex.rir = line[9];
+      if (line[10] !== '') ex.pain = line[10];
       if (HojeScreen.text_(line[11])) ex.note = HojeScreen.text_(line[11]);
       exercises.push(ex);
     });
-    const entry = { date: HojeScreen.date() };
-    if (exercises.length) {
-      if (!session) throw new Error('Selecione a Sessão (B23) antes de salvar o treino');
-      entry.workout = { session, phase, exercises };
-    }
-    return entry;
+    const args = { date: HojeScreen.date(), exercises };
+    const session = HojeScreen.text_(sheet.getRange(HojeScreen.CELLS.session).getValue());
+    const phase = HojeScreen.currentPhase();
+    if (session) args.session = session;
+    if (phase) args.phase = phase;
+    return args;
   },
 
   clearDiary() {
     const sheet = HojeScreen.sheet_();
     Object.keys(HojeScreen.CELLS.diary).forEach((field) => {
-      const type = Schema.DIARY_FIELDS[field].type;
       const range = sheet.getRange(HojeScreen.CELLS.diary[field]);
-      if (type === 'yesno') range.setValue(Schema.NO); else range.clearContent();
+      if (Schema.DIARY_FIELDS[field].type === 'boolean') range.setValue(Schema.NO); else range.clearContent();
     });
   },
 
@@ -113,21 +115,23 @@ function onOpen() {
 
 function menuSaveDay() {
   SheetMenu.run_(() => {
-    const entry = HojeScreen.readDiary();
-    if (EntryService.isEmpty(entry)) return 'Nada preenchido no bloco do dia.';
-    const result = EntryService.apply(entry);
+    const args = HojeScreen.readDiaryArgs();
+    if (!Object.keys(args.fields).length) return 'Nada preenchido no bloco do dia.';
+    const res = SheetApi.run('diary.upsert', args);
+    if (!res.ok) return SheetMenu.errors_(res.errors);
     HojeScreen.clearDiary();
-    return Telegram.formatConfirmation(entry, result);
+    return SheetMenu.diarySummary(res.result);
   });
 }
 
 function menuSaveWorkout() {
   SheetMenu.run_(() => {
-    const entry = HojeScreen.readWorkout();
-    if (EntryService.isEmpty(entry)) return 'Nenhuma série preenchida na tabela de treino.';
-    const result = EntryService.apply(entry);
+    const args = HojeScreen.readWorkoutArgs();
+    if (!args.exercises.length) return 'Nenhuma série preenchida na tabela de treino.';
+    const res = SheetApi.run('workout.upsert', args);
+    if (!res.ok) return SheetMenu.errors_(res.errors);
     HojeScreen.clearWorkout();
-    return Telegram.formatConfirmation(entry, result);
+    return SheetMenu.workoutSummary(res.result);
   });
 }
 
@@ -148,5 +152,39 @@ const SheetMenu = {
       message = `⚠ ${err.message}`;
     }
     SpreadsheetApp.getUi().alert(message);
+  },
+
+  errors_(errors) {
+    return ['Não gravei:'].concat(errors.map((e) => `• ${e.path.replace(/^args\./, '')}: ${e.message}`)).join('\n');
+  },
+
+  /** "21/09 · Peso kg 82,4 · Muay Thai Sim" from a diary.upsert result */
+  diarySummary(result) {
+    const parts = Object.keys(result.fields).map((field) => {
+      const header = Schema.DIARY_FIELDS[field].header.replace(/ \d–\d$/, '');
+      return `${header} ${SheetMenu.cell_(Schema.toCell(field, result.fields[field]))}`;
+    });
+    return `${SheetMenu.day_(result.date)} · ${parts.join(' · ')}`;
+  },
+
+  /** "21/09 · Upper (Adaptação):" then "• Supino inclinado 60×8 62,5×8 (RIR 2)" per exercise */
+  workoutSummary(result) {
+    const lines = [`${SheetMenu.day_(result.date)} · ${result.session} (${result.phase}):`];
+    result.exercises.forEach((ex) => {
+      const sets = ex.sets.map((s) => `${SheetMenu.cell_(s.kg)}×${s.reps}`).join(' ');
+      const extras = [];
+      if (ex.rir !== undefined) extras.push(`RIR ${ex.rir}`);
+      if (ex.pain !== undefined) extras.push(`dor ${ex.pain}`);
+      lines.push(`• ${ex.name} ${sets}${extras.length ? ` (${extras.join(', ')})` : ''}`);
+    });
+    return lines.join('\n');
+  },
+
+  day_(ymd) {
+    return `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}`;
+  },
+
+  cell_(v) {
+    return typeof v === 'number' ? String(v).replace('.', ',') : String(v);
   },
 };

@@ -7,11 +7,10 @@ const { sheets, WORKOUT_HEADERS } = require('./fixtures');
 const col = (h) => WORKOUT_HEADERS.indexOf(h) + 1;
 const day = (s) => new Date(`${s}T00:00:00`);
 
-test('resolveExercise matches ignoring accents and case, and unique partials', () => {
+test('sessions and plan rows come from the plan tab', () => {
   const { WorkoutPlan } = load({ sheets: sheets() });
-  assert.deepEqual(plain(WorkoutPlan.resolveExercise('supino INCLINADO')), { name: 'Supino inclinado', known: true });
-  assert.deepEqual(plain(WorkoutPlan.resolveExercise('puxada')), { name: 'Puxada aberta', known: true });
-  assert.deepEqual(plain(WorkoutPlan.resolveExercise('remada curvada')), { name: 'remada curvada', known: false });
+  assert.deepEqual(plain(WorkoutPlan.sessions()), ['Upper', 'Lower']);
+  assert.equal(WorkoutPlan.planRows().length, 3);
 });
 
 test('prescription and prescribedSets follow the plan and phase', () => {
@@ -29,13 +28,13 @@ test('saveSession appends one row per exercise with computed and prescribed colu
   const r = ctx.WorkoutRepo.saveSession(day('2026-09-21'), {
     session: 'Upper', phase: 'Adaptação',
     exercises: [
-      { name: 'supino inclinado', sets: [{ kg: 60, reps: 8 }, { kg: 62, reps: 8 }, { kg: 60, reps: 7 }], rir: 2 },
-      { name: 'remada curvada', sets: [{ kg: 40, reps: 10 }], pain: 3, note: 'pegada supinada' },
+      { name: 'Supino inclinado', sets: [{ kg: 60, reps: 8 }, { kg: 62, reps: 8 }, { kg: 60, reps: 7 }], rir: 2 },
+      { name: 'Leg press', sets: [{ kg: 40, reps: 10 }], pain: 3, note: 'pegada supinada' },
     ],
   });
   assert.deepEqual(plain(r.rows), [6, 7]);
-  assert.equal(r.exercises[0].known, true);
-  assert.equal(r.exercises[1].known, false);
+  assert.equal(r.sessionId, '2026-09-21/Upper');
+  assert.deepEqual(plain(r.exercises[1]), { name: 'Leg press', row: 7, sets: [{ kg: 40, reps: 10 }], setsDone: 1, volume: 400, pain: 3, note: 'pegada supinada' });
   const sheet = ctx.__spreadsheet.getSheetByName('Registro de treino');
   const row6 = sheet.getRange(6, 1, 1, WORKOUT_HEADERS.length).getValues()[0];
   assert.equal(row6[col('Exercício') - 1], 'Supino inclinado');
@@ -52,8 +51,8 @@ test('saveSession appends one row per exercise with computed and prescribed colu
   assert.equal(row6[col('Fase') - 1], 'Adaptação');
   assert.equal(row6[col('ID sessão') - 1], '2026-09-21/Upper');
   const row7 = sheet.getRange(7, 1, 1, WORKOUT_HEADERS.length).getValues()[0];
-  assert.equal(row7[col('Exercício') - 1], 'remada curvada');
-  assert.equal(row7[col('Séries prescritas') - 1], '');
+  assert.equal(row7[col('Exercício') - 1], 'Leg press');
+  assert.equal(row7[col('Séries prescritas') - 1], 2);
   assert.equal(row7[col('Dor 0–10') - 1], 3);
   assert.equal(row7[col('Técnica / adaptação') - 1], 'pegada supinada');
 });
@@ -71,8 +70,9 @@ test('saveSession overwrites the same date+session+exercise instead of duplicati
   assert.equal(sheet.getRange(6, col('Fase')).getValue(), 'Regular');
 });
 
-test('saveSession validates its input', () => {
-  const { WorkoutRepo } = load({ sheets: sheets() });
-  assert.throws(() => WorkoutRepo.saveSession(day('2026-09-21'), { exercises: [{ name: 'x' }] }), /session is required/);
-  assert.throws(() => WorkoutRepo.saveSession(day('2026-09-21'), { session: 'Upper', exercises: [] }), /exercises is empty/);
+test('history returns one exercise newest first, capped by limit', () => {
+  const ctx = load({ sheets: sheets() });
+  ['2026-09-14', '2026-09-21', '2026-09-17'].forEach((d) => ctx.WorkoutRepo.saveSession(day(d), { session: 'Upper', exercises: [{ name: 'Supino inclinado', sets: [{ kg: 60, reps: 8 }] }] }));
+  const rows = ctx.WorkoutRepo.history('Supino inclinado', 2);
+  assert.deepEqual(rows.map((r) => r['Data'].getDate()), [21, 17]);
 });

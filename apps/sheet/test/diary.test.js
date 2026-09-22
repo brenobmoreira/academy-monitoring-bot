@@ -28,14 +28,14 @@ test('upsert on an existing day overwrites given fields and preserves the rest',
   assert.equal(sheet.getRange(6, col('Meta versão')).getValue(), 'v3');
 });
 
-test('upsert skips fields whose column is absent and fills gaps left by formula columns', () => {
+test('upsert fills gaps left by formula columns and refuses a missing column before writing', () => {
   const rows = [[day('2026-09-20'), 82], [], ['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 'formula']];
   const ctx = load({ sheets: sheets({ diaryRows: rows }) });
+  assert.equal(ctx.DiaryRepo.upsert(day('2026-09-21'), { steps: 8000 }).row, 7);
   const sheet = ctx.__spreadsheet.getSheetByName('Diário');
   sheet.setCell_(5, col('Cintura cm'), 'Renamed');
-  const r = ctx.DiaryRepo.upsert(day('2026-09-21'), { waistCm: 90, steps: 8000 });
-  assert.equal(r.row, 7);
-  assert.deepEqual(plain(r.written), ['steps']);
+  assert.throws(() => ctx.DiaryRepo.upsert(day('2026-09-22'), { waistCm: 90, steps: 8000 }), /Header "Cintura cm" not found/);
+  assert.equal(sheet.getRange(8, col('Data')).getValue(), '');
 });
 
 test('upsert fails loudly when the diary tab or date header is missing', () => {

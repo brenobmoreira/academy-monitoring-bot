@@ -61,7 +61,12 @@ const Sheets = {
     return new Date(`${ymd}T00:00:00`);
   },
 
+  /** Today as yyyy-MM-dd in the script time zone. */
+  todayKey() {
+    return Sheets.dayKey(new Date());
+  },
+
   today() {
-    return Sheets.localDate(Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd'));
+    return Sheets.localDate(Sheets.todayKey());
   },
 };

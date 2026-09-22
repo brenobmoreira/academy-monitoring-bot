@@ -5,6 +5,7 @@ const { load, plain } = require('./harness');
 const { sheets, DIARY_HEADERS, WORKOUT_HEADERS } = require('./fixtures');
 
 const day = (s) => new Date(`${s}T00:00:00`);
+const NOW = '2026-09-21T15:00:00-03:00';
 
 function hojeRows() {
   const rows = Array.from({ length: 40 }, () => []);
@@ -20,35 +21,34 @@ function hojeRows() {
   return rows;
 }
 
-test('readDiary maps the yellow cells; unchecked yes/no cells are not statements', () => {
+test('readDiaryArgs maps the yellow cells; unchecked yes/no cells are not statements', () => {
   const ctx = load({ sheets: sheets({ hoje: hojeRows() }) });
-  const e = ctx.HojeScreen.readDiary();
-  assert.equal(e.date.getTime(), day('2026-09-21').getTime());
-  assert.deepEqual(plain(e.diary), { weightKg: 82.4, sleepH: 7.5, steps: 8000, muayThai: true, hunger: 3, notes: 'ok' });
+  assert.deepEqual(plain(ctx.HojeScreen.readDiaryArgs()), {
+    date: '2026-09-21', fields: { weightKg: 82.4, sleepH: 7.5, steps: 8000, muayThai: true, hunger: 3, notes: 'ok' },
+  });
 });
 
-test('readWorkout reads session, phase and only rows with sets', () => {
+test('readWorkoutArgs reads session, phase and only rows with sets', () => {
   const ctx = load({ sheets: sheets({ hoje: hojeRows() }) });
-  const e = ctx.HojeScreen.readWorkout();
-  assert.deepEqual(plain(e.workout), { session: 'Upper', phase: 'Adaptação', exercises: [
+  assert.deepEqual(plain(ctx.HojeScreen.readWorkoutArgs()), { date: '2026-09-21', session: 'Upper', phase: 'Adaptação', exercises: [
     { name: 'Supino inclinado', sets: [{ kg: 60, reps: 8 }, { kg: 62, reps: 8 }], rir: 2 },
     { name: 'Leg press', sets: [{ kg: 100, reps: 10 }], pain: 1, note: 'joelho' },
   ] });
 });
 
-test('menuSaveDay writes the diary, clears the inputs and alerts the confirmation', () => {
-  const ctx = load({ sheets: sheets({ hoje: hojeRows() }) });
+test('menuSaveDay writes the diary, clears the inputs and alerts the summary', () => {
+  const ctx = load({ sheets: sheets({ hoje: hojeRows() }), now: NOW });
   ctx.menuSaveDay();
   const diary = ctx.__spreadsheet.getSheetByName('Diário');
   assert.equal(diary.getRange(6, DIARY_HEADERS.indexOf('Peso kg') + 1).getValue(), 82.4);
   const hoje = ctx.__spreadsheet.getSheetByName('Hoje');
   assert.equal(hoje.getRange('B7').getValue(), '');
   assert.equal(hoje.getRange('E9').getValue(), 'Não');
-  assert.match(ctx.__alerts[0], /21\/09 · Peso kg 82,4/);
+  assert.equal(ctx.__alerts[0], '21/09 · Peso kg 82,4 · Sono h 7,5 · Passos 8000 · Muay Thai Sim · Fome 3 · Observações ok');
 });
 
 test('menuSaveWorkout writes rows, keeps exercise names and clears sets', () => {
-  const ctx = load({ sheets: sheets({ hoje: hojeRows() }) });
+  const ctx = load({ sheets: sheets({ hoje: hojeRows() }), now: NOW });
   ctx.menuSaveWorkout();
   const w = ctx.__spreadsheet.getSheetByName('Registro de treino');
   assert.equal(w.getLastRow(), 7);
@@ -56,17 +56,25 @@ test('menuSaveWorkout writes rows, keeps exercise names and clears sets', () => 
   const hoje = ctx.__spreadsheet.getSheetByName('Hoje');
   assert.equal(hoje.getRange('A27').getValue(), 'Supino inclinado');
   assert.equal(hoje.getRange('B27').getValue(), '');
-  assert.match(ctx.__alerts[0], /Upper \(Adaptação\)/);
+  assert.equal(ctx.__alerts[0], ['21/09 · Upper (Adaptação):', '• Supino inclinado 60×8 62×8 (RIR 2)', '• Leg press 100×10 (dor 1)'].join('\n'));
 });
 
-test('menu actions surface errors as alerts and require a session when sets exist', () => {
-  const rows = hojeRows(); rows[22] = ['Sessão', '', '', 'Fase', ''];
-  const ctx = load({ sheets: sheets({ hoje: rows }) });
+test('validation errors are listed in the alert and nothing is written or cleared', () => {
+  const rows = hojeRows(); rows[22] = ['Sessão', '', '', 'Fase', '']; rows[6][1] = '82,4';
+  const ctx = load({ sheets: sheets({ hoje: rows }), now: NOW });
   ctx.menuSaveWorkout();
-  assert.match(ctx.__alerts[0], /Selecione a Sessão/);
-  const empty = load({ sheets: sheets({ hoje: Array.from({ length: 40 }, () => []) }) });
+  assert.match(ctx.__alerts[0], /^Não gravei:\n• session: campo obrigatório/);
+  ctx.menuSaveDay();
+  assert.match(ctx.__alerts[1], /• fields\.weightKg: esperado número/);
+  assert.equal(ctx.__spreadsheet.getSheetByName('Hoje').getRange('B7').getValue(), '82,4');
+  assert.equal(ctx.__spreadsheet.getSheetByName('Diário').getLastRow(), 5);
+});
+
+test('empty blocks are reported without calling the API', () => {
+  const empty = load({ sheets: sheets({ hoje: Array.from({ length: 40 }, () => []) }), now: NOW });
   empty.menuSaveDay();
-  assert.equal(empty.__alerts[0], 'Nada preenchido no bloco do dia.');
+  empty.menuSaveWorkout();
+  assert.deepEqual(plain(empty.__alerts), ['Nada preenchido no bloco do dia.', 'Nenhuma série preenchida na tabela de treino.']);
 });
 
 test('onOpen registers the three menu items', () => {

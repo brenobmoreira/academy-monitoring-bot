@@ -16,11 +16,7 @@ const Progression = {
     const columns = Sheets.columnIndex(sheet, Progression.HEADER_ROW);
     const width = Math.max(...Object.values(columns));
     const H = WorkoutRepo.HEADERS;
-    const key = WorkoutPlan.normalize(exercise);
-    const log = Sheets.readRows(WorkoutRepo.sheet_(), Config.headerRow())
-      .filter((r) => r[H.date] instanceof Date && WorkoutPlan.normalize(r[H.exercise]) === key)
-      .sort((a, b) => b[H.date] - a[H.date])
-      .slice(0, Progression.MAX_SESSIONS);
+    const log = WorkoutRepo.history(exercise, Progression.MAX_SESSIONS);
 
     const firstRow = Progression.HEADER_ROW + 1;
     sheet.getRange(firstRow, 1, Progression.MAX_SESSIONS, width).clearContent();

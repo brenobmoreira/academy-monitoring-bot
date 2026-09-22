@@ -129,7 +129,7 @@ function createContext({ sheets = [], properties = {}, fetchResponses = [], now 
         alert: (msg) => ctx.__alerts.push(msg),
       }),
     },
-    __menus: [], __alerts: [],
+    __menus: [], __alerts: [], __locks: [],
     PropertiesService: {
       getScriptProperties: () => ({
         getProperty: (k) => (k in props ? props[k] : null),
@@ -147,8 +147,11 @@ function createContext({ sheets = [], properties = {}, fetchResponses = [], now 
       },
     },
     ContentService: {
-      MimeType: { TEXT: 'text' },
-      createTextOutput: (text) => ({ text, setMimeType() { return this; } }),
+      MimeType: { TEXT: 'text', JSON: 'json' },
+      createTextOutput: (text) => ({ text, mimeType: 'text', setMimeType(m) { this.mimeType = m; return this; } }),
+    },
+    LockService: {
+      getScriptLock: () => ({ waitLock: () => { ctx.__locks.push('wait'); }, releaseLock: () => { ctx.__locks.push('release'); } }),
     },
     ScriptApp: {
       getProjectTriggers: () => triggers.map((t) => ({ getHandlerFunction: () => t.fn, ...t })),

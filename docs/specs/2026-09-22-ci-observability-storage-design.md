@@ -27,7 +27,7 @@ is visible before the Cloud Build trigger deploys.
 | Job | Runs when | Steps |
 |-----|-----------|-------|
 | `changes` | always | `dorny/paths-filter` decides which of the two below run |
-| `sheet` | `apps/sheet/**`, `package.json` or the workflow changed | `npm run check`, `npm test` (Node 20) |
+| `sheet` | `apps/sheet/**`, `package.json` or the workflow changed | `npm run check`, `npm test` (Node 22: `node --test` expands globs only from Node 21) |
 | `agent` | `services/agent/**`, `e2e/**`, `apps/sheet/src/**` or the workflow changed | `uv sync --locked`, `ruff check`, `ruff format --check`, `ty check`, `pytest`, scripted e2e run; the e2e trace is uploaded as an artifact |
 
 `apps/sheet/src/**` triggers the agent job because the e2e run executes the real Apps Script

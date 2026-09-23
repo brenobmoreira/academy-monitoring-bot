@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - run: npm run check
       - run: npm test
 
@@ -58,7 +58,7 @@ jobs:
       # e2e/sheet_server.js runs the real Apps Script sources in Node.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true

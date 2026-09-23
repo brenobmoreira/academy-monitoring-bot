@@ -6,5 +6,5 @@
     "test": "node --test \"apps/**/test/*.test.js\"",
     "check": "for f in apps/*/src/*.js; do node --check \"$f\" || exit 1; done"
   },
-  "engines": { "node": ">=20" }
+  "engines": { "node": ">=22" }
 }

@@ -1,0 +1,24 @@
+# Agent settings that are safe to publish. Loaded once when the process starts.
+#
+# Precedence (highest first): environment variables > .env > this file > defaults in settings.py.
+# Any key below can be overridden by the environment variable of the same name in upper case
+# (gemini_model -> GEMINI_MODEL).
+#
+# Changing a value without rebuilding: point SETTINGS_FILE at a copy mounted into the container
+# (on Cloud Run, a Secret Manager secret mounted as a file) and restart the instances.
+#
+# Secrets (tokens, API keys) are refused here: they come only from the environment.
+
+# Gemini model id. Prices and ids: https://ai.google.dev/gemini-api/docs/pricing
+gemini_model: gemini-3.8-flash
+
+# Maximum model calls per Telegram message (tool calls and corrections included).
+max_llm_calls: 8
+
+# Resolves "hoje", "ontem" and weekdays in the agent instruction.
+timezone: America/Sao_Paulo
+
+# Model provider: false = AI Studio (GOOGLE_API_KEY), true = Vertex AI (GOOGLE_CLOUD_PROJECT +
+# credentials of the machine or of the Cloud Run service account).
+google_genai_use_vertexai: false
+google_cloud_location: us-central1

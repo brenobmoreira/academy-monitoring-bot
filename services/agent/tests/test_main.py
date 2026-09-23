@@ -1,19 +1,18 @@
-import dataclasses
-
 import pytest
 from flask import Request
+from pydantic import SecretStr
 
 from agent import main
-from agent.config import Settings
+from agent.settings import Settings
 
 pytestmark = pytest.mark.unit
 
-SETTINGS = Settings(
-    telegram_bot_token="tok",
+SETTINGS = Settings.model_construct(
+    telegram_bot_token=SecretStr("tok"),
     allowed_chat_ids=frozenset({42}),
     sheet_api_url="https://x/exec",
-    sheet_api_key="k",
-    telegram_webhook_secret="sec",
+    sheet_api_key=SecretStr("k"),
+    telegram_webhook_secret=SecretStr("sec"),
 )
 
 
@@ -49,7 +48,7 @@ def test_rejects_a_wrong_or_missing_secret(handled, secret):
 
 def test_fails_closed_without_a_configured_secret(handled, monkeypatch):
     monkeypatch.setattr(
-        main, "_settings", lambda: dataclasses.replace(SETTINGS, telegram_webhook_secret=None)
+        main, "_settings", lambda: SETTINGS.model_copy(update={"telegram_webhook_secret": None})
     )
     assert main.telegram_webhook(request())[1] == 403
 

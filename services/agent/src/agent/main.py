@@ -16,15 +16,17 @@ import functions_framework
 import httpx
 from flask import Request
 
-from agent.config import Settings
 from agent.handler import build_handler
+from agent.settings import Settings
 
 logging.basicConfig(level=logging.INFO)
 
 
 @functools.cache
 def _settings() -> Settings:
-    return Settings.from_env()
+    settings = Settings.load()
+    settings.apply_model_env()
+    return settings
 
 
 async def _handle(settings: Settings, update: dict[str, Any]) -> None:
@@ -37,7 +39,7 @@ def telegram_webhook(request: Request) -> tuple[str, int]:
     settings = _settings()
     expected = settings.telegram_webhook_secret
     given = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if not expected or not hmac.compare_digest(given.encode(), expected.encode()):
+    if not expected or not hmac.compare_digest(given.encode(), expected.get_secret_value().encode()):
         return "forbidden", 403
     update = request.get_json(silent=True)
     if isinstance(update, dict):

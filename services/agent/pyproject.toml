@@ -8,6 +8,7 @@ dependencies = [
     "functions-framework>=3.10.2",
     "google-adk>=2.9.2",
     "httpx>=0.28.1",
+    "pydantic-settings[yaml]>=2.15.0",
     "python-dotenv>=1.2.3",
 ]
 

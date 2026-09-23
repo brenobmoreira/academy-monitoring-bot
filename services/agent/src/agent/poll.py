@@ -2,7 +2,8 @@
 
     uv run agent-poll
 
-Reads services/agent/.env. Telegram refuses getUpdates while a webhook is set; delete it first
+Settings come from settings.yaml, overridden by services/agent/.env and the environment.
+Telegram refuses getUpdates while a webhook is set; delete it first
 (scripts/set-webhook.sh delete) and set it again before relying on the deployed function.
 """
 
@@ -13,10 +14,9 @@ import logging
 from typing import Any, Protocol
 
 import httpx
-from dotenv import load_dotenv
 
-from agent.config import Settings
 from agent.handler import build_handler
+from agent.settings import Settings
 from agent.telegram import TelegramClient
 
 log = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ async def poll_once(telegram: Updates, handler: UpdateHandler, offset: int | Non
 
 async def run(settings: Settings) -> None:
     async with httpx.AsyncClient() as http:
-        telegram = TelegramClient(settings.telegram_bot_token, http)
+        telegram = TelegramClient(settings.telegram_bot_token.get_secret_value(), http)
         handler = build_handler(settings, http)
         offset = None
         log.info("polling Telegram; Ctrl+C to stop")
@@ -49,5 +49,7 @@ async def run(settings: Settings) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    load_dotenv()
-    asyncio.run(run(Settings.from_env()))
+    settings = Settings.load()
+    settings.apply_model_env()
+    log.info("model %s, up to %s calls per message", settings.gemini_model, settings.max_llm_calls)
+    asyncio.run(run(settings))

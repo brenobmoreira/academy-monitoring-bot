@@ -37,6 +37,7 @@ from google.genai import types
 from agent import handler as handler_module
 from agent import main
 from agent.bot import Bot
+from agent.settings import Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "e2e" / "out"
@@ -185,12 +186,13 @@ def start_sheet_server() -> tuple[subprocess.Popen[str], str]:
     return proc, f"http://127.0.0.1:{line.split()[1]}/"
 
 
-def require_model_credentials() -> None:
-    if os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").upper() in ("TRUE", "1"):
-        if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
-            sys.exit(f"--real with Vertex needs GOOGLE_CLOUD_PROJECT in {ENV_FILE.relative_to(ROOT)}")
-    elif not os.environ.get("GOOGLE_API_KEY"):
-        sys.exit(f"--real needs GOOGLE_API_KEY (AI Studio) in {ENV_FILE.relative_to(ROOT)}")
+def require_model_credentials(settings: Settings) -> None:
+    where = ENV_FILE.relative_to(ROOT)
+    if settings.google_genai_use_vertexai:
+        if not settings.google_cloud_project:
+            sys.exit(f"--real with Vertex needs GOOGLE_CLOUD_PROJECT in {where}")
+    elif not settings.google_api_key:
+        sys.exit(f"--real needs GOOGLE_API_KEY (AI Studio) in {where}")
 
 
 def main_run() -> None:
@@ -202,11 +204,10 @@ def main_run() -> None:
     args = parser.parse_args()
     message = args.message if args.real else DEFAULT_MESSAGE
     today = datetime.now(TZ).date().isoformat()
-    # Model credentials come from services/agent/.env; the Telegram and sheet values in it are
-    # replaced by local fakes below, so the run never reaches the real bot or spreadsheet.
+    # Model settings come from settings.yaml and services/agent/.env like in the real agent; the
+    # Telegram and sheet values are replaced by local fakes below, so the run never reaches the
+    # real bot or spreadsheet.
     load_dotenv(ENV_FILE)
-    if args.real:
-        require_model_credentials()
 
     proc, sheet_url = start_sheet_server()
     try:
@@ -218,13 +219,16 @@ def main_run() -> None:
             TELEGRAM_WEBHOOK_SECRET=WEBHOOK_SECRET,
         )
         main._settings.cache_clear()
+        settings = main._settings()
+        if args.real:
+            require_model_credentials(settings)
         inner = (
-            Gemini(model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"))
+            Gemini(model=settings.gemini_model)
             if args.real
             else ScriptedLlm(model="scripted", script=scripted_turns(today))
         )
         llm = RecordingLlm(model=inner.model, inner=inner)
-        handler_module.Bot = lambda sheet, _model, timezone: Bot(sheet, llm, timezone=timezone)  # type: ignore[assignment]
+        handler_module.Bot = lambda sheet, _model, **kw: Bot(sheet, llm, **kw)  # type: ignore[assignment]
         main._handle = handle_with_mocks  # type: ignore[assignment]
 
         update = {

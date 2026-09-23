@@ -13,7 +13,7 @@ Telegram ─webhook─▶ main.telegram_webhook ─▶ Handler ─▶ Bot (ADK L
 
 | Module | Role |
 |--------|------|
-| `config.py` | Settings from environment variables |
+| `settings.py` | `Settings`: every external value (env, `.env`, `settings.yaml`) |
 | `sheet_client.py` | Calls the sheet API; network failures become `{ok:false, errors:[{code:"unavailable"}]}` |
 | `tools.py` | ADK tools; return the API body as-is so the model fixes rejected payloads |
 | `summary.py` | Confirmation text built from what the sheet reports it wrote |
@@ -25,17 +25,55 @@ Telegram ─webhook─▶ main.telegram_webhook ─▶ Handler ─▶ Bot (ADK L
 
 ## Configuration
 
+All settings are fields of `Settings` in `src/agent/settings.py`. Sources, highest precedence
+first: **environment variables → `.env` (working directory) → `settings.yaml` → code defaults.**
+Everything is read once when the process starts.
+
+`settings.yaml` (committed) holds what is safe to publish and worth tuning:
+
+| Key | Default | |
+|-----|---------|-|
+| `gemini_model` | `gemini-3.8-flash` | model id ([prices](https://ai.google.dev/gemini-api/docs/pricing)) |
+| `max_llm_calls` | `8` | model calls per message, corrections included |
+| `timezone` | `America/Sao_Paulo` | resolves "hoje" and "ontem" |
+| `google_genai_use_vertexai` | `false` | `false` = AI Studio key, `true` = Vertex AI |
+| `google_cloud_location` | `us-central1` | Vertex region |
+
+Environment only (account-specific or secret; a YAML file containing a secret is refused):
+
 | Variable | Required | Notes |
 |----------|----------|-------|
-| `TELEGRAM_BOT_TOKEN` | yes | from BotFather |
-| `ALLOWED_CHAT_IDS` | yes | comma-separated chat ids; others are ignored |
+| `TELEGRAM_BOT_TOKEN` | yes | secret |
+| `ALLOWED_CHAT_IDS` | yes | comma-separated; other chats are ignored |
 | `SHEET_API_URL` | yes | Apps Script Web App URL, ends with `/exec` |
-| `SHEET_API_KEY` | yes | same value as Script Property `SHEET_API_KEY` |
-| `TELEGRAM_WEBHOOK_SECRET` | webhook only | without it the function answers 403 to everything |
-| `GEMINI_MODEL` | no | default `gemini-2.5-flash` |
-| `TIMEZONE` | no | default `America/Sao_Paulo`; resolves "hoje" and "ontem" |
-| `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION` | yes for Vertex | read by the Gemini SDK |
-| `GOOGLE_API_KEY` | alternative | AI Studio key instead of Vertex |
+| `SHEET_API_KEY` | yes | secret; same value as the Script Property |
+| `TELEGRAM_WEBHOOK_SECRET` | webhook only | secret; without it the function answers 403 |
+| `GOOGLE_API_KEY` | AI Studio | secret |
+| `GOOGLE_CLOUD_PROJECT` | Vertex | |
+| `SETTINGS_FILE` | no | path of the YAML to load; default `settings.yaml` here |
+
+Any YAML key can also be overridden by its upper-case variable (`GEMINI_MODEL=...`).
+
+### Changing settings without rebuilding
+
+The image carries a default `settings.yaml`; a restart with a different file or variable is
+enough. Two ways on Cloud Run, neither rebuilds the image:
+
+```bash
+# quick: one value as an env var (new revision, same image)
+gcloud run services update fitness-agent --region $REGION --update-env-vars GEMINI_MODEL=gemini-3.1-flash-lite
+
+# whole file: keep settings.yaml in Secret Manager, mounted as a file
+gcloud secrets create agent-settings --data-file=settings.yaml          # first time
+gcloud secrets add-iam-policy-binding agent-settings --member=serviceAccount:$SA --role=roles/secretmanager.secretAccessor
+gcloud run services update fitness-agent --region $REGION \
+  --set-secrets /config/settings.yaml=agent-settings:latest --update-env-vars SETTINGS_FILE=/config/settings.yaml
+# later changes: new version, then restart
+gcloud secrets versions add agent-settings --data-file=settings.yaml
+gcloud run services update fitness-agent --region $REGION --update-labels restarted=$(date +%s)
+```
+
+Any other container runtime works the same way: mount the file and set `SETTINGS_FILE`.
 
 ## Local development
 

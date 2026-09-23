@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     SECRETS: ClassVar[frozenset[str]] = frozenset(
-        {"TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "SHEET_API_KEY", "GOOGLE_API_KEY"}
+        {"TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "SHEET_API_KEY", "LLM_API_KEY"}
     )
 
     # --- Telegram -----------------------------------------------------------------------------
@@ -49,14 +49,16 @@ class Settings(BaseSettings):
     SHEET_API_URL: str
     SHEET_API_KEY: SecretStr
 
-    # --- Model -----------------------------------------------------------------------------------
-    GEMINI_MODEL: str = "gemini-3.8-flash"
+    # --- Model (any provider LiteLLM supports) ------------------------------------------------
+    # "<provider>/<model>", e.g. gemini/gemini-3.8-flash, anthropic/claude-sonnet-5,
+    # openai/gpt-5.6, vertex_ai/gemini-3.8-flash, ollama/llama3.
+    LLM_MODEL: str = "gemini/gemini-3.8-flash"
+    # Key of that provider. Optional: Vertex AI and local models authenticate otherwise.
+    LLM_API_KEY: SecretStr | None = None
+    # A LiteLLM proxy or self-hosted endpoint; empty = the provider's public API.
+    LLM_API_BASE: str | None = None
     MAX_LLM_CALLS: int = Field(8, ge=1, le=30)
     TIMEZONE: str = "America/Sao_Paulo"
-    GOOGLE_GENAI_USE_VERTEXAI: bool = False
-    GOOGLE_API_KEY: SecretStr | None = None
-    GOOGLE_CLOUD_PROJECT: str | None = None
-    GOOGLE_CLOUD_LOCATION: str = "us-central1"
 
     @field_validator("ALLOWED_CHAT_IDS", mode="before")
     @classmethod
@@ -89,23 +91,6 @@ class Settings(BaseSettings):
         except ValidationError as err:
             problems = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in err.errors()]
             raise ConfigError(f"Invalid settings ({path}): " + "; ".join(problems)) from err
-
-    def model_provider_env(self) -> dict[str, str]:
-        """Variables the Gemini SDK (google-genai) reads itself; see apply_model_env."""
-        env = {
-            "GOOGLE_GENAI_USE_VERTEXAI": "TRUE" if self.GOOGLE_GENAI_USE_VERTEXAI else "FALSE",
-            "GOOGLE_CLOUD_LOCATION": self.GOOGLE_CLOUD_LOCATION,
-        }
-        if self.GOOGLE_CLOUD_PROJECT:
-            env["GOOGLE_CLOUD_PROJECT"] = self.GOOGLE_CLOUD_PROJECT
-        if self.GOOGLE_API_KEY:
-            env["GOOGLE_API_KEY"] = self.GOOGLE_API_KEY.get_secret_value()
-        return env
-
-    def apply_model_env(self) -> None:
-        """The SDK takes its provider from os.environ, so values that came from the YAML or .env
-        must be exported before the first model call."""
-        os.environ.update(self.model_provider_env())
 
 
 def settings_file() -> Path:

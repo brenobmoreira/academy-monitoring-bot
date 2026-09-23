@@ -4,7 +4,7 @@ Sends a mocked Telegram webhook through the whole stack and writes a formatted J
 every hop. No Telegram, no Google account, no network (unless `--real`).
 
 ```
-fake webhook ─▶ agent.main.telegram_webhook ─▶ Handler ─▶ ADK Bot ─▶ LLM (scripted | Gemini)
+fake webhook ─▶ main.telegram_webhook | asgi.app ─▶ Handler ─▶ ADK Bot ─▶ LiteLLM ─▶ provider (scripted | real)
                                                               │
                                      tools ─POST─▶ sheet_server.js ─▶ apps/sheet/src (real JS)
                                                                          └─ in-memory spreadsheet
@@ -13,16 +13,16 @@ fake webhook ─▶ agent.main.telegram_webhook ─▶ Handler ─▶ ADK Bot �
 
 ```bash
 cd services/agent
-uv run python ../../e2e/run.py                                   # scripted LLM
-uv run python ../../e2e/run.py --real --message "dormi 6h, fome 4"  # real Gemini
+uv run python ../../e2e/run.py                                   # scripted provider
+uv run python ../../e2e/run.py --server uvicorn                  # through the ASGI app
+uv run python ../../e2e/run.py --real --message "dormi 6h, fome 4"  # real LLM_MODEL
 ```
 
-`--real` reads model credentials from `services/agent/.env` (gitignored; copy
-`services/agent/.env.example`): `GOOGLE_API_KEY` with `GOOGLE_GENAI_USE_VERTEXAI=FALSE`, or the
-Vertex variables. Telegram and sheet values in that file are ignored here: the run swaps them
+`--real` calls `LLM_MODEL` through LiteLLM with `LLM_API_KEY`, both read like in the real agent
+(`services/agent/settings.yaml`, then `services/agent/.env`, gitignored). Telegram and sheet values in that file are ignored here: the run swaps them
 for local fakes, so it never touches the real bot or spreadsheet.
 
-The scripted model replays a fixed conversation for the default message and makes two mistakes
+The scripted provider (it replaces only the HTTP call LiteLLM would make) replays a fixed conversation for the default message and makes two mistakes
 on purpose (`sleepH: "7h30"` and the exercise `"puxada"`), so the trace shows the sheet API
 rejecting them and the agent correcting.
 

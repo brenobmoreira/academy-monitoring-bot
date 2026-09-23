@@ -1,6 +1,7 @@
 # Python agent + strict sheet API — design
 
-Date: 2026-09-22 · Status: approved for implementation · Supersedes the chat half of
+Date: 2026-09-22 · Status: approved for implementation; model and settings amended by ADR 0004 ·
+Supersedes the chat half of
 `2026-09-21-fitness-sheet-bot-design.md`
 
 ## Goal

@@ -1,9 +1,11 @@
 """Fakes shared by the unit tests: a sheet API that records calls and a scripted LLM."""
 
+import json
 from collections.abc import AsyncGenerator
 from typing import Any
 
 from google.adk.models import BaseLlm, LlmRequest, LlmResponse
+from google.adk.models.lite_llm import LiteLLMClient
 from google.genai import types
 
 OK_DIARY = {"ok": True, "result": {"date": "2026-09-21", "row": 6, "fields": {"weightKg": 82.4}}}
@@ -59,3 +61,35 @@ def call(name: str, **args: Any) -> types.Content:
 
 def say(text: str) -> types.Content:
     return types.Content(role="model", parts=[types.Part(text=text)])
+
+
+class FakeLiteLLMClient(LiteLLMClient):
+    """Stands in for litellm.acompletion: replays OpenAI-style responses, records each request."""
+
+    def __init__(self, script: list[Any]) -> None:
+        self.script = script
+        self.requests: list[dict[str, Any]] = []
+
+    async def acompletion(self, model: Any, messages: Any, tools: Any, **kwargs: Any) -> Any:
+        self.requests.append({"model": model, "messages": messages, "tools": tools, **kwargs})
+        return self.script.pop(0)
+
+
+def tool_call_response(name: str, args: dict[str, Any], call_id: str = "c1") -> Any:
+    from litellm import ModelResponse
+
+    function = {"name": name, "arguments": json.dumps(args)}
+    message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": call_id, "type": "function", "function": function}],
+    }
+    return ModelResponse(choices=[{"message": message, "finish_reason": "tool_calls"}])
+
+
+def text_response(text: str) -> Any:
+    from litellm import ModelResponse
+
+    return ModelResponse(
+        choices=[{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}]
+    )

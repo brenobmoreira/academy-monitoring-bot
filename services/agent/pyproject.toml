@@ -8,8 +8,11 @@ dependencies = [
     "functions-framework>=3.10.2",
     "google-adk>=2.9.2",
     "httpx>=0.28.1",
+    "litellm>=1.102.0",
     "pydantic-settings[yaml]>=2.15.0",
     "python-dotenv>=1.2.3",
+    "starlette>=1.6.0",
+    "uvicorn>=0.53.0",
 ]
 
 [project.scripts]

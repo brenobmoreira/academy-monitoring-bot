@@ -62,7 +62,8 @@ Details: [`apps/sheet/docs/setup.md`](../../apps/sheet/docs/setup.md).
 
 ## 3. Agent on your machine
 
-The quickest model access is an AI Studio key (no `gcloud` needed): create one at
+The model is any LiteLLM provider (`LLM_MODEL` in `services/agent/settings.yaml`). The default is
+Gemini, and the quickest access is an AI Studio key (no `gcloud` needed): create one at
 <https://aistudio.google.com/apikey>.
 
 ```bash
@@ -77,8 +78,8 @@ TELEGRAM_BOT_TOKEN=<token>
 ALLOWED_CHAT_IDS=<chat id>
 SHEET_API_URL=https://script.google.com/macros/s/<deploymentId>/exec
 SHEET_API_KEY=<same value as the Script Property>
-GOOGLE_GENAI_USE_VERTEXAI=FALSE
-GOOGLE_API_KEY=<AI Studio key>
+LLM_MODEL=gemini/gemini-3.8-flash      # optional; settings.yaml has the same default
+LLM_API_KEY=<AI Studio key>
 ```
 
 Telegram refuses polling while a webhook is set, so remove it first, then start polling:
@@ -102,8 +103,9 @@ error; nothing is written in that case.
 1. Install the Google Cloud CLI in WSL (<https://cloud.google.com/sdk/docs/install>), then
    `gcloud auth login`.
 2. Follow **Deploy** in [`services/agent/README.md`](../../services/agent/README.md), in order:
-   enable the APIs, create the `fitness-agent` service account with `roles/aiplatform.user`,
-   create the three secrets (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `SHEET_API_KEY`),
+   enable the APIs, create the `fitness-agent` service account,
+   create the four secrets (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `SHEET_API_KEY`,
+   `LLM_API_KEY`),
    run `gcloud run deploy ...`.
 3. Point Telegram at the function:
    ```bash

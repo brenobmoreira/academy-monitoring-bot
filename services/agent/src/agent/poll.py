@@ -50,6 +50,5 @@ async def run(settings: Settings) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = Settings.load()
-    settings.apply_model_env()
-    log.info("model %s, up to %s calls per message", settings.GEMINI_MODEL, settings.MAX_LLM_CALLS)
+    log.info("model %s, up to %s calls per message", settings.LLM_MODEL, settings.MAX_LLM_CALLS)
     asyncio.run(run(settings))

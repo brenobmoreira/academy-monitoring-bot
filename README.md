@@ -1,7 +1,7 @@
 # academy-monitoring-bot
 
 A personal Telegram bot that fills a fitness spreadsheet in Google Sheets. A Python agent
-(Google ADK + Gemini) understands the messages; a Google Apps Script project bound to the
+(Google ADK + LiteLLM, Gemini by default) understands the messages; a Google Apps Script project bound to the
 spreadsheet is the only thing that writes to it, through a strict JSON API.
 
 Nothing here is tied to a specific account. Secrets and ids live in Script Properties, in the
@@ -14,13 +14,13 @@ repo.
 
 | Part | Language | What it does | Setup |
 |------|----------|--------------|-------|
-| [`services/agent`](services/agent) | Python 3.12, Google ADK | Telegram webhook (Cloud Run function), Gemini agent with sheet tools, confirmation replies | [README](services/agent/README.md) |
+| [`services/agent`](services/agent) | Python 3.12, Google ADK, LiteLLM | Telegram webhook (Cloud Run function or uvicorn), LLM agent with sheet tools, confirmation replies | [README](services/agent/README.md) |
 | [`apps/sheet`](apps/sheet) | Apps Script (JS) | Validated JSON API over the spreadsheet, the **Registro** sheet menu, the `Progressão` tab | [setup](apps/sheet/docs/setup.md) |
 
 ## Architecture
 
 ```
-Telegram ──webhook──▶ Cloud Run function (Python, ADK agent + Gemini)
+Telegram ──webhook──▶ Cloud Run function (Python, ADK agent + LiteLLM)
                          │ tools: get_catalog, save_diary, save_workout, get_exercise_history
                          │        └──POST JSON──▶ Apps Script Web App ──▶ Sheets
                          │             ◀── {ok, result} | {ok:false, errors[]}
@@ -46,7 +46,8 @@ Design and decisions: [`docs/specs`](docs/specs), [`docs/adr`](docs/adr), [`docs
 - Agent → Apps Script: the Web App is public (Apps Script cannot check Google identities for
   a server caller without OAuth), so every request carries `SHEET_API_KEY` in the JSON body,
   compared with the Script Property of the same name.
-- Gemini runs through Vertex AI with the function's service account; no API key.
+- The model is reached through LiteLLM: provider and key are configuration (`LLM_MODEL`,
+  `LLM_API_KEY` in Secret Manager), so switching provider needs no code change.
 
 ## Testing
 

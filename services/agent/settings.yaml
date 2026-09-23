@@ -8,16 +8,16 @@
 #
 # Secrets (tokens, API keys) are refused here: they come only from the environment.
 
-# Gemini model id. Prices and ids: https://ai.google.dev/gemini-api/docs/pricing
-GEMINI_MODEL: gemini-3.8-flash
+# Model, in LiteLLM's "<provider>/<model>" form; the provider needs a matching LLM_API_KEY.
+#   gemini/gemini-3.8-flash         Google AI Studio   (prices: ai.google.dev/gemini-api/docs/pricing)
+#   vertex_ai/gemini-3.8-flash      Vertex AI, no key  (VERTEXAI_PROJECT / VERTEXAI_LOCATION in the env)
+#   anthropic/claude-sonnet-5       Anthropic
+#   openai/gpt-5.6                  OpenAI
+#   ollama/llama3                   local, with LLM_API_BASE=http://localhost:11434
+LLM_MODEL: gemini/gemini-3.8-flash
 
 # Maximum model calls per Telegram message (tool calls and corrections included).
 MAX_LLM_CALLS: 8
 
 # Resolves "hoje", "ontem" and weekdays in the agent instruction.
 TIMEZONE: America/Sao_Paulo
-
-# Model provider: false = AI Studio (GOOGLE_API_KEY), true = Vertex AI (GOOGLE_CLOUD_PROJECT +
-# credentials of the machine or of the Cloud Run service account).
-GOOGLE_GENAI_USE_VERTEXAI: false
-GOOGLE_CLOUD_LOCATION: us-central1

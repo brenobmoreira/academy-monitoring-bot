@@ -8,6 +8,7 @@ from typing import Any, Protocol
 import httpx
 
 from agent.bot import Bot
+from agent.llm import build_model
 from agent.settings import Settings
 from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient
@@ -62,6 +63,6 @@ class Handler:
 
 def build_handler(settings: Settings, http: httpx.AsyncClient) -> Handler:
     sheet = SheetClient(settings.SHEET_API_URL, settings.SHEET_API_KEY.get_secret_value(), http)
-    bot = Bot(sheet, settings.GEMINI_MODEL, timezone=settings.TIMEZONE, max_llm_calls=settings.MAX_LLM_CALLS)
+    bot = Bot(sheet, build_model(settings), timezone=settings.TIMEZONE, max_llm_calls=settings.MAX_LLM_CALLS)
     telegram = TelegramClient(settings.TELEGRAM_BOT_TOKEN.get_secret_value(), http)
     return Handler(settings.ALLOWED_CHAT_IDS, bot, telegram)

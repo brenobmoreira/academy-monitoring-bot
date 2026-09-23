@@ -1,15 +1,17 @@
 """Local end-to-end run: mocked Telegram webhook → Python agent → LLM → Apps Script JS → JSON trace.
 
     cd services/agent
-    uv run python ../../e2e/run.py                 # scripted LLM, no network at all
+    uv run python ../../e2e/run.py                      # scripted LLM, no network at all
+    uv run python ../../e2e/run.py --server uvicorn     # same, through the ASGI app
     uv run python ../../e2e/run.py --real \\
-        --message "peso 82,4 dormi 7h30"           # real Gemini (GOOGLE_API_KEY or Vertex env)
+        --message "peso 82,4 dormi 7h30"                # real model: LLM_MODEL + LLM_API_KEY
 
-What is real: agent.main.telegram_webhook (secret check), Handler, Bot/ADK runner, tools,
-SheetClient over HTTP, and the Apps Script code (apps/sheet/src) running in Node.
+What is real: the chosen HTTP entry point (Functions Framework or ASGI) with its secret check,
+Handler, Bot/ADK runner, tools, the LiteLLM adapter, SheetClient over HTTP, and the Apps Script
+code (apps/sheet/src) running in Node.
 What is mocked: the Telegram Bot API (replies are captured), the spreadsheet (in-memory fake with
-the test fixtures' tabs), and — without --real — the LLM, which replays a fixed script that
-includes two rejected payloads so the correction loop shows up in the trace.
+the test fixtures' tabs), and — without --real — the provider behind LiteLLM, which replays a
+fixed script with two rejected payloads so the correction loop shows up in the trace.
 
 The trace is written to e2e/out/run-<timestamp>.json.
 """
@@ -31,12 +33,17 @@ from zoneinfo import ZoneInfo
 import httpx
 from dotenv import load_dotenv
 from flask import Request
-from google.adk.models import BaseLlm, Gemini, LlmRequest, LlmResponse
+from google.adk.models import BaseLlm, LlmRequest, LlmResponse
+from google.adk.models.lite_llm import LiteLLMClient
 from google.genai import types
+from litellm import ModelResponse
+from starlette.testclient import TestClient
+from werkzeug.test import EnvironBuilder
 
+from agent import asgi, main, webhook
 from agent import handler as handler_module
-from agent import main
 from agent.bot import Bot
+from agent.llm import build_model
 from agent.settings import Settings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,49 +65,46 @@ def record(kind: str, **data: Any) -> None:
 # ---- LLM ---------------------------------------------------------------------------------
 
 
-def call(name: str, **args: Any) -> types.Content:
-    return types.Content(
-        role="model", parts=[types.Part(function_call=types.FunctionCall(name=name, args=args))]
+def call(name: str, **args: Any) -> ModelResponse:
+    function = {"name": name, "arguments": json.dumps(args)}
+    tool_call = {"id": f"call-{name}-{time.monotonic_ns()}", "type": "function", "function": function}
+    message = {"role": "assistant", "content": None, "tool_calls": [tool_call]}
+    return ModelResponse(choices=[{"message": message, "finish_reason": "tool_calls"}])
+
+
+def say(text: str) -> ModelResponse:
+    return ModelResponse(
+        choices=[{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}]
     )
 
 
-def say(text: str) -> types.Content:
-    return types.Content(role="model", parts=[types.Part(text=text)])
-
-
-def scripted_turns(today: str) -> list[types.Content]:
+def scripted_turns(today: str) -> list[ModelResponse]:
     """What a model would do with DEFAULT_MESSAGE, including two mistakes the sheet rejects."""
     supino = {"name": "Supino inclinado", "sets": [{"kg": 60, "reps": 8}, {"kg": 62.5, "reps": 8}], "rir": 2}
+    puxada = {"sets": [{"kg": 50, "reps": 10}, {"kg": 50, "reps": 9}]}
     return [
         call("get_catalog"),
         call("save_diary", date=today, fields={"weightKg": 82.4, "sleepH": "7h30"}),
         call("save_diary", date=today, fields={"weightKg": 82.4, "sleepH": 7.5}),
+        call("save_workout", date=today, session="Upper", exercises=[supino, {"name": "puxada", **puxada}]),
         call(
             "save_workout",
             date=today,
             session="Upper",
-            exercises=[supino, {"name": "puxada", "sets": [{"kg": 50, "reps": 10}, {"kg": 50, "reps": 9}]}],
-        ),
-        call(
-            "save_workout",
-            date=today,
-            session="Upper",
-            exercises=[
-                supino,
-                {"name": "Puxada aberta", "sets": [{"kg": 50, "reps": 10}, {"kg": 50, "reps": 9}]},
-            ],
+            exercises=[supino, {"name": "Puxada aberta", **puxada}],
         ),
         say("ok"),
     ]
 
 
-class ScriptedLlm(BaseLlm):
-    script: list[types.Content]
+class ScriptedProvider(LiteLLMClient):
+    """Replaces the provider call inside LiteLLM; everything above it (ADK, LiteLlm) is real."""
 
-    async def generate_content_async(
-        self, llm_request: LlmRequest, stream: bool = False
-    ) -> AsyncGenerator[LlmResponse, None]:
-        yield LlmResponse(content=self.script.pop(0))
+    def __init__(self, script: list[ModelResponse]) -> None:
+        self.script = script
+
+    async def acompletion(self, model: Any, messages: Any, tools: Any, **kwargs: Any) -> ModelResponse:
+        return self.script.pop(0)
 
 
 class RecordingLlm(BaseLlm):
@@ -164,7 +168,7 @@ class RoutingTransport(httpx.AsyncBaseTransport):
 
 
 async def handle_with_mocks(settings: Any, update: dict[str, Any]) -> None:
-    """Same as agent.main._handle, with an HTTP client that captures Telegram."""
+    """Same as agent.webhook.handle_update, with an HTTP client that captures Telegram."""
     async with httpx.AsyncClient(transport=RoutingTransport()) as http:
         await handler_module.build_handler(settings, http).handle_update(update)
 
@@ -187,19 +191,29 @@ def start_sheet_server() -> tuple[subprocess.Popen[str], str]:
 
 
 def require_model_credentials(settings: Settings) -> None:
-    where = ENV_FILE.relative_to(ROOT)
-    if settings.GOOGLE_GENAI_USE_VERTEXAI:
-        if not settings.GOOGLE_CLOUD_PROJECT:
-            sys.exit(f"--real with Vertex needs GOOGLE_CLOUD_PROJECT in {where}")
-    elif not settings.GOOGLE_API_KEY:
-        sys.exit(f"--real needs GOOGLE_API_KEY (AI Studio) in {where}")
+    if settings.LLM_API_KEY is None and not settings.LLM_MODEL.startswith(("vertex_ai/", "ollama/")):
+        sys.exit(f"--real needs LLM_API_KEY for {settings.LLM_MODEL} in {ENV_FILE.relative_to(ROOT)}")
+
+
+def post_webhook(server: str, headers: dict[str, str], update: dict[str, Any]) -> tuple[str, int]:
+    if server == "uvicorn":
+        response = TestClient(asgi.app).post("/", headers=headers, json=update)
+        return response.text, response.status_code
+    environ = EnvironBuilder(method="POST", headers=headers, json=update).get_environ()
+    return main.telegram_webhook(Request(environ))
 
 
 def main_run() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--real", action="store_true", help="call Gemini instead of the scripted model")
+    parser.add_argument("--real", action="store_true", help="call LLM_MODEL instead of the scripted provider")
+    parser.add_argument(
+        "--server",
+        choices=["functions", "uvicorn"],
+        default="functions",
+        help="entry point: Functions Framework (Cloud Run functions) or the ASGI app (uvicorn)",
+    )
     parser.add_argument("--message", default=DEFAULT_MESSAGE, help="text to send (scripted mode ignores it)")
     args = parser.parse_args()
     message = args.message if args.real else DEFAULT_MESSAGE
@@ -218,18 +232,15 @@ def main_run() -> None:
             SHEET_API_KEY=SHEET_KEY,
             TELEGRAM_WEBHOOK_SECRET=WEBHOOK_SECRET,
         )
-        main._settings.cache_clear()
-        settings = main._settings()
+        webhook.get_settings.cache_clear()
+        settings = webhook.get_settings()
         if args.real:
             require_model_credentials(settings)
-        inner = (
-            Gemini(model=settings.GEMINI_MODEL)
-            if args.real
-            else ScriptedLlm(model="scripted", script=scripted_turns(today))
-        )
+        provider = None if args.real else ScriptedProvider(scripted_turns(today))
+        inner = build_model(settings, client=provider)
         llm = RecordingLlm(model=inner.model, inner=inner)
         handler_module.Bot = lambda sheet, _model, **kw: Bot(sheet, llm, **kw)  # type: ignore[assignment]
-        main._handle = handle_with_mocks  # type: ignore[assignment]
+        webhook.handle_update = handle_with_mocks  # type: ignore[assignment]
 
         update = {
             "update_id": 1001,
@@ -243,7 +254,7 @@ def main_run() -> None:
         }
         headers = {"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET}
         started = time.monotonic()
-        body, status = main.telegram_webhook(Request.from_values(method="POST", headers=headers, json=update))
+        body, status = post_webhook(args.server, headers, update)
         elapsed = round(time.monotonic() - started, 2)
         sheets = httpx.get(sheet_url + "__sheets").json()
     finally:
@@ -252,7 +263,8 @@ def main_run() -> None:
     reply = next((t["body"]["text"] for t in timeline if t["kind"] == "telegram_reply"), None)
     trace = {
         "scenario": {
-            "llm": "gemini (real)" if args.real else "scripted (mock)",
+            "llm": f"{settings.LLM_MODEL} via LiteLLM" + ("" if args.real else " (provider scripted)"),
+            "server": "uvicorn (ASGI)" if args.server == "uvicorn" else "Functions Framework",
             "message": message,
             "today": today,
             "spreadsheet": "in-memory fake seeded with apps/sheet/test/fixtures.js",

@@ -33,11 +33,11 @@ Everything is read once when the process starts.
 
 | Key | Default | |
 |-----|---------|-|
-| `gemini_model` | `gemini-3.8-flash` | model id ([prices](https://ai.google.dev/gemini-api/docs/pricing)) |
-| `max_llm_calls` | `8` | model calls per message, corrections included |
-| `timezone` | `America/Sao_Paulo` | resolves "hoje" and "ontem" |
-| `google_genai_use_vertexai` | `false` | `false` = AI Studio key, `true` = Vertex AI |
-| `google_cloud_location` | `us-central1` | Vertex region |
+| `GEMINI_MODEL` | `gemini-3.8-flash` | model id ([prices](https://ai.google.dev/gemini-api/docs/pricing)) |
+| `MAX_LLM_CALLS` | `8` | model calls per message, corrections included |
+| `TIMEZONE` | `America/Sao_Paulo` | resolves "hoje" and "ontem" |
+| `GOOGLE_GENAI_USE_VERTEXAI` | `false` | `false` = AI Studio key, `true` = Vertex AI |
+| `GOOGLE_CLOUD_LOCATION` | `us-central1` | Vertex region |
 
 Environment only (account-specific or secret; a YAML file containing a secret is refused):
 
@@ -52,7 +52,8 @@ Environment only (account-specific or secret; a YAML file containing a secret is
 | `GOOGLE_CLOUD_PROJECT` | Vertex | |
 | `SETTINGS_FILE` | no | path of the YAML to load; default `settings.yaml` here |
 
-Any YAML key can also be overridden by its upper-case variable (`GEMINI_MODEL=...`).
+YAML keys and field names are the environment variable names, as in the other Harbor services
+(`Settings.GEMINI_MODEL` ← `GEMINI_MODEL`); a variable set in the environment wins over the YAML.
 
 ### Changing settings without rebuilding
 

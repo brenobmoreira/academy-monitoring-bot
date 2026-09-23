@@ -39,7 +39,7 @@ async def poll_once(telegram: Updates, handler: UpdateHandler, offset: int | Non
 
 async def run(settings: Settings) -> None:
     async with httpx.AsyncClient() as http:
-        telegram = TelegramClient(settings.telegram_bot_token.get_secret_value(), http)
+        telegram = TelegramClient(settings.TELEGRAM_BOT_TOKEN.get_secret_value(), http)
         handler = build_handler(settings, http)
         offset = None
         log.info("polling Telegram; Ctrl+C to stop")
@@ -51,5 +51,5 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = Settings.load()
     settings.apply_model_env()
-    log.info("model %s, up to %s calls per message", settings.gemini_model, settings.max_llm_calls)
+    log.info("model %s, up to %s calls per message", settings.GEMINI_MODEL, settings.MAX_LLM_CALLS)
     asyncio.run(run(settings))

@@ -8,11 +8,11 @@ from agent.settings import Settings
 pytestmark = pytest.mark.unit
 
 SETTINGS = Settings.model_construct(
-    telegram_bot_token=SecretStr("tok"),
-    allowed_chat_ids=frozenset({42}),
-    sheet_api_url="https://x/exec",
-    sheet_api_key=SecretStr("k"),
-    telegram_webhook_secret=SecretStr("sec"),
+    TELEGRAM_BOT_TOKEN=SecretStr("tok"),
+    ALLOWED_CHAT_IDS=frozenset({42}),
+    SHEET_API_URL="https://x/exec",
+    SHEET_API_KEY=SecretStr("k"),
+    TELEGRAM_WEBHOOK_SECRET=SecretStr("sec"),
 )
 
 
@@ -48,7 +48,7 @@ def test_rejects_a_wrong_or_missing_secret(handled, secret):
 
 def test_fails_closed_without_a_configured_secret(handled, monkeypatch):
     monkeypatch.setattr(
-        main, "_settings", lambda: SETTINGS.model_copy(update={"telegram_webhook_secret": None})
+        main, "_settings", lambda: SETTINGS.model_copy(update={"TELEGRAM_WEBHOOK_SECRET": None})
     )
     assert main.telegram_webhook(request())[1] == 403
 

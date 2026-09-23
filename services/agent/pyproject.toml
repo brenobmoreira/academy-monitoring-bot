@@ -37,3 +37,6 @@ line-length = 110
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+# Settings fields are named after their environment variables (UPPER_CASE), which SIM300 mistakes
+# for constants and flags every `settings.X == value` comparison.
+ignore = ["SIM300"]

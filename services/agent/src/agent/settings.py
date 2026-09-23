@@ -36,29 +36,29 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     SECRETS: ClassVar[frozenset[str]] = frozenset(
-        {"telegram_bot_token", "telegram_webhook_secret", "sheet_api_key", "google_api_key"}
+        {"TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "SHEET_API_KEY", "GOOGLE_API_KEY"}
     )
 
     # --- Telegram -----------------------------------------------------------------------------
-    telegram_bot_token: SecretStr
+    TELEGRAM_BOT_TOKEN: SecretStr
     # Only the webhook entry needs it; local polling runs without one.
-    telegram_webhook_secret: SecretStr | None = None
-    allowed_chat_ids: Annotated[frozenset[int], NoDecode]
+    TELEGRAM_WEBHOOK_SECRET: SecretStr | None = None
+    ALLOWED_CHAT_IDS: Annotated[frozenset[int], NoDecode]
 
     # --- Sheet API (Apps Script Web App) -------------------------------------------------------
-    sheet_api_url: str
-    sheet_api_key: SecretStr
+    SHEET_API_URL: str
+    SHEET_API_KEY: SecretStr
 
     # --- Model -----------------------------------------------------------------------------------
-    gemini_model: str = "gemini-3.8-flash"
-    max_llm_calls: int = Field(8, ge=1, le=30)
-    timezone: str = "America/Sao_Paulo"
-    google_genai_use_vertexai: bool = False
-    google_api_key: SecretStr | None = None
-    google_cloud_project: str | None = None
-    google_cloud_location: str = "us-central1"
+    GEMINI_MODEL: str = "gemini-3.8-flash"
+    MAX_LLM_CALLS: int = Field(8, ge=1, le=30)
+    TIMEZONE: str = "America/Sao_Paulo"
+    GOOGLE_GENAI_USE_VERTEXAI: bool = False
+    GOOGLE_API_KEY: SecretStr | None = None
+    GOOGLE_CLOUD_PROJECT: str | None = None
+    GOOGLE_CLOUD_LOCATION: str = "us-central1"
 
-    @field_validator("allowed_chat_ids", mode="before")
+    @field_validator("ALLOWED_CHAT_IDS", mode="before")
     @classmethod
     def _split_chat_ids(cls, value: Any) -> Any:
         if isinstance(value, str):
@@ -87,19 +87,19 @@ class Settings(BaseSettings):
         try:
             return cls()
         except ValidationError as err:
-            problems = [f"{'.'.join(str(p) for p in e['loc']).upper()}: {e['msg']}" for e in err.errors()]
+            problems = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in err.errors()]
             raise ConfigError(f"Invalid settings ({path}): " + "; ".join(problems)) from err
 
     def model_provider_env(self) -> dict[str, str]:
         """Variables the Gemini SDK (google-genai) reads itself; see apply_model_env."""
         env = {
-            "GOOGLE_GENAI_USE_VERTEXAI": "TRUE" if self.google_genai_use_vertexai else "FALSE",
-            "GOOGLE_CLOUD_LOCATION": self.google_cloud_location,
+            "GOOGLE_GENAI_USE_VERTEXAI": "TRUE" if self.GOOGLE_GENAI_USE_VERTEXAI else "FALSE",
+            "GOOGLE_CLOUD_LOCATION": self.GOOGLE_CLOUD_LOCATION,
         }
-        if self.google_cloud_project:
-            env["GOOGLE_CLOUD_PROJECT"] = self.google_cloud_project
-        if self.google_api_key:
-            env["GOOGLE_API_KEY"] = self.google_api_key.get_secret_value()
+        if self.GOOGLE_CLOUD_PROJECT:
+            env["GOOGLE_CLOUD_PROJECT"] = self.GOOGLE_CLOUD_PROJECT
+        if self.GOOGLE_API_KEY:
+            env["GOOGLE_API_KEY"] = self.GOOGLE_API_KEY.get_secret_value()
         return env
 
     def apply_model_env(self) -> None:
@@ -116,6 +116,6 @@ def check_no_secrets(path: Path) -> None:
     if not path.is_file():
         return
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    leaked = sorted(k for k in data if str(k).lower() in Settings.SECRETS)
+    leaked = sorted(k for k in data if str(k).upper() in Settings.SECRETS)
     if leaked:
         raise ConfigError(f"{path} must not contain secrets; move {', '.join(leaked)} to the environment")

@@ -61,7 +61,7 @@ class Handler:
 
 
 def build_handler(settings: Settings, http: httpx.AsyncClient) -> Handler:
-    sheet = SheetClient(settings.sheet_api_url, settings.sheet_api_key.get_secret_value(), http)
-    bot = Bot(sheet, settings.gemini_model, timezone=settings.timezone, max_llm_calls=settings.max_llm_calls)
-    telegram = TelegramClient(settings.telegram_bot_token.get_secret_value(), http)
-    return Handler(settings.allowed_chat_ids, bot, telegram)
+    sheet = SheetClient(settings.SHEET_API_URL, settings.SHEET_API_KEY.get_secret_value(), http)
+    bot = Bot(sheet, settings.GEMINI_MODEL, timezone=settings.TIMEZONE, max_llm_calls=settings.MAX_LLM_CALLS)
+    telegram = TelegramClient(settings.TELEGRAM_BOT_TOKEN.get_secret_value(), http)
+    return Handler(settings.ALLOWED_CHAT_IDS, bot, telegram)

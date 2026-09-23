@@ -37,7 +37,7 @@ async def _handle(settings: Settings, update: dict[str, Any]) -> None:
 @functions_framework.http
 def telegram_webhook(request: Request) -> tuple[str, int]:
     settings = _settings()
-    expected = settings.telegram_webhook_secret
+    expected = settings.TELEGRAM_WEBHOOK_SECRET
     given = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
     if not expected or not hmac.compare_digest(given.encode(), expected.get_secret_value().encode()):
         return "forbidden", 403

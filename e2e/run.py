@@ -188,10 +188,10 @@ def start_sheet_server() -> tuple[subprocess.Popen[str], str]:
 
 def require_model_credentials(settings: Settings) -> None:
     where = ENV_FILE.relative_to(ROOT)
-    if settings.google_genai_use_vertexai:
-        if not settings.google_cloud_project:
+    if settings.GOOGLE_GENAI_USE_VERTEXAI:
+        if not settings.GOOGLE_CLOUD_PROJECT:
             sys.exit(f"--real with Vertex needs GOOGLE_CLOUD_PROJECT in {where}")
-    elif not settings.google_api_key:
+    elif not settings.GOOGLE_API_KEY:
         sys.exit(f"--real needs GOOGLE_API_KEY (AI Studio) in {where}")
 
 
@@ -223,7 +223,7 @@ def main_run() -> None:
         if args.real:
             require_model_credentials(settings)
         inner = (
-            Gemini(model=settings.gemini_model)
+            Gemini(model=settings.GEMINI_MODEL)
             if args.real
             else ScriptedLlm(model="scripted", script=scripted_turns(today))
         )

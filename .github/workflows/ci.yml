@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      sheet: ${{ steps.filter.outputs.sheet }}
+      agent: ${{ steps.filter.outputs.agent }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            sheet:
+              - 'apps/sheet/**'
+              - 'package.json'
+              - '.github/workflows/ci.yml'
+            agent:
+              - 'services/agent/**'
+              - 'e2e/**'
+              - 'apps/sheet/src/**'
+              - '.github/workflows/ci.yml'
+
+  sheet:
+    needs: changes
+    if: needs.changes.outputs.sheet == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm run check
+      - run: npm test
+
+  agent:
+    needs: changes
+    if: needs.changes.outputs.agent == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/agent
+    steps:
+      - uses: actions/checkout@v4
+      # e2e/sheet_server.js runs the real Apps Script sources in Node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: services/agent/uv.lock
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run ty check
+      - run: uv run pytest
+      # Scripted provider only: no LLM key, no network.
+      - run: uv run python ../../e2e/run.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-trace
+          path: e2e/out/
+          if-no-files-found: ignore

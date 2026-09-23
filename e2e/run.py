@@ -29,6 +29,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
+from dotenv import load_dotenv
 from flask import Request
 from google.adk.models import BaseLlm, Gemini, LlmRequest, LlmResponse
 from google.genai import types
@@ -39,6 +40,7 @@ from agent.bot import Bot
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "e2e" / "out"
+ENV_FILE = ROOT / "services" / "agent" / ".env"
 TZ = ZoneInfo("America/Sao_Paulo")
 CHAT_ID = 42
 SHEET_KEY = "local-sheet-key"
@@ -183,6 +185,14 @@ def start_sheet_server() -> tuple[subprocess.Popen[str], str]:
     return proc, f"http://127.0.0.1:{line.split()[1]}/"
 
 
+def require_model_credentials() -> None:
+    if os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").upper() in ("TRUE", "1"):
+        if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+            sys.exit(f"--real with Vertex needs GOOGLE_CLOUD_PROJECT in {ENV_FILE.relative_to(ROOT)}")
+    elif not os.environ.get("GOOGLE_API_KEY"):
+        sys.exit(f"--real needs GOOGLE_API_KEY (AI Studio) in {ENV_FILE.relative_to(ROOT)}")
+
+
 def main_run() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -192,6 +202,11 @@ def main_run() -> None:
     args = parser.parse_args()
     message = args.message if args.real else DEFAULT_MESSAGE
     today = datetime.now(TZ).date().isoformat()
+    # Model credentials come from services/agent/.env; the Telegram and sheet values in it are
+    # replaced by local fakes below, so the run never reaches the real bot or spreadsheet.
+    load_dotenv(ENV_FILE)
+    if args.real:
+        require_model_credentials()
 
     proc, sheet_url = start_sheet_server()
     try:

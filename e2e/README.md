@@ -17,8 +17,10 @@ uv run python ../../e2e/run.py                                   # scripted LLM
 uv run python ../../e2e/run.py --real --message "dormi 6h, fome 4"  # real Gemini
 ```
 
-`--real` needs model credentials in the environment: `GOOGLE_API_KEY` with
-`GOOGLE_GENAI_USE_VERTEXAI=FALSE`, or the Vertex variables (see `services/agent/.env.example`).
+`--real` reads model credentials from `services/agent/.env` (gitignored; copy
+`services/agent/.env.example`): `GOOGLE_API_KEY` with `GOOGLE_GENAI_USE_VERTEXAI=FALSE`, or the
+Vertex variables. Telegram and sheet values in that file are ignored here: the run swaps them
+for local fakes, so it never touches the real bot or spreadsheet.
 
 The scripted model replays a fixed conversation for the default message and makes two mistakes
 on purpose (`sleepH: "7h30"` and the exercise `"puxada"`), so the trace shows the sheet API

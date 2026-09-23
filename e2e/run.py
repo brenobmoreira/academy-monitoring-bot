@@ -181,7 +181,8 @@ def start_sheet_server() -> tuple[subprocess.Popen[str], str]:
         ["node", str(ROOT / "e2e" / "sheet_server.js")],
         stdout=subprocess.PIPE,
         text=True,
-        env={**os.environ, "SHEET_API_KEY": SHEET_KEY},
+        # Apps Script runs in the script's time zone; the fakes report America/Sao_Paulo.
+        env={**os.environ, "SHEET_API_KEY": SHEET_KEY, "TZ": str(TZ)},
     )
     line = proc.stdout.readline() if proc.stdout else ""
     if not line.startswith("LISTENING "):

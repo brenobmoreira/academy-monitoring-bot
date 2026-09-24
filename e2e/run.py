@@ -261,7 +261,9 @@ def main_run() -> None:
     finally:
         proc.kill()
 
-    reply = next((t["body"]["text"] for t in timeline if t["kind"] == "telegram_reply"), None)
+    # A long reply goes out in several sendMessage calls (format.split); show them as one text.
+    chunks = [t["body"]["text"] for t in timeline if t["kind"] == "telegram_reply"]
+    reply = "\n".join(chunks) or None
     trace = {
         "scenario": {
             "llm": f"{settings.LLM_MODEL} via LiteLLM" + ("" if args.real else " (provider scripted)"),

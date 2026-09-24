@@ -72,7 +72,7 @@ async def test_a_rejected_payload_goes_back_to_the_model_through_litellm():
     reply = await Bot(sheet, build_model(settings(), client=client), timezone="America/Sao_Paulo").reply(
         "dormi 7h30"
     )
-    assert reply == "22/09 · Sono h 7,5"
+    assert reply == "<b>22/09</b> · Sono h 7,5"
     tool_message = client.requests[1]["messages"][-1]
     assert tool_message["role"] == "tool"
     assert json.loads(tool_message["content"]) == rejected

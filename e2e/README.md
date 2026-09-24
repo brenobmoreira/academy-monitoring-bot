@@ -33,7 +33,7 @@ Output: `e2e/out/run-<timestamp>.json` (gitignored):
 | `scenario` | model, message, date, elapsed time |
 | `webhook` | the request Telegram would send (headers + update) and the function's answer |
 | `timeline` | every hop in order: `llm` (what the model received and returned), `sheet_api` (request and response of the Apps Script API), `telegram_reply` |
-| `reply_sent_to_telegram` | the final message, one line per item |
+| `reply_sent_to_telegram` | the final message as sent (Telegram HTML, every chunk joined), one line per item |
 | `sheet_after` | rows of `Diário` and `Registro de treino` after the run |
 
 The spreadsheet starts from `apps/sheet/test/fixtures.js`: sessions Upper/Lower and exercises

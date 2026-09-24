@@ -21,12 +21,15 @@ class FakeBot:
 class FakeTelegram:
     def __init__(self, error=None):
         self.sent = []
+        self.options = []
         self._error = error
 
-    async def send_message(self, chat_id, text):
+    async def send_message(self, chat_id, text, *, html=False, reply_markup=None, reply_to=None):
         if self._error:
             raise self._error
         self.sent.append((chat_id, text))
+        self.options.append({"html": html, "reply_markup": reply_markup, "reply_to": reply_to})
+        return {"message_id": len(self.sent), "chat": {"id": chat_id}, "text": text}
 
 
 def update(text="peso 82", chat_id=42):
@@ -38,6 +41,19 @@ async def test_runs_the_bot_and_replies_in_the_same_chat():
     await Handler({42}, bot, tg).handle_update(update())
     assert bot.texts == [("peso 82", "42")]
     assert tg.sent == [(42, "21/09 · Peso kg 82")]
+    assert tg.options == [{"html": True, "reply_markup": None, "reply_to": None}]
+
+
+async def test_long_replies_go_out_in_chunks_with_the_markup_on_the_last():
+    lines = [f"linha {i:04d} " + "x" * 90 for i in range(100)]
+    tg = FakeTelegram()
+    handler = Handler({42}, FakeBot(), tg)
+    await handler._send(42, "\n".join(lines), reply_markup={"inline_keyboard": []})
+    assert len(tg.sent) == 3
+    assert all(len(text) <= 4096 for _, text in tg.sent)
+    assert "\n".join(text for _, text in tg.sent) == "\n".join(lines)
+    assert [o["reply_markup"] for o in tg.options] == [None, None, {"inline_keyboard": []}]
+    assert all(o["html"] for o in tg.options)
 
 
 @pytest.mark.parametrize(

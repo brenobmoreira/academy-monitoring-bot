@@ -6,8 +6,6 @@ from typing import Any
 
 import httpx
 
-MAX_TEXT = 4096  # Telegram's limit for one message
-
 
 class TelegramError(RuntimeError):
     pass
@@ -30,8 +28,24 @@ class TelegramClient:
             )
         return body["result"]
 
-    async def send_message(self, chat_id: int, text: str) -> None:
-        await self._call("sendMessage", {"chat_id": chat_id, "text": text[:MAX_TEXT]})
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        html: bool = False,
+        reply_markup: dict[str, Any] | None = None,
+        reply_to: int | None = None,
+    ) -> dict[str, Any]:
+        """Returns the sent Message. `text` must fit one message (see format.split)."""
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if html:
+            payload["parse_mode"] = "HTML"
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        if reply_to is not None:
+            payload["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+        return await self._call("sendMessage", payload)
 
     async def get_updates(self, offset: int | None = None, wait: int = 50) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {"timeout": wait, "allowed_updates": ["message"]}

@@ -8,6 +8,7 @@ from typing import Any, Protocol
 import httpx
 
 from agent.bot import Bot
+from agent.format import split
 from agent.llm import build_model
 from agent.settings import Settings
 from agent.sheet_client import SheetClient
@@ -15,6 +16,7 @@ from agent.telegram import TelegramClient
 
 log = logging.getLogger(__name__)
 
+# Every reply is sent as Telegram HTML; these templates hold no <, > or &.
 HELP = (
     "Me conte o dia em texto livre, por exemplo:\n"
     "• peso 82,4, dormi 7h30, 8k passos, muay sim\n"
@@ -31,7 +33,15 @@ class Replier(Protocol):
 
 
 class Sender(Protocol):
-    async def send_message(self, chat_id: int, text: str) -> None: ...
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        html: bool = False,
+        reply_markup: dict[str, Any] | None = None,
+        reply_to: int | None = None,
+    ) -> dict[str, Any]: ...
 
 
 class Handler:
@@ -56,9 +66,16 @@ class Handler:
                 log.exception("bot failed on update %s", update.get("update_id"))
                 reply = FAILURE
         try:
-            await self._telegram.send_message(chat_id, reply)
+            await self._send(chat_id, reply)
         except Exception:
             log.exception("could not send the reply to chat %s", chat_id)
+
+    async def _send(self, chat_id: int, html_text: str, reply_markup: dict[str, Any] | None = None) -> None:
+        """Sends an HTML reply in as many messages as it needs; only the last one gets the markup."""
+        chunks = split(html_text)
+        for i, chunk in enumerate(chunks):
+            markup = reply_markup if i == len(chunks) - 1 else None
+            await self._telegram.send_message(chat_id, chunk, html=True, reply_markup=markup)
 
 
 def build_handler(settings: Settings, http: httpx.AsyncClient) -> Handler:

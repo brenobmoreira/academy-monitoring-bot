@@ -18,6 +18,9 @@ uv run python ../../e2e/run.py --server uvicorn                  # through the A
 uv run python ../../e2e/run.py --real --message "dormi 6h, fome 4"  # real LLM_MODEL
 ```
 
+From the repo root: `make e2e`, with flags passed through `E2E_ARGS`
+(`make e2e E2E_ARGS="--server uvicorn"`).
+
 `--real` calls `LLM_MODEL` through LiteLLM with `LLM_API_KEY`, both read like in the real agent
 (`services/agent/settings.yaml`, then `services/agent/.env`, gitignored). Telegram and sheet values in that file are ignored here: the run swaps them
 for local fakes, so it never touches the real bot or spreadsheet.

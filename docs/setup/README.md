@@ -48,7 +48,7 @@ curl -sL -H 'Content-Type: application/json' \
   https://script.google.com/macros/s/<deploymentId>/exec
 ```
 
-Later code changes: `clasp push` then `clasp deploy -i <deploymentId> -d "note"`. A plain push
+Later code changes: `clasp push` (or `make push-sheet` from the repo root) then `clasp deploy -i <deploymentId> -d "note"`. A plain push
 does not change what the URL serves.
 
 Details: [`apps/sheet/docs/setup.md`](../../apps/sheet/docs/setup.md).
@@ -90,6 +90,9 @@ uv sync
 uv run agent-poll
 ```
 
+The repo-root `Makefile` has the same steps: `make webhook-delete`, `make install`, `make poll`
+(`make` lists every target).
+
 **Check** — send to the bot:
 
 - `peso 82,4 dormi 7h30` → reply `DD/MM · Peso kg 82,4 · Sono h 7,5`, today's row in `Diário`.
@@ -111,8 +114,8 @@ error; nothing is written in that case.
    ```bash
    export TELEGRAM_BOT_TOKEN=<token> TELEGRAM_WEBHOOK_SECRET=<secret>
    export AGENT_URL=$(gcloud run services describe fitness-agent --region us-central1 --format 'value(status.url)')
-   scripts/set-webhook.sh set
-   scripts/set-webhook.sh info      # "url" set, no "last_error_message"
+   scripts/set-webhook.sh set       # or: make webhook-set
+   scripts/set-webhook.sh info      # or: make webhook-info; "url" set, no "last_error_message"
    ```
 4. Continuous deployment: Cloud Run console → `fitness-agent` → **Connect repo** → this GitHub
    repository, branch `^main$`, buildpacks, build context `/services/agent`, entry point

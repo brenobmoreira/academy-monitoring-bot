@@ -1,10 +1,11 @@
 import json
 from typing import Any
 
+import litellm
 import pytest
 from pydantic import SecretStr
 
-from agent.bot import Bot
+from agent.bot import MODEL_FAILED, Bot
 from agent.llm import build_model
 from agent.settings import Settings
 
@@ -76,3 +77,13 @@ async def test_a_rejected_payload_goes_back_to_the_model_through_litellm():
     tool_message = client.requests[1]["messages"][-1]
     assert tool_message["role"] == "tool"
     assert json.loads(tool_message["content"]) == rejected
+
+
+async def test_a_litellm_timeout_is_reported_after_what_was_written():
+    client = FakeLiteLLMClient(
+        [
+            tool_call_response("save_diary", {"date": "2026-09-21", "fields": {"weightKg": 82.4}}),
+            litellm.Timeout("timed out", model="claude-sonnet-5", llm_provider="anthropic"),
+        ]
+    )
+    assert await run(build_model(settings(), client=client)) == f"21/09 · Peso kg 82,4\n\n{MODEL_FAILED}"

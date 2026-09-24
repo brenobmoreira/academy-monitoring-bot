@@ -41,16 +41,20 @@ class FakeSheet:
 
 
 class ScriptedLlm(BaseLlm):
-    """Replays model turns in order and keeps every request it received."""
+    """Replays model turns in order (an exception in the script is raised) and keeps every
+    request it received."""
 
-    script: list[types.Content] = []
+    script: list[types.Content | Exception] = []
     requests: list[LlmRequest] = []
 
     async def generate_content_async(
         self, llm_request: LlmRequest, stream: bool = False
     ) -> AsyncGenerator[LlmResponse, None]:
         self.requests.append(llm_request)
-        yield LlmResponse(content=self.script.pop(0))
+        turn = self.script.pop(0)
+        if isinstance(turn, Exception):
+            raise turn
+        yield LlmResponse(content=turn)
 
 
 def call(name: str, **args: Any) -> types.Content:
@@ -64,7 +68,8 @@ def say(text: str) -> types.Content:
 
 
 class FakeLiteLLMClient(LiteLLMClient):
-    """Stands in for litellm.acompletion: replays OpenAI-style responses, records each request."""
+    """Stands in for litellm.acompletion: replays OpenAI-style responses (an exception in the
+    script is raised), records each request."""
 
     def __init__(self, script: list[Any]) -> None:
         self.script = script
@@ -72,7 +77,10 @@ class FakeLiteLLMClient(LiteLLMClient):
 
     async def acompletion(self, model: Any, messages: Any, tools: Any, **kwargs: Any) -> Any:
         self.requests.append({"model": model, "messages": messages, "tools": tools, **kwargs})
-        return self.script.pop(0)
+        response = self.script.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def tool_call_response(name: str, args: dict[str, Any], call_id: str = "c1") -> Any:

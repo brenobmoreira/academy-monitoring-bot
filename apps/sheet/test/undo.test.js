@@ -172,3 +172,31 @@ test('a log that cannot be saved costs the writeId, never the write', () => {
   assert.equal(res.result.writeId, undefined);
   assert.equal(diary(ctx).getRange(6, dcol('Sono h')).getValue(), 7);
 });
+
+test('catalog.recent lists the writes of the last 30 minutes, newest first, without undone ones', () => {
+  const ctx = boot();
+  const ago = (min) => new Date(new Date(NOW).getTime() - min * 60000).toISOString();
+  assert.equal(ctx.UndoLog.RECENT_MINUTES, 30);
+  ctx.UndoLog.save_([
+    { id: 'old', at: ago(31), op: 'diary.upsert', sheet: 'Diário', date: '2026-09-21', fields: ['weightKg'], rows: [] },
+    { id: 'edge', at: ago(30), op: 'diary.upsert', sheet: 'Diário', date: '2026-09-21', fields: ['sleepH'], rows: [] },
+    { id: 'gone', at: ago(10), op: 'diary.upsert', sheet: 'Diário', date: '2026-09-21', fields: ['steps'], undone: ago(5) },
+    { id: 'bad', at: 'not a time', op: 'diary.upsert', sheet: 'Diário', date: '2026-09-21', fields: ['notes'], rows: [] },
+  ]);
+  run(ctx, 'workout.upsert', supino(60));
+  const recent = run(ctx, 'catalog', {}).result.recent;
+  assert.equal(recent.length, 2);
+  assert.deepEqual(recent[0], {
+    writeId: log(ctx)[4].id, at: new Date(NOW).toISOString(), op: 'workout.upsert', date: '2026-09-21', session: 'Upper', exercises: ['Supino inclinado'],
+  });
+  assert.deepEqual(recent[1], { writeId: 'edge', at: ago(30), op: 'diary.upsert', date: '2026-09-21', fields: ['sleepH'] });
+});
+
+test('catalog.recent drops a write once it is undone and is empty without a log', () => {
+  const ctx = boot();
+  assert.deepEqual(run(ctx, 'catalog', {}).result.recent, []);
+  run(ctx, 'diary.upsert', { date: '2026-09-21', fields: { weightKg: 82 } });
+  assert.equal(run(ctx, 'catalog', {}).result.recent.length, 1);
+  run(ctx, 'write.undo', {});
+  assert.deepEqual(run(ctx, 'catalog', {}).result.recent, []);
+});

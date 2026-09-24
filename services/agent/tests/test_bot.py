@@ -31,6 +31,80 @@ def test_instruction_lists_the_diary_history_tool_and_forbids_inventing_days():
     assert "nunca invente" in text
 
 
+def test_instruction_has_the_recent_context_rules_and_no_reply_block_by_default():
+    text = instruction(NOW)
+    assert "Contexto recente" in text
+    assert "recent" in text
+    assert "e mais 3x10 de rosca" in text
+    assert "na verdade foi 62 no supino" in text
+    assert "responde a esta mensagem anterior" not in text
+    assert "responde a esta mensagem anterior" not in instruction(NOW, "  ")
+
+
+def test_instruction_quotes_the_replied_message_and_caps_its_length():
+    text = instruction(NOW, "21/09 · Upper {x}\nSupino inclinado: 60×8")
+    assert "responde a esta mensagem anterior" in text
+    assert "<<<\n21/09 · Upper {x}\nSupino inclinado: 60×8\n>>>" in text
+    long = instruction(NOW, "a" * 5000)
+    assert "a" * 2000 + "\n>>>" in long
+    assert "a" * 2001 not in long
+
+
+async def test_the_replied_text_reaches_the_model_and_the_correction_rewrites_that_write():
+    confirmation = "21/09 · Upper\nSupino inclinado: 60×8, 60×8"
+    catalog = {
+        "ok": True,
+        "result": {
+            "recent": [
+                {
+                    "writeId": "w1",
+                    "at": "2026-09-21T17:50:00.000Z",
+                    "op": "workout.upsert",
+                    "date": "2026-09-21",
+                    "session": "Upper",
+                    "exercises": ["Supino inclinado"],
+                }
+            ]
+        },
+    }
+    sets = [{"kg": 62, "reps": 8}, {"kg": 62, "reps": 8}]
+    written = {
+        "date": "2026-09-21",
+        "session": "Upper",
+        "phase": "Adaptação",
+        "sessionId": "2026-09-21/Upper",
+        "exercises": [{"name": "Supino inclinado", "row": 6, "sets": sets}],
+    }
+    sheet = FakeSheet(catalog=[catalog], workout_upsert=[{"ok": True, "result": written}])
+    b, llm = bot(
+        sheet,
+        [
+            call("get_catalog"),
+            call(
+                "save_workout",
+                date="2026-09-21",
+                session="Upper",
+                exercises=[{"name": "Supino inclinado", "sets": sets}],
+            ),
+            say("ok"),
+        ],
+    )
+    reply = await b.reply("na verdade foi 62", context=confirmation)
+    assert "Supino inclinado</b> 62×8 62×8" in reply
+    assert confirmation in llm.requests[0].config.system_instruction
+    assert llm.requests[1].contents[-1].parts[0].function_response.response == catalog
+    assert sheet.calls[1] == (
+        "workout.upsert",
+        {"date": "2026-09-21", "session": "Upper", "exercises": [{"name": "Supino inclinado", "sets": sets}]},
+    )
+
+
+async def test_without_a_reply_the_instruction_has_no_replied_message(sheet):
+    b, llm = bot(sheet, [say("ok")])
+    await b.reply("peso 82")
+    assert "responde a esta mensagem anterior" not in llm.requests[0].config.system_instruction
+
+
 async def test_answers_a_history_question_from_the_diary_range():
     history = {
         "ok": True,

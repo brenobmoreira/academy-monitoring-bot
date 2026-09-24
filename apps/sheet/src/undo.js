@@ -1,7 +1,7 @@
 /**
  * Undo log: the last writes of diary.upsert and workout.upsert, each with the previous content of
  * every cell it changed, in Script Property UNDO_LOG (JSON array, oldest first). catalog.recent
- * reads the same entries, so each one also keeps a summary: when, which op, date, session,
+ * reads the same entries (UndoLog.recent), so each one also keeps a summary: when, which op, date, session,
  * field names or exercise names.
  *
  * Only cells a write actually set are captured, so formula columns it never touches are never
@@ -18,6 +18,8 @@ const UndoLog = {
   MAX_ENTRIES: 30,
   /** Script Properties hold at most 9 kB per value; the margin covers the key and rounding. */
   MAX_BYTES: 8800,
+  /** How far back catalog.recent looks. */
+  RECENT_MINUTES: 30,
 
   /** A recorder the repos write through; see UndoCapture_. */
   capture() {
@@ -86,6 +88,19 @@ const UndoLog = {
     delete entry.rows;
     UndoLog.save_(log);
     return { writeId: entry.id, undone: UndoLog.summary_(entry) };
+  },
+
+  /**
+   * Writes of the last RECENT_MINUTES not undone, newest first, as summaries the model can use
+   * to continue or correct them (catalog.recent).
+   * @returns {{writeId: string, at: string, op: string, date: string, session?: string, fields?: string[], exercises?: string[]}[]}
+   */
+  recent() {
+    const since = Date.now() - UndoLog.RECENT_MINUTES * 60 * 1000;
+    return UndoLog.read_()
+      .filter((e) => !e.undone && Date.parse(e.at) >= since)
+      .reverse()
+      .map((e) => ({ writeId: e.id, at: e.at, ...UndoLog.summary_(e) }));
   },
 
   /** Entries oldest first; a missing or unreadable property is an empty log. */

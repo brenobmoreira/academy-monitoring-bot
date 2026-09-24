@@ -147,6 +147,20 @@ block:
 A correction ("na verdade foi 62 no supino") rewrites the same date/session/exercise, which the
 upsert already replaces.
 
+As built (F10): `recent` is a field of the `catalog` result (not a separate op), so the one
+`get_catalog` call the model already makes carries it; the window is `UndoLog.RECENT_MINUTES`
+(30, inclusive) and entries whose `at` does not parse are skipped. `Bot.reply(text, user_id, *,
+context=None)`; the handler passes `reply_to_message.text` only when `reply_to_message.from.is_bot`
+and the text is not blank. The replied text goes into the system instruction between `<<<`/`>>>`
+markers, marked as data, capped at 2000 chars. Rules 12–13 of the instruction: continuations and
+corrections without date or session use the most recent matching `recent` write (for workouts,
+the latest `workout.upsert`); a continuation writes only the new exercises; an ambiguous case
+falls back to rule 9. Caveat for F9's ✏️ Corrigir: Telegram does not nest `reply_to_message`, so
+the user's answer to the `force_reply` prompt carries only the prompt's own text; for the replied
+context to hold the confirmation, the prompt must repeat it (e.g. "Envie a correção para esta
+mensagem:" followed by the confirmation text). Without that, `catalog.recent` still covers
+corrections made within 30 minutes.
+
 ### Summaries (F11, `agent/weekly.py`)
 
 `/semana [n]` — the week (Mon–Sun) containing today, or `n` weeks back. Computed in Python from

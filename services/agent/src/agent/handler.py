@@ -27,7 +27,7 @@ TYPING_EVERY = 4.0  # seconds; Telegram clears the "typing…" status after abou
 
 
 class Replier(Protocol):
-    async def reply(self, text: str, user_id: str = "telegram") -> str: ...
+    async def reply(self, text: str, user_id: str = "telegram", *, context: str | None = None) -> str: ...
 
 
 class Sender(Protocol):
@@ -77,7 +77,8 @@ class Handler:
             typing = asyncio.create_task(self._keep_typing(chat_id))
             await asyncio.sleep(0)  # let the first action go out before the bot starts
             try:
-                reply = Reply(await self._bot.reply(text, user_id=str(chat_id)), html=True)
+                answer = await self._bot.reply(text, user_id=str(chat_id), context=replied_text(message))
+                reply = Reply(answer, html=True)
             except Exception:
                 log.exception("bot failed on update %s", update.get("update_id"))
                 reply = Reply(FAILURE)
@@ -116,6 +117,17 @@ class Handler:
         for i, chunk in enumerate(chunks):
             markup = reply.reply_markup if i == len(chunks) - 1 else None
             await self._telegram.send_message(chat_id, chunk, html=True, reply_markup=markup)
+
+
+def replied_text(message: dict[str, Any]) -> str | None:
+    """The text of the bot message this one replies to (swipe-reply or ✏️ Corrigir), the only
+    context the agent gets from earlier messages besides the sheet's recent writes. A reply to
+    the user's own message, or to one without text, gives none."""
+    replied = message.get("reply_to_message") or {}
+    if not (replied.get("from") or {}).get("is_bot"):
+        return None
+    text = replied.get("text")
+    return text if isinstance(text, str) and text.strip() else None
 
 
 def build_handler(settings: Settings, http: httpx.AsyncClient) -> Handler:

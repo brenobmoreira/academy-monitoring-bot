@@ -78,7 +78,7 @@ A plain `clasp push` does not change what the URL serves.
 
 | op | args |
 |----|------|
-| `catalog` | `{}` → today, time zone, current phase, sessions, exercises, plan, `lastWorkout` (`{date, session}` of the most recent log row, or `null`) |
+| `catalog` | `{}` → today, time zone, current phase, sessions, exercises, plan, `lastWorkout` (`{date, session}` of the most recent log row, or `null`), `recent` (writes of the last 30 minutes from the undo log, newest first, undone ones left out: `[{writeId, at, op, date, session?, exercises?, fields?}]`) |
 | `diary.upsert` | `{"date": "2026-09-21", "fields": {"weightKg": 82.4, "sleepH": 7.5, "muayThai": true}}` |
 | `workout.upsert` | `{"date": "2026-09-21", "session": "Upper", "exercises": [{"name": "Supino inclinado", "sets": [{"kg": 60, "reps": 8}], "rir": 2}]}` |
 | `exercise.history` | `{"name": "Supino inclinado", "limit": 10}` |

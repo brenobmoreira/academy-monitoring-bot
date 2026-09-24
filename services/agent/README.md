@@ -23,15 +23,29 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `tools.py` | ADK tools; return the API body as-is so the model fixes rejected payloads; `Journal` of writes and error codes. `get_diary_history` reads `diary.range` for questions about a period |
 | `format.py` | Telegram HTML: `escape`, `bold`, `split` (≤ 4096 chars, cut on line boundaries) |
 | `summary.py` | Confirmation text built from what the sheet reports it wrote (HTML; bold date/session and exercise names), each exercise compared with its previous session |
-| `bot.py` | Instruction, one ADK run per message, `MAX_LLM_CALLS` budget, failure replies; the model's text is escaped |
+| `bot.py` | Instruction (with the "Contexto recente" rules and the replied-to message), one ADK run per message, `MAX_LLM_CALLS` budget, failure replies; the model's text is escaped |
 | `telegram.py` | `sendMessage` (optional `parse_mode=HTML`, `reply_markup`, reply-to; returns the sent Message), `sendChatAction`, `getUpdates`, `setMyCommands` |
 | `commands.py` | `COMMANDS` registry: `/hoje`, `/ficha`, `/exercicios`, `/desfazer`, `/help`, `/start`, answered from the sheet without the model; `uv run agent-commands` publishes the menu |
-| `handler.py` | Allowlist, dispatch registered commands, otherwise run the bot while showing "typing…" (re-sent every 4 s), reply as HTML in as many messages as needed; never raises |
+| `handler.py` | Allowlist, dispatch registered commands, otherwise run the bot (with the text of the bot message being replied to, if any) while showing "typing…" (re-sent every 4 s), reply as HTML in as many messages as needed; never raises |
 | `undo.py` | `/desfazer`: `write.undo` on the latest write, reply built from what the sheet undid |
 | `webhook.py` | What every HTTP entry does: `X-Telegram-Bot-Api-Secret-Token` check, hand the update over |
 | `main.py` (+ root `main.py` shim) | Functions Framework entry — Cloud Run functions |
 | `asgi.py` | ASGI app — uvicorn in any container; `GET /healthz` (`make serve`) |
 | `poll.py` | Local long polling (`uv run agent-poll`, `make poll`) |
+
+## Context between messages
+
+Each message is a fresh agent run; nothing is kept in the agent. Two things link a message to
+earlier ones, both placed in the instruction's "Contexto recente" rules:
+
+- **The replied-to message.** When the user replies (swipe-reply) to a message the bot sent,
+  the handler passes `reply_to_message.text` as `Bot.reply(..., context=...)`; the instruction
+  quotes it (capped at 2000 chars) as data. Replies to the user's own messages carry nothing.
+- **`catalog.recent`.** The sheet's writes of the last 30 minutes (from the undo log). For a
+  continuation ("e mais 3x10 de rosca") or a correction ("na verdade foi 62 no supino") that
+  names neither date nor session, the model takes the date and session of the most recent
+  matching write; a correction rewrites the same date/session/exercise, which the upsert
+  replaces. When that is ambiguous it saves nothing it would have to guess and says so.
 
 ## When something fails
 

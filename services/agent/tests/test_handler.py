@@ -14,13 +14,15 @@ pytestmark = pytest.mark.unit
 class FakeBot:
     def __init__(self, reply="ok", error=None, seconds=0.0, events=None):
         self.texts = []
+        self.contexts = []
         self._reply = reply
         self._error = error
         self._seconds = seconds
         self._events = events if events is not None else []
 
-    async def reply(self, text, user_id="telegram"):
+    async def reply(self, text, user_id="telegram", *, context=None):
         self.texts.append((text, user_id))
+        self.contexts.append(context)
         self._events.append("bot")
         if self._seconds:
             await asyncio.sleep(self._seconds)
@@ -62,6 +64,37 @@ async def test_runs_the_bot_and_replies_in_the_same_chat():
     assert bot.texts == [("peso 82", "42")]
     assert tg.sent == [(42, "21/09 · Peso kg 82")]
     assert tg.options == [{"html": True, "reply_markup": None, "reply_to": None}]
+    assert bot.contexts == [None]
+
+
+def replying(text, replied):
+    u = update(text)
+    u["message"]["reply_to_message"] = replied
+    return u
+
+
+async def test_a_reply_to_a_bot_message_passes_its_text_as_context():
+    confirmation = "21/09 · Upper\nSupino inclinado: 60×8, 60×8"
+    replied = {"message_id": 7, "from": {"id": 1, "is_bot": True}, "text": confirmation}
+    bot, tg = FakeBot(), FakeTelegram()
+    await Handler({42}, bot, tg).handle_update(replying("na verdade foi 62", replied))
+    assert bot.texts == [("na verdade foi 62", "42")]
+    assert bot.contexts == [confirmation]
+
+
+@pytest.mark.parametrize(
+    "replied",
+    [
+        {"message_id": 7, "from": {"id": 42, "is_bot": False}, "text": "peso 82"},
+        {"message_id": 7, "text": "sem remetente"},
+        {"message_id": 7, "from": {"id": 1, "is_bot": True}, "photo": []},
+        {"message_id": 7, "from": {"id": 1, "is_bot": True}, "text": "  "},
+    ],
+)
+async def test_other_replies_give_no_context(replied):
+    bot = FakeBot()
+    await Handler({42}, bot, FakeTelegram()).handle_update(replying("peso 83", replied))
+    assert bot.contexts == [None]
 
 
 async def test_long_replies_go_out_in_chunks_with_the_markup_on_the_last():

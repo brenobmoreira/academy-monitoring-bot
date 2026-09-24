@@ -28,6 +28,7 @@ const SheetApi = {
         exercises: WorkoutPlan.catalogue(),
         plan: WorkoutPlan.planRows(),
         lastWorkout: WorkoutRepo.last(),
+        recent: UndoLog.recent(),
       }),
     },
     'diary.upsert': {

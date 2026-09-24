@@ -93,8 +93,10 @@ class Journal:
 def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
     async def get_catalog() -> dict[str, Any]:
         """Lê o catálogo da planilha: data de hoje, sessões, nomes exatos de exercícios com grupo
-        muscular, a ficha (séries e repetições por sessão) e a fase atual. Chame antes de
-        save_workout ou get_exercise_history."""
+        muscular, a ficha (séries e repetições por sessão), a fase atual e recent: as gravações dos
+        últimos 30 minutos, a mais recente primeiro, com data, sessão e exercícios ou campos.
+        Chame antes de save_workout ou get_exercise_history, e para continuar ou corrigir uma
+        gravação recente."""
         return journal.check(await sheet.catalog())
 
     async def save_diary(date: str, fields: DiaryFields) -> dict[str, Any]:

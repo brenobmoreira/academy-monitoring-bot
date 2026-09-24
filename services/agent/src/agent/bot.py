@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -105,6 +106,16 @@ instrução):
 """
 
 
+@dataclass(frozen=True)
+class Answer:
+    """The HTML reply to one message and what it wrote: `wrote` is true when anything was saved,
+    `write_ids` are the sheet's undo ids of those writes, oldest first (the buttons use both)."""
+
+    text: str
+    write_ids: tuple[str, ...] = ()
+    wrote: bool = False
+
+
 def instruction(now: datetime, context: str | None = None) -> str:
     """The system instruction; `context` is the text of the bot message the user replied to."""
     reply_context = ""
@@ -133,7 +144,7 @@ class Bot:
         self._clock = clock or (lambda: datetime.now(self._zone))
         self._max_llm_calls = max_llm_calls
 
-    async def reply(self, text: str, user_id: str = "telegram", *, context: str | None = None) -> str:
+    async def reply(self, text: str, user_id: str = "telegram", *, context: str | None = None) -> Answer:
         """Runs the agent on one message. No memory between messages: each one is a fresh session;
         `context` (the bot message the user replied to) and the sheet's `catalog.recent` are the
         only links to earlier ones.
@@ -184,8 +195,12 @@ class Bot:
             note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
         if journal.sheet_failed and not journal.writes:
             log.warning("sheet unavailable for message %r: %s", text, journal.error_codes)
-            return SHEET_FAILED
-        return compose(confirmation(journal.writes), final, note)
+            return Answer(SHEET_FAILED)
+        return Answer(
+            compose(confirmation(journal.writes), final, note),
+            write_ids=tuple(journal.write_ids),
+            wrote=bool(journal.writes),
+        )
 
 
 def compose(lines: list[str], model_text: str, note: str = "") -> str:

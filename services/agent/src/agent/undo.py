@@ -1,7 +1,7 @@
-"""/desfazer: undo the latest sheet write (op write.undo), answered without the model.
+"""Undo through the sheet (op write.undo), answered without the model: /desfazer undoes the
+latest write, the ↩️ button under a confirmation undoes that message's writes.
 
-The reply is built from what the sheet reports it undid. Kept self-contained so it can move into
-the command registry (commands.py) as a plain `run`.
+Replies are built from what the sheet reports it undid.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ from typing import Any, Protocol
 from agent.summary import LABELS
 
 NOTHING = "Nada para desfazer."
+ALREADY = "Já estava desfeito."
+GONE = "⚠ Não desfiz: a gravação saiu do registro de desfazer; corrija direto na planilha."
 SHEET_DOWN = "⚠ A planilha não respondeu. Tente de novo em alguns minutos."
 
 
@@ -30,6 +32,31 @@ async def undo_last(sheet: UndoApi) -> str:
     if codes & {"unavailable", "internal"}:
         return SHEET_DOWN
     return "⚠ Não desfiz: " + "; ".join(str(e.get("message", "")) for e in errors)
+
+
+async def undo_writes(sheet: UndoApi, write_ids: list[str]) -> tuple[str, bool]:
+    """Undoes the given writes newest first (ids come oldest first, as the bot made them).
+
+    Returns the reply, one line per write (repeats merged), and whether the sheet was down: the
+    run stops there and the caller keeps the button, so a later tap undoes the rest.
+    """
+    lines: list[str] = []
+    for write_id in reversed(write_ids):
+        response = await sheet.undo(write_id)
+        if response.get("ok"):
+            lines.append(undone_line(response["result"]["undone"]))
+            continue
+        errors = response.get("errors") or []
+        codes = {e.get("code") for e in errors}
+        if codes & {"unavailable", "internal"}:
+            return "\n".join([*dict.fromkeys(lines), SHEET_DOWN]), True
+        if "already_undone" in codes:
+            lines.append(ALREADY)
+        elif "not_found" in codes:
+            lines.append(GONE)
+        else:
+            lines.append("⚠ Não desfiz: " + "; ".join(str(e.get("message", "")) for e in errors))
+    return "\n".join(dict.fromkeys(lines)) or NOTHING, False
 
 
 def undone_line(undone: dict[str, Any]) -> str:

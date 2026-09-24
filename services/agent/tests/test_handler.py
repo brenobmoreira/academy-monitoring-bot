@@ -3,8 +3,11 @@ from datetime import datetime
 
 import pytest
 
+from agent.bot import Answer
+from agent.buttons import FIX_PLACEHOLDER, FIX_PROMPT, keyboard
 from agent.commands import Reply, help_text
 from agent.handler import FAILURE, Handler
+from agent.undo import ALREADY, SHEET_DOWN
 
 from .fakes import FakeSheet
 
@@ -15,7 +18,7 @@ class FakeBot:
     def __init__(self, reply="ok", error=None, seconds=0.0, events=None):
         self.texts = []
         self.contexts = []
-        self._reply = reply
+        self._reply = reply if isinstance(reply, Answer) else Answer(reply)
         self._error = error
         self._seconds = seconds
         self._events = events if events is not None else []
@@ -32,12 +35,15 @@ class FakeBot:
 
 
 class FakeTelegram:
-    def __init__(self, error=None, action_error=None, events=None):
+    def __init__(self, error=None, action_error=None, events=None, edit_error=None):
         self.sent = []
         self.actions = []
         self.options = []
+        self.answered = []
+        self.edited = []
         self._error = error
         self._action_error = action_error
+        self._edit_error = edit_error
         self._events = events if events is not None else []
 
     async def send_message(self, chat_id, text, *, html=False, reply_markup=None, reply_to=None):
@@ -53,9 +59,33 @@ class FakeTelegram:
         if self._action_error:
             raise self._action_error
 
+    async def answer_callback_query(self, callback_query_id, text=None):
+        self.answered.append((callback_query_id, text))
+
+    async def edit_message_reply_markup(self, chat_id, message_id, reply_markup=None):
+        if self._edit_error:
+            raise self._edit_error
+        self.edited.append((chat_id, message_id, reply_markup))
+
 
 def update(text="peso 82", chat_id=42):
     return {"update_id": 1, "message": {"chat": {"id": chat_id}, "text": text}}
+
+
+CONFIRMATION = "21/09 · Peso kg 82,4"
+
+
+def tap(data, chat_id=42, message_id=9, text=CONFIRMATION):
+    message = {"message_id": message_id, "chat": {"id": chat_id}, "text": text}
+    return {"update_id": 2, "callback_query": {"id": "cb1", "data": data, "message": message}}
+
+
+def undone(date="2026-09-21", **fields):
+    return {"ok": True, "result": {"writeId": "w", "undone": {"op": "diary.upsert", "date": date, **fields}}}
+
+
+def refused(code, message="m"):
+    return {"ok": False, "errors": [{"path": "args.writeId", "code": code, "message": message}]}
 
 
 async def test_runs_the_bot_and_replies_in_the_same_chat():
@@ -212,3 +242,125 @@ async def test_desfazer_failures_become_the_short_warning():
     tg = FakeTelegram()
     await Handler({42}, FakeBot(), tg, sheet=BrokenSheet()).handle_update(update("/desfazer"))
     assert tg.sent[0][1].startswith("⚠")
+
+
+async def test_a_reply_that_wrote_gets_the_buttons_with_its_write_ids():
+    bot, tg = FakeBot(Answer("<b>21/09</b> · Peso kg 82", ("w1", "w2"), wrote=True)), FakeTelegram()
+    await Handler({42}, bot, tg).handle_update(update())
+    markup = tg.options[0]["reply_markup"]
+    assert markup == keyboard(["w1", "w2"])
+    assert [b["callback_data"] for b in markup["inline_keyboard"][0]] == ["ok", "undo:w1,w2", "fix"]
+
+
+async def test_a_reply_that_wrote_nothing_has_no_buttons():
+    tg = FakeTelegram()
+    await Handler({42}, FakeBot(Answer("Nada gravado.")), tg).handle_update(update("oi"))
+    assert tg.options[0]["reply_markup"] is None
+
+
+async def test_ok_removes_the_buttons():
+    tg = FakeTelegram()
+    await Handler({42}, FakeBot(), tg).handle_update(tap("ok"))
+    assert tg.edited == [(42, 9, None)]
+    assert tg.answered == [("cb1", None)]
+    assert tg.sent == []
+
+
+async def test_undo_undoes_every_write_newest_first_and_replies_to_the_confirmation():
+    sheet = FakeSheet(
+        write_undo=[
+            undone(**{"op": "workout.upsert", "session": "Upper", "exercises": ["Supino"]}),
+            undone(fields=["weightKg"]),
+        ]
+    )
+    bot, tg = FakeBot(), FakeTelegram()
+    await Handler({42}, bot, tg, sheet=sheet).handle_update(tap("undo:w1,w2"))
+    assert sheet.calls == [("write.undo", {"writeId": "w2"}), ("write.undo", {"writeId": "w1"})]
+    assert tg.edited == [(42, 9, None)]
+    assert tg.sent == [(42, "↩️ Desfeito: 21/09 · Upper (Supino)\n↩️ Desfeito: 21/09 · Diário (Peso kg)")]
+    assert tg.options[0]["reply_to"] == 9
+    assert tg.answered == [("cb1", None)]
+    assert bot.texts == []
+
+
+async def test_undo_reports_each_refusal_in_portuguese():
+    sheet = FakeSheet(
+        write_undo=[
+            refused("already_undone"),
+            refused("conflict", "a linha 6 mudou"),
+            refused("already_undone"),
+        ]
+    )
+    tg = FakeTelegram()
+    await Handler({42}, FakeBot(), tg, sheet=sheet).handle_update(tap("undo:w1,w2,w3"))
+    assert tg.sent == [(42, f"{ALREADY}\n⚠ Não desfiz: a linha 6 mudou")]
+    assert tg.edited == [(42, 9, None)]
+
+
+async def test_undo_keeps_the_button_when_the_sheet_is_down():
+    sheet = FakeSheet(write_undo=[undone(fields=["sleepH"]), refused("unavailable")])
+    tg = FakeTelegram()
+    await Handler({42}, FakeBot(), tg, sheet=sheet).handle_update(tap("undo:w1,w2"))
+    assert len(sheet.calls) == 2
+    assert tg.sent == [(42, f"↩️ Desfeito: 21/09 · Diário (Sono h)\n{SHEET_DOWN}")]
+    assert tg.edited == []
+
+
+async def test_fix_asks_for_the_correction_quoting_the_confirmation():
+    tg = FakeTelegram()
+    await Handler({42}, FakeBot(), tg).handle_update(tap("fix"))
+    assert tg.sent == [(42, f"{FIX_PROMPT}:\n\n{CONFIRMATION}")]
+    assert tg.options == [
+        {
+            "html": True,
+            "reply_markup": {"force_reply": True, "input_field_placeholder": FIX_PLACEHOLDER},
+            "reply_to": 9,
+        }
+    ]
+    assert tg.edited == []
+    assert tg.answered == [("cb1", None)]
+
+
+async def test_the_quoted_confirmation_is_escaped_for_html():
+    tg = FakeTelegram()
+    await Handler({42}, FakeBot(), tg).handle_update(tap("fix", text="Upper: Supino <barra> & halter"))
+    assert tg.sent == [(42, f"{FIX_PROMPT}:\n\nUpper: Supino &lt;barra&gt; &amp; halter")]
+
+
+async def test_the_answer_to_the_fix_prompt_goes_to_the_model_like_any_message():
+    bot, tg = FakeBot(), FakeTelegram()
+    u = update("na verdade 82,6")
+    u["message"]["reply_to_message"] = {"message_id": 10, "text": f"{FIX_PROMPT}:\n\n{CONFIRMATION}"}
+    await Handler({42}, bot, tg).handle_update(u)
+    assert bot.texts == [("na verdade 82,6", "42")]
+
+
+async def test_taps_from_other_chats_are_answered_and_ignored():
+    sheet = FakeSheet()
+    tg = FakeTelegram()
+    await Handler({42}, FakeBot(), tg, sheet=sheet).handle_update(tap("undo:w1", chat_id=7))
+    assert sheet.calls == []
+    assert tg.sent == tg.edited == []
+    assert tg.answered == [("cb1", None)]
+
+
+async def test_a_failing_tap_is_still_answered_with_the_warning():
+    tg = FakeTelegram()
+    await Handler({42}, FakeBot(), tg).handle_update(tap("undo:w1"))  # no sheet API configured
+    assert tg.answered == [("cb1", FAILURE)]
+    assert tg.sent == []
+
+
+async def test_a_keyboard_that_cannot_be_edited_does_not_stop_the_undo():
+    sheet = FakeSheet(write_undo=[undone(fields=["weightKg"])])
+    tg = FakeTelegram(edit_error=RuntimeError("message is not modified"))
+    await Handler({42}, FakeBot(), tg, sheet=sheet).handle_update(tap("undo:w1"))
+    assert tg.sent == [(42, "↩️ Desfeito: 21/09 · Diário (Peso kg)")]
+    assert tg.answered == [("cb1", None)]
+
+
+async def test_unknown_buttons_are_only_answered():
+    tg = FakeTelegram()
+    await Handler({42}, FakeBot(), tg).handle_update(tap("weird:1"))
+    assert tg.sent == tg.edited == []
+    assert tg.answered == [("cb1", None)]

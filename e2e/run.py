@@ -262,8 +262,9 @@ def main_run() -> None:
         proc.kill()
 
     # A long reply goes out in several sendMessage calls (format.split); show them as one text.
-    chunks = [t["body"]["text"] for t in timeline if t["kind"] == "telegram_reply" and t["method"] == "sendMessage"]
-    reply = "\n".join(chunks) or None
+    sends = [t["body"] for t in timeline if t["kind"] == "telegram_reply" and t["method"] == "sendMessage"]
+    reply = "\n".join(b["text"] for b in sends) or None
+    keyboard = sends[-1].get("reply_markup") if sends else None  # the inline buttons ride on the last chunk
     trace = {
         "scenario": {
             "llm": f"{settings.LLM_MODEL} via LiteLLM" + ("" if args.real else " (provider scripted)"),
@@ -279,6 +280,7 @@ def main_run() -> None:
         },
         "timeline": timeline,
         "reply_sent_to_telegram": reply.splitlines() if reply else None,
+        "reply_markup": keyboard,
         "sheet_after": sheets,
     }
     OUT.mkdir(parents=True, exist_ok=True)
@@ -289,6 +291,9 @@ def main_run() -> None:
     print(f"webhook → {status} {body} in {elapsed}s")
     print(f"llm calls: {kinds.count('llm')} · sheet api calls: {kinds.count('sheet_api')}")
     print("reply:\n  " + (reply or "(none)").replace("\n", "\n  "))
+    if keyboard:
+        row = keyboard.get("inline_keyboard", [[]])[0]
+        print("buttons: " + " · ".join(f"{b['text']} [{b['callback_data']}]" for b in row))
     print(f"trace: {path.relative_to(ROOT)}")
 
 

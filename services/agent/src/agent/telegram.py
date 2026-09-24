@@ -6,6 +6,9 @@ from typing import Any
 
 import httpx
 
+# Update kinds the bot handles; scripts/set-webhook.sh registers the same list (a test checks).
+ALLOWED_UPDATES = ["message", "callback_query"]
+
 
 class TelegramError(RuntimeError):
     pass
@@ -56,8 +59,24 @@ class TelegramClient:
         payload = [{"command": name, "description": description} for name, description in commands]
         await self._call("setMyCommands", {"commands": payload})
 
+    async def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
+        """Stops the button's loading spinner; `text` shows as a short toast."""
+        payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text is not None:
+            payload["text"] = text
+        await self._call("answerCallbackQuery", payload, seconds=10.0)
+
+    async def edit_message_reply_markup(
+        self, chat_id: int, message_id: int, reply_markup: dict[str, Any] | None = None
+    ) -> None:
+        """Replaces a sent message's inline keyboard; None removes it."""
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        await self._call("editMessageReplyMarkup", payload)
+
     async def get_updates(self, offset: int | None = None, wait: int = 50) -> list[dict[str, Any]]:
-        payload: dict[str, Any] = {"timeout": wait, "allowed_updates": ["message"]}
+        payload: dict[str, Any] = {"timeout": wait, "allowed_updates": ALLOWED_UPDATES}
         if offset is not None:
             payload = {"offset": offset, **payload}
         return await self._call("getUpdates", payload, seconds=wait + 10)

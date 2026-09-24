@@ -25,7 +25,7 @@ Telegram ──webhook──▶ Cloud Run function (Python, ADK agent + LiteLLM)
                          │        get_diary_history
                          │        └──POST JSON──▶ Apps Script Web App ──▶ Sheets
                          │             ◀── {ok, result} | {ok:false, errors[]}
-                         └──▶ Telegram reply
+                         └──▶ Telegram reply (+ buttons ✅ Ok · ↩️ Desfazer · ✏️ Corrigir)
                        /hoje, /ficha, /exercicios, /semana, /desfazer: Sheet API only, no model call
 
 Sheet menu "Registro" ──▶ Hoje screen ──▶ same validator ──▶ same repos ──▶ Sheets

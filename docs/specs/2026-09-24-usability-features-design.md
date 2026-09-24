@@ -133,6 +133,17 @@ Telegram limits `callback_data` to 64 bytes. Format `<verb>:<arg>`:
 `scripts/set-webhook.sh` registers `allowed_updates=["message","callback_query"]`, and
 `TelegramClient.get_updates` asks for the same.
 
+As built (F9, `agent/buttons.py`, `Handler._callback`): `Bot.reply` returns `Answer(text,
+write_ids, wrote)` (`agent/bot.py`); the keyboard goes under any reply that wrote, ↩️ only when
+there are ids that fit. The ✏️ prompt repeats the confirmation ("✏️ Envie a correção para esta
+mensagem:\n\n<callback_query.message.text>", escaped, cut at 3500 chars), since the answer's
+`reply_to_message` is the prompt and Telegram does not nest a second level. The undo reply quotes
+the confirmation and has one line per write (repeats merged): `undone_line`, "Já estava
+desfeito." (`already_undone`), a pruned-log hint (`not_found`), "⚠ Não desfiz: <message>"
+otherwise; an outage stops the run and keeps the keyboard so a later tap finishes it. Taps from
+other chats are answered but ignored; a failing tap is answered with the `FAILURE` toast.
+`agent.telegram.ALLOWED_UPDATES` and the script's list are kept equal by a test.
+
 ### Context (F10)
 
 No agent-side storage. Two sources, both put into the agent instruction as a "Contexto recente"
@@ -232,6 +243,23 @@ checks: token unset → 404, wrong/missing token → 403, body not `{"kind": "da
   without downloading.
 - The instruction gains: transcribe what is said / read the scale or app screen, then apply the
   same rules; never guess an unreadable digit.
+
+As built (F13): `Bot.reply(text, user_id, *, media: list[Media] | None)` with
+`Media = (mime_type, data)`; the user turn is the inline parts followed by one text part
+`[Anexo: áudio|foto]` + the caption. ADK 2.9's LiteLLM adapter sends images as `image_url` data
+URIs and audio as `input_audio` (`format` = MIME subtype, `ogg` for voice); a MIME type it
+cannot convert raises `ValueError` before any provider call. "Rejected media" = a model error on
+a message with media that is that `ValueError` or a LiteLLM `BadRequestError` /
+`UnprocessableEntityError` (400/422, subclasses included); timeouts, connection errors and 5xx
+keep the F3 reply. LiteLLM 1.102 **drops `input_audio` silently for Anthropic** (and Bedrock), so
+no error exists to detect: the `[Anexo: …]` label plus instruction rule 12 make the model say it
+could not read the audio instead of logging the caption alone. `MEDIA_ENABLED: false` answers
+with the same hint as a rejection. Other replies: a file over `MEDIA_MAX_BYTES` (Telegram's
+announced `file_size`, else the downloaded length) → "O arquivo passa de N MB, …" without
+download when announced; a failed `getFile`/download → "⚠ Não consegui baixar o arquivo do
+Telegram. …". A photo without a fitting size is refused; a size without `file_size` counts as
+fitting and is checked after download. `MEDIA_MAX_BYTES` is capped at 20 MB (the Bot API's
+`getFile` limit). Documents (a photo sent "as file"), stickers and video notes stay ignored.
 
 ### Errors (F3)
 

@@ -17,6 +17,7 @@ class TelegramError(RuntimeError):
 class TelegramClient:
     def __init__(self, token: str, http: httpx.AsyncClient) -> None:
         self._base = f"https://api.telegram.org/bot{token}"
+        self._files = f"https://api.telegram.org/file/bot{token}"
         self._http = http
 
     async def _call(self, method: str, payload: dict[str, Any], seconds: float = 30.0) -> Any:
@@ -74,6 +75,23 @@ class TelegramClient:
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         await self._call("editMessageReplyMarkup", payload)
+
+    async def get_file(self, file_id: str) -> dict[str, Any]:
+        """The File object (`file_path`, `file_size`) of a file sent to the bot, for download_file."""
+        return await self._call("getFile", {"file_id": file_id})
+
+    async def download_file(self, file_path: str) -> bytes:
+        """Downloads a file from its `file_path` (valid for about an hour after getFile).
+
+        The URL holds the bot token, so errors name only the status or the error type, never the URL.
+        """
+        try:
+            response = await self._http.get(f"{self._files}/{file_path}", timeout=60.0)
+        except httpx.HTTPError as error:
+            raise TelegramError(f"download_file: {type(error).__name__}") from None
+        if response.status_code != 200:
+            raise TelegramError(f"download_file: HTTP {response.status_code}")
+        return response.content
 
     async def get_updates(self, offset: int | None = None, wait: int = 50) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {"timeout": wait, "allowed_updates": ALLOWED_UPDATES}

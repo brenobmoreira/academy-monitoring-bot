@@ -23,10 +23,10 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `tools.py` | ADK tools; return the API body as-is so the model fixes rejected payloads; `Journal` of writes and error codes. `get_diary_history` reads `diary.range` for questions about a period |
 | `format.py` | Telegram HTML: `escape`, `bold`, `split` (≤ 4096 chars, cut on line boundaries) |
 | `summary.py` | Confirmation text built from what the sheet reports it wrote (HTML; bold date/session and exercise names), each exercise compared with its previous session |
-| `bot.py` | Instruction (with the "Contexto recente" rules and the replied-to message), one ADK run per message, `MAX_LLM_CALLS` budget, failure replies; the model's text is escaped. `reply` returns an `Answer`: the HTML text, whether it wrote, and the undo ids of its writes |
-| `telegram.py` | `sendMessage` (optional `parse_mode=HTML`, `reply_markup`, reply-to; returns the sent Message), `sendChatAction`, `getUpdates` (messages and button taps), `setMyCommands`, `answerCallbackQuery`, `editMessageReplyMarkup` |
+| `bot.py` | Instruction (with the "Contexto recente" rules and the replied-to message), one ADK run per message, `MAX_LLM_CALLS` budget, failure replies; voice, audio and photos as inline data; the model's text is escaped. `reply` returns an `Answer`: the HTML text, whether it wrote, and the undo ids of its writes |
+| `telegram.py` | `sendMessage` (optional `parse_mode=HTML`, `reply_markup`, reply-to; returns the sent Message), `sendChatAction`, `getUpdates` (messages and button taps), `setMyCommands`, `answerCallbackQuery`, `editMessageReplyMarkup`, `getFile` + file download (errors never carry the token-bearing URL) |
 | `commands.py` | `COMMANDS` registry: `/hoje`, `/ficha`, `/exercicios`, `/semana`, `/desfazer`, `/help`, `/start`, answered from the sheet without the model; `uv run agent-commands` publishes the menu |
-| `handler.py` | Allowlist, dispatch registered commands, otherwise run the bot (with the text of the bot message being replied to, if any) while showing "typing…" (re-sent every 4 s), reply as HTML in as many messages as needed, with the buttons under a reply that wrote; acts on button taps; never raises |
+| `handler.py` | Allowlist, dispatch registered commands, otherwise run the bot (with the text of the bot message being replied to, if any) while showing "typing…" (re-sent every 4 s), reply as HTML in as many messages as needed, with the buttons under a reply that wrote; acts on button taps; downloads voice, audio and photos for the bot (see below); never raises |
 | `weekly.py` | `/semana` text: Mon–Sun bounds and the summary built from `diary.range` + `workout.range` (pure, no model) |
 | `buttons.py` | The inline keyboard under a confirmation and its `callback_data` (`ok`, `undo:<ids>`, `fix`); the ✏️ prompt |
 | `undo.py` | `write.undo`: the latest write (`/desfazer`) or a message's writes (↩️ button); reply built from what the sheet undid |
@@ -61,6 +61,34 @@ The reply always starts with the confirmation of what was written before the fai
 | Anything else | `handler.FAILURE`: "⚠ Não consegui processar agora. Confira a planilha antes de reenviar." |
 
 Each case is logged, model failures and unexpected errors with the traceback.
+
+## Voice and photo messages
+
+A voice note, an audio file or a photo (caption optional) from an allowed chat is downloaded
+(`getFile`, then `https://api.telegram.org/file/bot<token>/<file_path>`) and sent to the model
+as inline data next to the caption: voice as `audio/ogg` (Opus), audio with the MIME type
+Telegram reports, photos as `image/jpeg`, using the largest size Telegram offers that fits
+`MEDIA_MAX_BYTES`. The text part names the attachment (`[Anexo: áudio]`) so a model that never
+received it says so instead of answering the caption alone. The instruction asks the model to
+transcribe the audio / read the scale or app screen and apply the same rules, and never to
+guess an unreadable digit. Documents, stickers and video notes get no reply.
+
+ADK's LiteLLM adapter turns images into `image_url` data URIs and audio into `input_audio`
+blocks (`format` from the MIME subtype, so `ogg`). Gemini (`gemini/`, `vertex_ai/`) accepts
+both. What other providers do with them, as of LiteLLM 1.102:
+
+| Provider | Photo | Voice (`audio/ogg`) |
+|----------|-------|---------------------|
+| Gemini, Vertex AI | yes | yes |
+| Anthropic | yes | no: LiteLLM drops `input_audio` without an error; the `[Anexo: áudio]` line makes the model answer that it could not read it |
+| OpenAI | yes (vision models) | no: the API takes only wav/mp3, on audio models; its 400 is expected to give the "envie em texto" reply (not tried against the live API) |
+
+| Case | Reply |
+|------|-------|
+| `MEDIA_ENABLED: false` | "Não consegui ler o áudio/foto com o modelo configurado; envie em texto." — nothing is downloaded |
+| File over `MEDIA_MAX_BYTES` (announced by Telegram or measured after download) | "O arquivo passa de 5 MB, o máximo que eu leio; envie em texto ou um arquivo menor." — not downloaded when Telegram announced the size |
+| Download failed | "⚠ Não consegui baixar o arquivo do Telegram. Tente de novo ou envie em texto." |
+| The model call fails with ADK's conversion `ValueError` or a provider 400/422 (LiteLLM `BadRequestError`, `UnprocessableEntityError`) on a message with media | "Não consegui ler o áudio/foto com o modelo configurado; envie em texto." after any confirmation; timeouts and 5xx stay "O modelo não respondeu agora" |
 
 ## Commands
 
@@ -109,6 +137,8 @@ Everything is read once when the process starts.
 | `LLM_MODEL` | `gemini/gemini-3.8-flash` | LiteLLM `<provider>/<model>`; switching provider is only this plus the key |
 | `MAX_LLM_CALLS` | `8` | model calls per message, corrections included |
 | `TIMEZONE` | `America/Sao_Paulo` | resolves "hoje" and "ontem", in messages and in `/hoje` |
+| `MEDIA_ENABLED` | `true` | voice, audio and photos go to the model; `false` answers them with "envie em texto" without downloading |
+| `MEDIA_MAX_BYTES` | `5000000` | largest file downloaded (1 to 20000000, the Bot API's `getFile` limit) |
 
 Environment only (account-specific or secret; a YAML file containing a secret is refused):
 

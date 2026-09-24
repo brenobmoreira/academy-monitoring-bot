@@ -223,6 +223,23 @@ Scheduling is a Cloud Scheduler job per kind (documented, not automated).
 - The instruction gains: transcribe what is said / read the scale or app screen, then apply the
   same rules; never guess an unreadable digit.
 
+As built (F13): `Bot.reply(text, user_id, *, media: list[Media] | None)` with
+`Media = (mime_type, data)`; the user turn is the inline parts followed by one text part
+`[Anexo: áudio|foto]` + the caption. ADK 2.9's LiteLLM adapter sends images as `image_url` data
+URIs and audio as `input_audio` (`format` = MIME subtype, `ogg` for voice); a MIME type it
+cannot convert raises `ValueError` before any provider call. "Rejected media" = a model error on
+a message with media that is that `ValueError` or a LiteLLM `BadRequestError` /
+`UnprocessableEntityError` (400/422, subclasses included); timeouts, connection errors and 5xx
+keep the F3 reply. LiteLLM 1.102 **drops `input_audio` silently for Anthropic** (and Bedrock), so
+no error exists to detect: the `[Anexo: …]` label plus instruction rule 12 make the model say it
+could not read the audio instead of logging the caption alone. `MEDIA_ENABLED: false` answers
+with the same hint as a rejection. Other replies: a file over `MEDIA_MAX_BYTES` (Telegram's
+announced `file_size`, else the downloaded length) → "O arquivo passa de N MB, …" without
+download when announced; a failed `getFile`/download → "⚠ Não consegui baixar o arquivo do
+Telegram. …". A photo without a fitting size is refused; a size without `file_size` counts as
+fitting and is checked after download. `MEDIA_MAX_BYTES` is capped at 20 MB (the Bot API's
+`getFile` limit). Documents (a photo sent "as file"), stickers and video notes stay ignored.
+
 ### Errors (F3)
 
 `Bot.reply` distinguishes and the handler reports:

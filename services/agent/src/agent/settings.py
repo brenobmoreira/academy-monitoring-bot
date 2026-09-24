@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     MAX_LLM_CALLS: int = Field(8, ge=1, le=30)
     TIMEZONE: str = "America/Sao_Paulo"
 
+    # --- Voice and photo messages -------------------------------------------------------------
+    # Off: voice, audio and photos get a "send it as text" reply and are never downloaded.
+    MEDIA_ENABLED: bool = True
+    # Largest file downloaded and sent to the model; the Bot API's getFile stops at 20 MB.
+    MEDIA_MAX_BYTES: int = Field(5_000_000, ge=1, le=20_000_000)
+
     @field_validator("ALLOWED_CHAT_IDS", mode="before")
     @classmethod
     def _split_chat_ids(cls, value: Any) -> Any:

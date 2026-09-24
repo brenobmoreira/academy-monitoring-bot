@@ -3,10 +3,10 @@ from datetime import datetime
 
 import pytest
 
-from agent.bot import Answer
+from agent.bot import MEDIA_UNREADABLE, Answer, Media
 from agent.buttons import FIX_PLACEHOLDER, FIX_PROMPT, keyboard
 from agent.commands import Reply, help_text
-from agent.handler import FAILURE, Handler
+from agent.handler import DOWNLOAD_FAILED, FAILURE, Handler, media_ref, too_large
 from agent.undo import ALREADY, SHEET_DOWN
 
 from .fakes import FakeSheet
@@ -18,14 +18,16 @@ class FakeBot:
     def __init__(self, reply="ok", error=None, seconds=0.0, events=None):
         self.texts = []
         self.contexts = []
+        self.media = []
         self._reply = reply if isinstance(reply, Answer) else Answer(reply)
         self._error = error
         self._seconds = seconds
         self._events = events if events is not None else []
 
-    async def reply(self, text, user_id="telegram", *, context=None):
+    async def reply(self, text, user_id="telegram", *, context=None, media=None):
         self.texts.append((text, user_id))
         self.contexts.append(context)
+        self.media.append(media)
         self._events.append("bot")
         if self._seconds:
             await asyncio.sleep(self._seconds)
@@ -35,12 +37,17 @@ class FakeBot:
 
 
 class FakeTelegram:
-    def __init__(self, error=None, action_error=None, events=None, edit_error=None):
+    def __init__(
+        self, error=None, action_error=None, events=None, edit_error=None, files=None, download_error=None
+    ):
         self.sent = []
         self.actions = []
         self.options = []
         self.answered = []
         self.edited = []
+        self.fetched = []
+        self._files = files or {}  # file_id -> (File object, bytes)
+        self._download_error = download_error
         self._error = error
         self._action_error = action_error
         self._edit_error = edit_error
@@ -66,6 +73,16 @@ class FakeTelegram:
         if self._edit_error:
             raise self._edit_error
         self.edited.append((chat_id, message_id, reply_markup))
+
+    async def get_file(self, file_id):
+        self.fetched.append(("getFile", file_id))
+        return self._files[file_id][0]
+
+    async def download_file(self, file_path):
+        self.fetched.append(("download", file_path))
+        if self._download_error:
+            raise self._download_error
+        return next(data for info, data in self._files.values() if info["file_path"] == file_path)
 
 
 def update(text="peso 82", chat_id=42):
@@ -364,3 +381,107 @@ async def test_unknown_buttons_are_only_answered():
     await Handler({42}, FakeBot(), tg).handle_update(tap("weird:1"))
     assert tg.sent == tg.edited == []
     assert tg.answered == [("cb1", None)]
+
+
+VOICE = {"file_id": "v1", "file_unique_id": "u1", "duration": 3, "mime_type": "audio/ogg", "file_size": 9000}
+PHOTO_SIZES = [
+    {"file_id": "p-small", "width": 90, "height": 120, "file_size": 2_000},
+    {"file_id": "p-medium", "width": 600, "height": 800, "file_size": 60_000},
+    {"file_id": "p-large", "width": 1200, "height": 1600, "file_size": 300_000},
+]
+
+
+def media_update(chat_id=42, **fields):
+    return {"update_id": 2, "message": {"chat": {"id": chat_id}, **fields}}
+
+
+def file(file_id, data, path=None):
+    info = {"file_id": file_id, "file_size": len(data), "file_path": path or f"files/{file_id}"}
+    return {file_id: (info, data)}
+
+
+async def test_a_voice_message_is_downloaded_and_goes_to_the_bot_as_ogg_audio():
+    bot, tg = FakeBot("<b>24/09</b> · Peso kg 82"), FakeTelegram(files=file("v1", b"OggS...", "voice/f.oga"))
+    await Handler({42}, bot, tg).handle_update(media_update(voice=VOICE))
+    assert tg.fetched == [("getFile", "v1"), ("download", "voice/f.oga")]
+    assert bot.texts == [("", "42")]
+    assert bot.media == [[Media("audio/ogg", b"OggS...")]]
+    assert tg.sent == [(42, "<b>24/09</b> · Peso kg 82")]
+    assert tg.actions[0] == (42, "typing")
+
+
+async def test_an_audio_file_keeps_its_mime_type_and_the_caption_goes_along():
+    audio = {"file_id": "a1", "mime_type": "audio/mp4", "file_size": 100}
+    bot, tg = FakeBot(), FakeTelegram(files=file("a1", b"m4a"))
+    await Handler({42}, bot, tg).handle_update(media_update(audio=audio, caption="treino de hoje"))
+    assert bot.texts == [("treino de hoje", "42")]
+    assert bot.media == [[Media("audio/mp4", b"m4a")]]
+
+
+async def test_a_photo_sends_the_largest_size_that_fits_as_jpeg():
+    bot = FakeBot()
+    tg = FakeTelegram(files={**file("p-medium", b"jpeg-m"), **file("p-large", b"jpeg-l")})
+    handler = Handler({42}, bot, tg, media_max_bytes=100_000)
+    await handler.handle_update(media_update(photo=PHOTO_SIZES, caption="balança"))
+    assert tg.fetched == [("getFile", "p-medium"), ("download", "files/p-medium")]
+    assert bot.texts == [("balança", "42")]
+    assert bot.media == [[Media("image/jpeg", b"jpeg-m")]]
+
+
+def test_photo_size_selection():
+    def chosen(max_bytes):
+        ref = media_ref({"photo": PHOTO_SIZES}, max_bytes)
+        return ref and ref.file_id
+
+    assert chosen(5_000_000) == "p-large"
+    assert chosen(60_000) == "p-medium"
+    too_big = media_ref({"photo": PHOTO_SIZES}, 1_000)
+    assert too_big is not None and too_big.file_id == "p-small" and not too_big.fits(1_000)
+    assert media_ref({"sticker": {"file_id": "s"}}, 1_000) is None
+
+
+async def test_a_file_over_the_limit_is_refused_without_downloading():
+    bot, tg = FakeBot(), FakeTelegram()
+    await Handler({42}, bot, tg, media_max_bytes=5_000).handle_update(media_update(voice=VOICE))
+    await Handler({42}, bot, tg, media_max_bytes=1_000).handle_update(media_update(photo=PHOTO_SIZES))
+    assert tg.fetched == []
+    assert bot.texts == []
+    assert [text for _, text in tg.sent] == [too_large(5_000), too_large(1_000)]
+    assert too_large(5_000_000) == (
+        "O arquivo passa de 5 MB, o máximo que eu leio; envie em texto ou um arquivo menor."
+    )
+    assert "2,5 MB" in too_large(2_500_000)
+
+
+async def test_a_download_larger_than_telegram_announced_is_refused():
+    bot = FakeBot()
+    tg = FakeTelegram(files={"v1": ({"file_id": "v1", "file_path": "voice/f.oga"}, b"x" * 20_000)})
+    await Handler({42}, bot, tg, media_max_bytes=10_000).handle_update(
+        media_update(voice={**VOICE, "file_size": None})
+    )
+    assert bot.texts == []
+    assert tg.sent == [(42, too_large(10_000))]
+
+
+async def test_media_disabled_answers_with_the_text_hint_without_downloading():
+    bot, tg = FakeBot(), FakeTelegram()
+    await Handler({42}, bot, tg, media_enabled=False).handle_update(media_update(voice=VOICE))
+    assert tg.fetched == []
+    assert bot.texts == []
+    assert tg.sent == [(42, MEDIA_UNREADABLE)]
+
+
+async def test_a_failed_download_gets_its_own_warning_and_skips_the_bot():
+    bot = FakeBot()
+    tg = FakeTelegram(files=file("v1", b"x", "voice/f.oga"), download_error=RuntimeError("HTTP 502"))
+    await Handler({42}, bot, tg).handle_update(media_update(voice=VOICE))
+    assert bot.texts == []
+    assert tg.sent == [(42, DOWNLOAD_FAILED)]
+
+
+async def test_media_from_other_chats_and_other_kinds_of_message_are_ignored():
+    bot, tg = FakeBot(), FakeTelegram()
+    await Handler({42}, bot, tg).handle_update(media_update(chat_id=7, voice=VOICE))
+    await Handler({42}, bot, tg).handle_update(media_update(sticker={"file_id": "s1"}))
+    await Handler({42}, bot, tg).handle_update(media_update(document={"file_id": "d1"}, caption="x"))
+    assert tg.fetched == [] and tg.sent == [] and bot.texts == []

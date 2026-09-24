@@ -28,7 +28,7 @@ test('reports malformed envelopes: bad JSON, unknown op, unknown field', () => {
   assert.deepEqual(codes(call(ctx, '{nope')), ['body:invalid_json']);
   assert.deepEqual(codes(call(ctx, req('diary.delete', {}))), ['op:unknown_op']);
   assert.deepEqual(codes(call(ctx, { ...req('catalog', {}), extra: 1 })), ['extra:unknown_field']);
-  assert.match(call(ctx, req('nope', {})).errors[0].message, /catalog, diary\.upsert, workout\.upsert, exercise\.history/);
+  assert.match(call(ctx, req('nope', {})).errors[0].message, /catalog, diary\.upsert, workout\.upsert, write\.undo, exercise\.history/);
 });
 
 test('catalog lists today, sessions, exercises, plan and the current phase', () => {
@@ -46,7 +46,9 @@ test('catalog lists today, sessions, exercises, plan and the current phase', () 
 test('diary.upsert writes and echoes exactly the stored fields', () => {
   const ctx = boot();
   const res = call(ctx, req('diary.upsert', { date: '2026-09-21', fields: { weightKg: 82.4, muayThai: true } }));
-  assert.deepEqual(res, { ok: true, result: { date: '2026-09-21', row: 6, fields: { weightKg: 82.4, muayThai: true } } });
+  const { writeId, ...result } = res.result;
+  assert.deepEqual(result, { date: '2026-09-21', row: 6, fields: { weightKg: 82.4, muayThai: true } });
+  assert.match(writeId, /^[0-9a-z]{1,20}$/);
   assert.equal(diaryCell(ctx, 6, 'Peso kg'), 82.4);
   assert.equal(diaryCell(ctx, 6, 'Muay Thai'), 'Sim');
 });
@@ -65,7 +67,9 @@ test('workout.upsert fills prescription columns and returns rows per exercise', 
   const res = call(ctx, req('workout.upsert', { date: '2026-09-21', session: 'Upper', exercises: [
     { name: 'Supino inclinado', sets: [{ kg: 60, reps: 8 }, { kg: 62.5, reps: 8 }], rir: 2 },
   ] }));
-  assert.deepEqual(res.result, {
+  const { writeId, ...result } = res.result;
+  assert.match(writeId, /^[0-9a-z]{1,20}$/);
+  assert.deepEqual(result, {
     date: '2026-09-21', session: 'Upper', phase: 'Adaptação', sessionId: '2026-09-21/Upper',
     exercises: [{ name: 'Supino inclinado', row: 6, sets: [{ kg: 60, reps: 8 }, { kg: 62.5, reps: 8 }], setsDone: 2, volume: 980, rir: 2 }],
   });

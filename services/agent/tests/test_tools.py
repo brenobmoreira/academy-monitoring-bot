@@ -64,3 +64,12 @@ async def test_read_tools_pass_through(sheet):
     await t["get_catalog"]()
     await t["get_exercise_history"]("Leg press", 3)
     assert sheet.calls == [("catalog", {}), ("exercise.history", {"name": "Leg press", "limit": 3})]
+
+
+def test_journal_lists_the_write_ids_of_the_message_in_order():
+    journal = Journal()
+    journal.record("diary.upsert", {"ok": True, "result": {"date": "2026-09-21", "writeId": "a1"}})
+    journal.record("workout.upsert", {"ok": False, "errors": []})
+    journal.record("workout.upsert", {"ok": True, "result": {"date": "2026-09-21", "writeId": "b2"}})
+    journal.record("diary.upsert", {"ok": True, "result": {"date": "2026-09-21"}})
+    assert journal.write_ids == ["a1", "b2"]

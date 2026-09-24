@@ -107,6 +107,14 @@ row numbers of later writes stay valid). An entry is undone once; undoing it aga
 error `already_undone`; an unknown or pruned id returns `not_found`. `catalog.recent` (F10) reads
 the same log, so both features share it.
 
+As built (F6, `apps/sheet/src/undo.js`): each entry is `{id, at, op, sheet, date, session?,
+fields?: [field keys], exercises?: [names], rows, undone?}` with `rows` in a compact form
+(`[{r, n?, c: [col | [col, before]]}]`, only cells whose value changed); `undone` is the ISO time
+of the undo and an undone entry drops `rows`. Two more error codes: `nothing_to_undo` (no id and
+nothing pending) and `conflict` (a row no longer holds the write's date, e.g. the tab was sorted;
+nothing is restored), plus `not_undoable` for a single write too large for the property (it keeps
+its summary only). Sheet-menu saves go through `SheetApi.run` and are logged like the agent's.
+
 `SheetClient` gains one method per op, and the `SheetApi` protocol in `tools.py` (the future
 `LogStore` port) gains the ones the agent's tools use. `tests/fakes.py::FakeSheet` gains the same
 methods. `e2e/sheet_server.js` runs the real Apps Script, so it needs no change unless the fake

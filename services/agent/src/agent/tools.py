@@ -61,6 +61,11 @@ class Journal:
             self.writes.append((op, response["result"]))
         return response
 
+    @property
+    def write_ids(self) -> list[str]:
+        """The sheet's undo ids of these writes, in order (an older sheet deployment sends none)."""
+        return [result["writeId"] for _, result in self.writes if result.get("writeId")]
+
 
 def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
     async def get_catalog() -> dict[str, Any]:

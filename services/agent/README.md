@@ -23,7 +23,8 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `summary.py` | Confirmation text built from what the sheet reports it wrote |
 | `bot.py` | Instruction, one ADK run per message, `MAX_LLM_CALLS` budget |
 | `telegram.py` | `sendMessage`, `getUpdates` |
-| `handler.py` | Allowlist, `/start`, run the bot, reply; never raises |
+| `handler.py` | Allowlist, `/start`, `/desfazer`, run the bot, reply; never raises |
+| `undo.py` | `/desfazer`: `write.undo` on the latest write, reply built from what the sheet undid |
 | `webhook.py` | What every HTTP entry does: `X-Telegram-Bot-Api-Secret-Token` check, hand the update over |
 | `main.py` (+ root `main.py` shim) | Functions Framework entry — Cloud Run functions |
 | `asgi.py` | ASGI app — uvicorn in any container; `GET /healthz` |
@@ -189,4 +190,5 @@ uv export --no-dev --no-emit-project --no-hashes --format requirements-txt -o re
 
 Send `peso 82,4 dormi 7h30` to the bot → `21/09 · Peso kg 82,4 · Sono h 7,5` and today's row in
 `Diário`. Send `upper: supino inclinado 60x8 62x8 rir 2` → a row in `Registro de treino`.
+Send `/desfazer` → `↩️ Desfeito: 21/09 · Upper (Supino inclinado)` and the row is empty again.
 Nothing back? Cloud Run → Logs for the function, and Apps Script → Executions for `doPost`.

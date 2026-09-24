@@ -17,9 +17,10 @@ const DiaryRepo = {
    * Every column is resolved before the first write, so a renamed header fails the whole call.
    * @param {Date} date
    * @param {Object} fields  validated diary fields (see Validator.diaryUpsert)
+   * @param {UndoCapture_} [capture]  records the previous cell values (see UndoLog)
    * @returns {{row: number, written: string[]}}
    */
-  upsert(date, fields) {
+  upsert(date, fields, capture = UndoLog.capture()) {
     const sheet = DiaryRepo.sheet_();
     const headerRow = Config.headerRow();
     const columns = Sheets.columnIndex(sheet, headerRow);
@@ -32,10 +33,11 @@ const DiaryRepo = {
     let row = Sheets.findRowByDate(sheet, headerRow + 1, dateCol, date);
     if (!row) {
       row = Sheets.nextEmptyRow(sheet, headerRow + 1, dateCol);
-      sheet.getRange(row, dateCol).setValue(date);
+      capture.newRow(sheet, row);
+      capture.set(sheet, row, dateCol, date);
     }
     written.forEach((field) => {
-      sheet.getRange(row, columns[Schema.DIARY_FIELDS[field].header]).setValue(Schema.toCell(field, fields[field]));
+      capture.set(sheet, row, columns[Schema.DIARY_FIELDS[field].header], Schema.toCell(field, fields[field]));
     });
     return { row, written };
   },

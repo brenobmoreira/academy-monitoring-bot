@@ -39,6 +39,9 @@ class FakeSheet:
         args = {"name": name} if limit is None else {"name": name, "limit": limit}
         return self._next("exercise.history", args)
 
+    async def undo(self, write_id=None):
+        return self._next("write.undo", {} if write_id is None else {"writeId": write_id})
+
 
 class ScriptedLlm(BaseLlm):
     """Replays model turns in order and keeps every request it received."""

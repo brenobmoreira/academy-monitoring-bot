@@ -96,9 +96,10 @@ const WorkoutRepo = {
    * Names are expected to be exact catalogue names (see Validator.workoutUpsert).
    * @param {Date} date
    * @param {{session: string, phase?: string, exercises: Array}} workout
+   * @param {UndoCapture_} [capture]  records the previous cell values (see UndoLog)
    * @returns {{phase: string, sessionId: string, rows: number[], exercises: Object[]}}
    */
-  saveSession(date, workout) {
+  saveSession(date, workout, capture = UndoLog.capture()) {
     const sheet = WorkoutRepo.sheet_();
     const headerRow = Config.headerRow();
     const columns = Sheets.columnIndex(sheet, headerRow);
@@ -140,10 +141,13 @@ const WorkoutRepo = {
         cells[WorkoutRepo.repsHeader(n)] = s ? Number(s.reps) || '' : '';
       }
 
-      const row = WorkoutRepo.findExisting_(existing, date, workout.session, ex.name)
-        || Sheets.nextEmptyRow(sheet, headerRow + 1, columns[H.date]);
+      let row = WorkoutRepo.findExisting_(existing, date, workout.session, ex.name);
+      if (!row) {
+        row = Sheets.nextEmptyRow(sheet, headerRow + 1, columns[H.date]);
+        capture.newRow(sheet, row);
+      }
       Object.keys(cells).forEach((header) => {
-        if (columns[header]) sheet.getRange(row, columns[header]).setValue(cells[header]);
+        if (columns[header]) capture.set(sheet, row, columns[header], cells[header]);
       });
       existing.push({ __row: row, [H.date]: date, [H.session]: workout.session, [H.exercise]: ex.name });
       result.rows.push(row);

@@ -61,6 +61,16 @@ const SheetApi = {
         return { name: args.name, sessions };
       },
     },
+    'diary.range': {
+      write: false,
+      validate: (args, ctx) => Validator.dateRange(args, ctx),
+      run: (args) => ({ from: args.from, to: args.to, days: DiaryRepo.range(args.from, args.to) }),
+    },
+    'workout.range': {
+      write: false,
+      validate: (args, ctx) => Validator.dateRange(args, ctx),
+      run: (args) => ({ from: args.from, to: args.to, rows: WorkoutRepo.range(args.from, args.to) }),
+    },
   },
 
   /** HTTP entry: parse, authenticate, check the envelope, then run. */

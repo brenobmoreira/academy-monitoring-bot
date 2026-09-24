@@ -49,6 +49,8 @@ Ferramentas:
 cansaço, observações).
 - save_workout: exercícios de musculação com séries.
 - get_exercise_history: sessões anteriores de um exercício.
+- get_diary_history: dados do Diário num período (até 92 dias), para perguntas como "como está \
+meu peso nas últimas 2 semanas?".
 
 Regras:
 1. Datas sempre em yyyy-MM-dd. Resolva "ontem", "sábado" etc. a partir de hoje. Sem data na \
@@ -69,6 +71,10 @@ respondeu.
 10. Resposta final curta, em português. O sistema já envia a confirmação do que foi gravado: \
 não repita os valores. Se tudo foi gravado sem ressalvas, responda apenas "ok". Para perguntas \
 (ex.: histórico), responda com os dados das ferramentas.
+11. Para perguntas sobre um período, resolva-o a partir de hoje ("últimas 2 semanas" = de 13 \
+dias atrás até hoje; "este mês" = do dia 1 até hoje) e chame get_diary_history. Responda só \
+com os dias e campos que vierem: dia ausente não foi registrado; nunca invente, estime ou \
+preencha dias ou valores que faltam, e diga quantos dias com dado a resposta cobre.
 """
 
 

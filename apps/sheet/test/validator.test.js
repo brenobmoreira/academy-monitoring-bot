@@ -101,3 +101,16 @@ test('every error carries a Portuguese message for the model', () => {
   const r = Validator.diaryUpsert({ date: '2026-09-21', fields: { hunger: 9 } }, ctx);
   assert.match(r.errors[0].message, /entre 1 e 5/);
 });
+
+test('range: strict dates, from before to, at most 92 days; future days allowed', () => {
+  const { Validator } = load();
+  assert.deepEqual(plain(Validator.dateRange({ from: '2026-09-01', to: '2026-09-27' }, ctx)), { value: { from: '2026-09-01', to: '2026-09-27' }, errors: [] });
+  assert.deepEqual(codes(Validator.dateRange({ from: '2026-09-21', to: '2026-09-21' }, ctx)), []);
+  assert.deepEqual(codes(Validator.dateRange({ from: '2026-06-22', to: '2026-09-21' }, ctx)), []);
+  assert.deepEqual(codes(Validator.dateRange({ from: '2026-06-21', to: '2026-09-21' }, ctx)), ['args.to:out_of_range']);
+  assert.deepEqual(codes(Validator.dateRange({ from: '2026-09-21', to: '2026-09-20' }, ctx)), ['args.to:invalid_range']);
+  assert.deepEqual(codes(Validator.dateRange({ from: '01/09/2026', to: '2026-02-30', days: 7 }, ctx)), ['args.days:unknown_field', 'args.from:invalid_date', 'args.to:invalid_date']);
+  assert.deepEqual(codes(Validator.dateRange({}, ctx)), ['args.from:required', 'args.to:required']);
+  assert.deepEqual(codes(Validator.dateRange([], ctx)), ['args:wrong_type']);
+  assert.match(Validator.dateRange({ from: '2026-01-01', to: '2026-09-21' }, ctx).errors[0].message, /no máximo 92 dias, recebido 264/);
+});

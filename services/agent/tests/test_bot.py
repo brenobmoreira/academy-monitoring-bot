@@ -24,6 +24,38 @@ def test_instruction_states_today_weekday_and_the_retry_rule():
     assert "ok=false" in text
 
 
+def test_instruction_lists_the_diary_history_tool_and_forbids_inventing_days():
+    text = instruction(NOW)
+    assert "get_diary_history" in text
+    assert "últimas 2 semanas" in text
+    assert "nunca invente" in text
+
+
+async def test_answers_a_history_question_from_the_diary_range():
+    history = {
+        "ok": True,
+        "result": {
+            "from": "2026-09-08",
+            "to": "2026-09-21",
+            "days": [
+                {"date": "2026-09-10", "weightKg": 83.0},
+                {"date": "2026-09-21", "weightKg": 82.4},
+            ],
+        },
+    }
+    sheet = FakeSheet(diary_range=[history])
+    answer = "Peso em 2 dias registrados: 83,0 (10/09) → 82,4 (21/09)."
+    b, llm = bot(
+        sheet,
+        [call("get_diary_history", date_from="2026-09-08", date_to="2026-09-21"), say(answer)],
+    )
+    assert await b.reply("como está meu peso nas últimas 2 semanas?") == answer
+    assert sheet.calls == [("diary.range", {"from": "2026-09-08", "to": "2026-09-21"})]
+    assert llm.requests[1].contents[-1].parts[0].function_response.response == history
+    tools = llm.requests[0].config.tools[0].function_declarations
+    assert "get_diary_history" in [t.name for t in tools]
+
+
 async def test_replies_with_the_confirmation_and_hides_a_bare_ok():
     sheet = FakeSheet(diary_upsert=[OK_DIARY])
     b, llm = bot(sheet, [call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}), say("ok")])

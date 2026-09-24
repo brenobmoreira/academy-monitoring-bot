@@ -198,6 +198,33 @@ const WorkoutRepo = {
     return latest;
   },
 
+  /**
+   * Log rows dated from..to (yyyy-MM-dd, inclusive), oldest first and in sheet order within a
+   * day. group comes from "Exercícios" (null when the name is not there); rir and pain are left
+   * out when empty; setsDone, volume and prescribedSets are null when empty.
+   */
+  range(from, to) {
+    const H = WorkoutRepo.HEADERS;
+    const groups = new Map(WorkoutPlan.catalogue().map((e) => [WorkoutPlan.normalize(e.name), e.group || null]));
+    const cell = (v) => (v === '' || v === undefined || v === null ? null : v);
+    return Sheets.readRows(WorkoutRepo.sheet_(), Config.headerRow())
+      .filter((r) => r[H.date] instanceof Date && String(r[H.exercise] || '').trim())
+      .map((r) => ({ r, date: Sheets.dayKey(r[H.date]) }))
+      .filter(({ date }) => date >= from && date <= to)
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.r.__row - b.r.__row))
+      .map(({ r, date }) => {
+        const exercise = String(r[H.exercise]).trim();
+        const row = {
+          date, session: String(r[H.session] || '').trim(), exercise,
+          group: groups.get(WorkoutPlan.normalize(exercise)) || null,
+          setsDone: cell(r[H.setsDone]), volume: cell(r[H.volume]), prescribedSets: cell(r[H.prescribedSets]),
+        };
+        if (cell(r[H.rir]) !== null) row.rir = r[H.rir];
+        if (cell(r[H.pain]) !== null) row.pain = r[H.pain];
+        return row;
+      });
+  },
+
   findExisting_(rows, date, session, exercise) {
     const H = WorkoutRepo.HEADERS;
     const key = Sheets.dayKey(date);

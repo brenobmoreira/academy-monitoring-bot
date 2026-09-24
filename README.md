@@ -21,7 +21,8 @@ repo.
 
 ```
 Telegram ──webhook──▶ Cloud Run function (Python, ADK agent + LiteLLM)
-                         │ tools: get_catalog, save_diary, save_workout, get_exercise_history
+                         │ tools: get_catalog, save_diary, save_workout, get_exercise_history,
+                         │        get_diary_history
                          │        └──POST JSON──▶ Apps Script Web App ──▶ Sheets
                          │             ◀── {ok, result} | {ok:false, errors[]}
                          └──▶ Telegram reply

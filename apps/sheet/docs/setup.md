@@ -82,6 +82,10 @@ A plain `clasp push` does not change what the URL serves.
 | `workout.upsert` | `{"date": "2026-09-21", "session": "Upper", "exercises": [{"name": "Supino inclinado", "sets": [{"kg": 60, "reps": 8}], "rir": 2}]}` |
 | `exercise.history` | `{"name": "Supino inclinado", "limit": 10}` |
 
+Each exercise in the `workout.upsert` result also carries `previous`: the date, sets, volume and
+sets done of its latest session before the written date, or `null`. The bot's confirmation
+compares against it.
+
 Nothing is coerced (`"82,4"` and `"sim"` are rejected), every error is reported at once, and a
 request with any error writes nothing. The full rules are in
 [`docs/specs/2026-09-22-python-agent-sheet-api-design.md`](../../../docs/specs/2026-09-22-python-agent-sheet-api-design.md).

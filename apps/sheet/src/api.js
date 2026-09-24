@@ -54,17 +54,10 @@ const SheetApi = {
       run: (args) => {
         const H = WorkoutRepo.HEADERS;
         const cell = (v) => (v === '' || v === undefined ? null : v);
-        const sessions = WorkoutRepo.history(args.name, args.limit).map((r) => {
-          const sets = [];
-          for (let n = 1; n <= Schema.MAX_SETS; n++) {
-            const reps = r[WorkoutRepo.repsHeader(n)];
-            if (reps !== '' && reps !== undefined) sets.push({ kg: Number(r[WorkoutRepo.kgHeader(n)]) || 0, reps: Number(reps) });
-          }
-          return {
-            date: Sheets.dayKey(r[H.date]), session: r[H.session], sets,
-            setsDone: cell(r[H.setsDone]), volume: cell(r[H.volume]), rir: cell(r[H.rir]), pain: cell(r[H.pain]),
-          };
-        });
+        const sessions = WorkoutRepo.history(args.name, args.limit).map((r) => ({
+          date: Sheets.dayKey(r[H.date]), session: r[H.session], sets: WorkoutRepo.loggedSets(r),
+          setsDone: cell(r[H.setsDone]), volume: cell(r[H.volume]), rir: cell(r[H.rir]), pain: cell(r[H.pain]),
+        }));
         return { name: args.name, sessions };
       },
     },

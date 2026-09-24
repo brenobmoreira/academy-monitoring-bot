@@ -93,7 +93,8 @@ const WorkoutRepo = {
   },
 
   /**
-   * Names are expected to be exact catalogue names (see Validator.workoutUpsert).
+   * Names are expected to be exact catalogue names (see Validator.workoutUpsert). Each saved
+   * exercise carries `previous`, its latest session before `date` (see previousSessions_).
    * @param {Date} date
    * @param {{session: string, phase?: string, exercises: Array}} workout
    * @returns {{phase: string, sessionId: string, rows: number[], exercises: Object[]}}
@@ -109,6 +110,7 @@ const WorkoutRepo = {
     const planVersion = WorkoutPlan.currentPlanVersion();
     const existing = Sheets.readRows(sheet, headerRow);
     const sessionId = WorkoutRepo.sessionId(date, workout.session);
+    const previous = WorkoutRepo.previousSessions_(existing, date);
     const result = { phase, sessionId, rows: [], exercises: [] };
 
     workout.exercises.forEach((ex) => {
@@ -149,6 +151,7 @@ const WorkoutRepo = {
       result.rows.push(row);
       const saved = { name: ex.name, row, sets: sets.map((set) => ({ kg: set.kg, reps: set.reps })), setsDone, volume };
       ['rir', 'pain', 'note', 'equipment'].forEach((k) => { if (ex[k] !== undefined) saved[k] = ex[k]; });
+      saved.previous = previous[WorkoutPlan.normalize(ex.name)] || null;
       result.exercises.push(saved);
     });
     return result;
@@ -162,6 +165,37 @@ const WorkoutRepo = {
       .filter((r) => r[H.date] instanceof Date && WorkoutPlan.normalize(r[H.exercise]) === key)
       .sort((a, b) => b[H.date] - a[H.date])
       .slice(0, limit);
+  },
+
+  /** Sets logged in a log row (reps filled), in set order; a blank load is bodyweight (kg 0). */
+  loggedSets(row) {
+    const sets = [];
+    for (let n = 1; n <= Schema.MAX_SETS; n++) {
+      const reps = row[WorkoutRepo.repsHeader(n)];
+      if (reps !== '' && reps !== undefined) sets.push({ kg: Number(row[WorkoutRepo.kgHeader(n)]) || 0, reps: Number(reps) });
+    }
+    return sets;
+  },
+
+  /**
+   * Latest session of every exercise strictly before `date`, from log rows read before the write,
+   * so a same-date rewrite never compares with itself. On a day logged twice (two sessions)
+   * the later row wins.
+   * @returns {Object<string, {date: string, sets: Object[], volume: ?number, setsDone: ?number}>} by normalized name
+   */
+  previousSessions_(rows, date) {
+    const H = WorkoutRepo.HEADERS;
+    const key = Sheets.dayKey(date);
+    const cell = (v) => (v === '' || v === undefined ? null : v);
+    const latest = {};
+    rows.forEach((r) => {
+      if (!(r[H.date] instanceof Date)) return;
+      const day = Sheets.dayKey(r[H.date]);
+      const name = WorkoutPlan.normalize(r[H.exercise]);
+      if (day >= key || (latest[name] && latest[name].date > day)) return;
+      latest[name] = { date: day, sets: WorkoutRepo.loggedSets(r), volume: cell(r[H.volume]), setsDone: cell(r[H.setsDone]) };
+    });
+    return latest;
   },
 
   findExisting_(rows, date, session, exercise) {

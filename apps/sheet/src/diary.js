@@ -39,4 +39,28 @@ const DiaryRepo = {
     });
     return { row, written };
   },
+
+  /**
+   * Diary fields of one day as API values (Sim/Não become booleans). Empty cells and columns
+   * missing from the header row are omitted, so a day without a row reads as {}.
+   * @param {Date} date
+   * @returns {Object}
+   */
+  read(date) {
+    const sheet = DiaryRepo.sheet_();
+    const headerRow = Config.headerRow();
+    const columns = Sheets.columnIndex(sheet, headerRow);
+    const dateCol = columns[Schema.DATE_HEADER];
+    if (!dateCol) throw new Error(`Header "${Schema.DATE_HEADER}" not found on row ${headerRow}`);
+    const row = Sheets.findRowByDate(sheet, headerRow + 1, dateCol, date);
+    if (!row) return {};
+    const line = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const fields = {};
+    Object.keys(Schema.DIARY_FIELDS).forEach((field) => {
+      const col = columns[Schema.DIARY_FIELDS[field].header];
+      const value = col ? Schema.fromCell(field, line[col - 1]) : undefined;
+      if (value !== undefined) fields[field] = value;
+    });
+    return fields;
+  },
 };

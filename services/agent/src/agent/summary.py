@@ -45,7 +45,8 @@ def _diary(group: dict[str, Any]) -> list[str]:
 
 
 def _workout(group: dict[str, Any]) -> list[str]:
-    lines = [f"{_day(group['date'])} · {group['session']} ({group['phase']}):"]
+    phase = f" ({group['phase']})" if group.get("phase") else ""  # hand-typed rows may lack it
+    lines = [f"{_day(group['date'])} · {group['session']}{phase}:"]
     for ex in group["exercises"].values():
         sets = " ".join(f"{_value(s['kg'])}×{s['reps']}" for s in ex["sets"])
         extras = [f"RIR {ex['rir']}"] if ex.get("rir") is not None else []

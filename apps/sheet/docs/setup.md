@@ -77,10 +77,11 @@ A plain `clasp push` does not change what the URL serves.
 
 | op | args |
 |----|------|
-| `catalog` | `{}` → today, time zone, current phase, sessions, exercises, plan |
+| `catalog` | `{}` → today, time zone, current phase, sessions, exercises, plan, `lastWorkout` (`{date, session}` of the most recent log row, or `null`) |
 | `diary.upsert` | `{"date": "2026-09-21", "fields": {"weightKg": 82.4, "sleepH": 7.5, "muayThai": true}}` |
 | `workout.upsert` | `{"date": "2026-09-21", "session": "Upper", "exercises": [{"name": "Supino inclinado", "sets": [{"kg": 60, "reps": 8}], "rir": 2}]}` |
 | `exercise.history` | `{"name": "Supino inclinado", "limit": 10}` |
+| `day.get` | `{"date": "2026-09-21"}` → `{date, diary: {weightKg: 82.4, muayThai: true, …}, workout: [{session, phase, exercises: [{name, sets, setsDone, volume, rir?, pain?}]}]}`; empty cells are left out, `Sim`/`Não` read back as `true`/`false` |
 
 Nothing is coerced (`"82,4"` and `"sim"` are rejected), every error is reported at once, and a
 request with any error writes nothing. The full rules are in

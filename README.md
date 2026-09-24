@@ -25,6 +25,7 @@ Telegram ──webhook──▶ Cloud Run function (Python, ADK agent + LiteLLM)
                          │        └──POST JSON──▶ Apps Script Web App ──▶ Sheets
                          │             ◀── {ok, result} | {ok:false, errors[]}
                          └──▶ Telegram reply
+                       /hoje, /ficha, /exercicios: read from the Sheet API, no model call
 
 Sheet menu "Registro" ──▶ Hoje screen ──▶ same validator ──▶ same repos ──▶ Sheets
 ```

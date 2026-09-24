@@ -8,7 +8,7 @@
 #                            Telegram sends it back in the X-Telegram-Bot-Api-Secret-Token header
 #
 # Usage:
-#   scripts/set-webhook.sh set     # register webhook
+#   scripts/set-webhook.sh set     # register webhook and the command menu
 #   scripts/set-webhook.sh info    # show current webhook
 #   scripts/set-webhook.sh delete  # remove webhook (needed before local polling)
 set -euo pipefail
@@ -16,6 +16,15 @@ set -euo pipefail
 cmd="${1:-info}"
 : "${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN}"
 api="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
+
+# Command menu, the same list `uv run agent-commands` sends from agent.commands.COMMANDS;
+# services/agent/tests/test_commands.py fails when the two differ.
+commands='[
+  {"command": "hoje", "description": "O que está registrado no dia: /hoje, /hoje ontem, /hoje 21/09"},
+  {"command": "ficha", "description": "Exercícios de uma sessão da ficha; sem nome, a próxima a fazer"},
+  {"command": "exercicios", "description": "Nomes exatos dos exercícios por grupo; /exercicios peito filtra"},
+  {"command": "help", "description": "Exemplos de mensagem e esta lista de comandos"}
+]'
 
 case "$cmd" in
   set)
@@ -26,6 +35,8 @@ case "$cmd" in
       --data-urlencode "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
       --data-urlencode "allowed_updates=[\"message\"]" \
       --data-urlencode "drop_pending_updates=true"
+    echo
+    curl -sS "${api}/setMyCommands" --data-urlencode "commands=${commands}"
     ;;
   info)   curl -sS "${api}/getWebhookInfo" ;;
   delete) curl -sS "${api}/deleteWebhook" ;;

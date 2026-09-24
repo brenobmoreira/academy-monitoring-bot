@@ -35,4 +35,15 @@ const Schema = {
   toCell(field, value) {
     return Schema.DIARY_FIELDS[field].type === 'boolean' ? (value ? Schema.YES : Schema.NO) : value;
   },
+
+  /** Inverse of toCell for reads: undefined for an empty cell or a yes/no cell holding anything else. */
+  fromCell(field, value) {
+    if (value === '' || value === null || value === undefined) return undefined;
+    const type = Schema.DIARY_FIELDS[field].type;
+    if (type === 'boolean') {
+      if (value === true || value === Schema.YES) return true;
+      return value === false || value === Schema.NO ? false : undefined;
+    }
+    return type === 'text' ? String(value) : value;
+  },
 };

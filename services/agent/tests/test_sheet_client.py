@@ -85,3 +85,17 @@ async def test_transport_failures_become_unavailable_errors():
 
     res = await client(handler).catalog()
     assert res["errors"][0]["code"] == "unavailable"
+
+
+async def test_day_reads_one_date():
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"ok": True, "result": {"date": "2026-09-21", "diary": {}, "workout": []}}
+        )
+
+    res = await client(handler).day("2026-09-21")
+    assert seen["body"] == {"key": "k", "op": "day.get", "args": {"date": "2026-09-21"}}
+    assert res["result"]["workout"] == []

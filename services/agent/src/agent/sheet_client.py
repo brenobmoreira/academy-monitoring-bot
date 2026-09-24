@@ -65,6 +65,9 @@ class SheetClient:
             args["limit"] = limit
         return await self.call("exercise.history", args)
 
+    async def day(self, date: str) -> Response:
+        return await self.call("day.get", {"date": date})
+
 
 def _unavailable(message: str) -> Response:
     return {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": message}]}

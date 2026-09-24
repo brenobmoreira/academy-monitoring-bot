@@ -69,6 +69,14 @@ const Validator = {
     return c.result({ name: args.name, limit: args.limit === undefined ? 10 : args.limit });
   },
 
+  dayGet(args, ctx) {
+    const c = new Checker_();
+    if (!c.object(args, 'args')) return c.result(null);
+    c.onlyKeys(args, 'args', ['date']);
+    c.date(args.date, 'args.date', ctx.today);
+    return c.result({ date: args.date });
+  },
+
   sets_(c, sets, path) {
     if (sets === undefined) { c.add(path, 'required', 'campo obrigatório'); return; }
     if (!Array.isArray(sets)) { c.add(path, 'wrong_type', `esperado lista, recebido ${Checker_.show(sets)}`); return; }

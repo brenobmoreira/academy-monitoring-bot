@@ -33,6 +33,11 @@ class TelegramClient:
     async def send_message(self, chat_id: int, text: str) -> None:
         await self._call("sendMessage", {"chat_id": chat_id, "text": text[:MAX_TEXT]})
 
+    async def set_my_commands(self, commands: list[tuple[str, str]]) -> None:
+        """Replaces the command menu Telegram shows: (name without the slash, description)."""
+        payload = [{"command": name, "description": description} for name, description in commands]
+        await self._call("setMyCommands", {"commands": payload})
+
     async def get_updates(self, offset: int | None = None, wait: int = 50) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {"timeout": wait, "allowed_updates": ["message"]}
         if offset is not None:

@@ -18,6 +18,7 @@ Keep these values at hand as you go; none of them belongs in the repo:
 | `TELEGRAM_BOT_TOKEN` | BotFather | the agent, `set-webhook.sh` |
 | chat id (`ALLOWED_CHAT_IDS`) | `getUpdates` | the agent |
 | `TELEGRAM_WEBHOOK_SECRET` | `openssl rand -hex 24` | Cloud Run and `set-webhook.sh` |
+| `REMINDER_TOKEN` (optional) | `openssl rand -hex 24` | Cloud Run and the Cloud Scheduler jobs |
 
 ## 1. Apps Script in the spreadsheet
 
@@ -122,5 +123,12 @@ error; nothing is written in that case.
    `telegram_webhook`; in the generated Cloud Build trigger set **Included files filter** to
    `services/agent/**`. From then on, every push to `main` that touches the agent redeploys it.
 
+5. Optional reminders: a nightly "Faltou registrar hoje: …" when weight, sleep or steps are
+   missing, and the weekly summary on Sunday evening. Follow **Reminder jobs** in
+   [`services/agent/README.md`](../../services/agent/README.md): the `REMINDER_TOKEN` secret and
+   two Cloud Scheduler jobs calling `POST /remind`. Skip it and the bot only answers messages.
+
 **Check** — repeat the two messages from stage 3 with polling stopped. Nothing back? Cloud Run →
-the function's **Logs**, and Apps Script → **Executions** for `doPost`.
+the function's **Logs**, and Apps Script → **Executions** for `doPost`. With the reminders:
+`gcloud scheduler jobs run agent-remind-weekly --location us-central1` → the week's summary in
+the chat.

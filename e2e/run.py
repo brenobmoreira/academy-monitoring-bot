@@ -12,6 +12,8 @@ code (apps/sheet/src) running in Node.
 What is mocked: the Telegram Bot API (replies are captured), the spreadsheet (in-memory fake with
 the test fixtures' tabs), and — without --real — the provider behind LiteLLM, which replays a
 fixed script with two rejected payloads so the correction loop shows up in the trace.
+After the message, the same entry point gets `POST /remind {"kind":"daily"}` (F12): the message
+logged weight and sleep, so the reminder asks for the steps.
 
 The trace is written to e2e/out/run-<timestamp>.json.
 """
@@ -40,7 +42,7 @@ from litellm import ModelResponse
 from starlette.testclient import TestClient
 from werkzeug.test import EnvironBuilder
 
-from agent import asgi, main, webhook
+from agent import asgi, main, reminder, webhook
 from agent import handler as handler_module
 from agent.bot import Bot
 from agent.llm import build_model
@@ -53,6 +55,7 @@ TZ = ZoneInfo("America/Sao_Paulo")
 CHAT_ID = 42
 SHEET_KEY = "local-sheet-key"
 WEBHOOK_SECRET = "local-webhook-secret"
+REMINDER_TOKEN = "local-reminder-token"
 DEFAULT_MESSAGE = "peso 82,4 dormi 7h30. upper: supino inclinado 60x8 62,5x8 rir 2, puxada 50x10 50x9"
 
 timeline: list[dict[str, Any]] = []
@@ -196,11 +199,13 @@ def require_model_credentials(settings: Settings) -> None:
         sys.exit(f"--real needs LLM_API_KEY for {settings.LLM_MODEL} in {ENV_FILE.relative_to(ROOT)}")
 
 
-def post_webhook(server: str, headers: dict[str, str], update: dict[str, Any]) -> tuple[str, int]:
+def post_webhook(
+    server: str, headers: dict[str, str], body: dict[str, Any], path: str = "/"
+) -> tuple[str, int]:
     if server == "uvicorn":
-        response = TestClient(asgi.app).post("/", headers=headers, json=update)
+        response = TestClient(asgi.app).post(path, headers=headers, json=body)
         return response.text, response.status_code
-    environ = EnvironBuilder(method="POST", headers=headers, json=update).get_environ()
+    environ = EnvironBuilder(path=path, method="POST", headers=headers, json=body).get_environ()
     return main.telegram_webhook(Request(environ))
 
 
@@ -232,6 +237,7 @@ def main_run() -> None:
             SHEET_API_URL=sheet_url,
             SHEET_API_KEY=SHEET_KEY,
             TELEGRAM_WEBHOOK_SECRET=WEBHOOK_SECRET,
+            REMINDER_TOKEN=REMINDER_TOKEN,
         )
         webhook.get_settings.cache_clear()
         settings = webhook.get_settings()
@@ -242,6 +248,7 @@ def main_run() -> None:
         llm = RecordingLlm(model=inner.model, inner=inner)
         handler_module.Bot = lambda sheet, _model, **kw: Bot(sheet, llm, **kw)  # type: ignore[assignment]
         webhook.handle_update = handle_with_mocks  # type: ignore[assignment]
+        reminder.http_client = lambda: httpx.AsyncClient(transport=RoutingTransport())
 
         update = {
             "update_id": 1001,
@@ -257,6 +264,13 @@ def main_run() -> None:
         started = time.monotonic()
         body, status = post_webhook(args.server, headers, update)
         elapsed = round(time.monotonic() - started, 2)
+        # The daily reminder right after: the message logged weight and sleep, so it asks for steps.
+        before_reminder = len(timeline)
+        remind_headers = {reminder.TOKEN_HEADER: REMINDER_TOKEN}
+        remind_body = {"kind": "daily"}
+        remind_text, remind_status = post_webhook(args.server, remind_headers, remind_body, reminder.PATH)
+        reminder_steps = timeline[before_reminder:]
+        del timeline[before_reminder:]
         sheets = httpx.get(sheet_url + "__sheets").json()
     finally:
         proc.kill()
@@ -278,6 +292,11 @@ def main_run() -> None:
             "response": {"status": status, "body": body},
         },
         "timeline": timeline,
+        "reminder": {
+            "request": {"path": reminder.PATH, "headers": remind_headers, "json": remind_body},
+            "response": {"status": remind_status, "body": remind_text},
+            "timeline": reminder_steps,
+        },
         "reply_sent_to_telegram": reply.splitlines() if reply else None,
         "sheet_after": sheets,
     }
@@ -289,6 +308,8 @@ def main_run() -> None:
     print(f"webhook → {status} {body} in {elapsed}s")
     print(f"llm calls: {kinds.count('llm')} · sheet api calls: {kinds.count('sheet_api')}")
     print("reply:\n  " + (reply or "(none)").replace("\n", "\n  "))
+    reminded = [t["body"]["text"] for t in reminder_steps if t["kind"] == "telegram_reply"]
+    print(f"remind daily → {remind_status} {remind_text}: " + (" / ".join(reminded) or "(no message)"))
     print(f"trace: {path.relative_to(ROOT)}")
 
 

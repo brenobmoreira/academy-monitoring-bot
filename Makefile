@@ -7,12 +7,13 @@ SHEET := apps/sheet
 HOST ?= 127.0.0.1
 PORT ?= 8080
 E2E_ARGS ?=
+KIND ?= daily
 CLASP ?= clasp
 
 .DEFAULT_GOAL := help
 
 .PHONY: help install test test-sheet test-agent lint fmt e2e poll serve \
-	webhook-set webhook-info webhook-delete commands push-sheet
+	webhook-set webhook-info webhook-delete commands push-sheet remind
 
 help: ## List the targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-z0-9-]+:.*## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -46,6 +47,11 @@ poll: ## Run the bot with local long polling (needs services/agent/.env; delete 
 
 serve: ## Serve the ASGI webhook app with uvicorn (HOST=127.0.0.1 PORT=8080)
 	cd $(AGENT) && uv run uvicorn agent.asgi:app --host $(HOST) --port $(PORT)
+
+remind: ## POST /remind to the local server (KIND=daily|weekly; REMINDER_TOKEN from env or services/agent/.env)
+	@token="$${REMINDER_TOKEN:-$$(sed -n 's/^REMINDER_TOKEN=//p' $(AGENT)/.env 2>/dev/null)}"; \
+	curl -sS -X POST http://$(HOST):$(PORT)/remind -H "X-Reminder-Token: $$token" \
+	  -H 'Content-Type: application/json' -d '{"kind":"$(KIND)"}'; echo
 
 webhook-set: ## Register the Telegram webhook (env: TELEGRAM_BOT_TOKEN, AGENT_URL, TELEGRAM_WEBHOOK_SECRET)
 	scripts/set-webhook.sh set

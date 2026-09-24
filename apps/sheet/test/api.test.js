@@ -67,7 +67,7 @@ test('workout.upsert fills prescription columns and returns rows per exercise', 
   ] }));
   assert.deepEqual(res.result, {
     date: '2026-09-21', session: 'Upper', phase: 'Adaptação', sessionId: '2026-09-21/Upper',
-    exercises: [{ name: 'Supino inclinado', row: 6, sets: [{ kg: 60, reps: 8 }, { kg: 62.5, reps: 8 }], setsDone: 2, volume: 980, rir: 2 }],
+    exercises: [{ name: 'Supino inclinado', row: 6, sets: [{ kg: 60, reps: 8 }, { kg: 62.5, reps: 8 }], setsDone: 2, volume: 980, rir: 2, previous: null }],
   });
   assert.equal(workoutCell(ctx, 6, 'Séries prescritas'), 2);
   assert.equal(workoutCell(ctx, 6, 'Fase'), 'Adaptação');

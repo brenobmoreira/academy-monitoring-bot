@@ -53,3 +53,45 @@ def test_merges_repeated_writes_of_the_same_day_and_session():
 
 def test_nothing_written_gives_no_lines():
     assert confirmation([]) == []
+
+
+PREVIOUS = {
+    "date": "2026-09-18",
+    "sets": [{"kg": 60, "reps": 8}, {"kg": 60, "reps": 7}],
+    "volume": 900,
+    "setsDone": 2,
+}
+
+
+def supino(sets, previous, **extra):
+    exercise = {"name": "Supino inclinado", "row": 6, "sets": sets, "previous": previous, **extra}
+    return confirmation([("workout.upsert", {**WORKOUT[1], "exercises": [exercise]})])[1]
+
+
+def test_compares_each_exercise_with_its_previous_session():
+    heavier = [{"kg": 60, "reps": 8}, {"kg": 62, "reps": 8}]
+    assert supino(heavier, PREVIOUS, volume=976, rir=2) == (
+        "• Supino inclinado 60×8 62×8 (RIR 2) · vs 18/09: 60×8 60×7, carga +2 kg, volume +76"
+    )
+    lighter = [{"kg": 57.5, "reps": 10}, {"kg": 57.5, "reps": 10}]
+    assert supino(lighter, PREVIOUS, volume=1150) == (
+        "• Supino inclinado 57,5×10 57,5×10 · vs 18/09: 60×8 60×7, carga -2,5 kg, volume +250"
+    )
+    assert supino(PREVIOUS["sets"], PREVIOUS, volume=900).endswith(": 60×8 60×7, carga igual, volume igual")
+
+
+def test_volume_falls_back_to_the_sets_when_not_reported():
+    assert supino([{"kg": 50, "reps": 10}], {**PREVIOUS, "volume": None}).endswith(
+        "carga -10 kg, volume -400"
+    )
+
+
+def test_bodyweight_compares_total_reps():
+    previous = {"date": "2026-09-18", "sets": [{"kg": 0, "reps": 12}, {"kg": 0, "reps": 10}], "volume": 0}
+    assert supino([{"kg": 0, "reps": 12}, {"kg": 0, "reps": 12}], previous, volume=0) == (
+        "• Supino inclinado 0×12 0×12 · vs 18/09: 0×12 0×10, reps +2"
+    )
+
+
+def test_no_previous_session_adds_nothing():
+    assert supino([{"kg": 60, "reps": 8}], None) == "• Supino inclinado 60×8"

@@ -20,7 +20,7 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `llm.py` | `build_model`: the LiteLLM model from `LLM_MODEL`, `LLM_API_KEY`, `LLM_API_BASE` |
 | `sheet_client.py` | Calls the sheet API; network failures become `{ok:false, errors:[{code:"unavailable"}]}` |
 | `tools.py` | ADK tools; return the API body as-is so the model fixes rejected payloads |
-| `summary.py` | Confirmation text built from what the sheet reports it wrote |
+| `summary.py` | Confirmation text built from what the sheet reports it wrote, each exercise compared with its previous session |
 | `bot.py` | Instruction, one ADK run per message, `MAX_LLM_CALLS` budget |
 | `telegram.py` | `sendMessage`, `getUpdates` |
 | `handler.py` | Allowlist, `/start`, run the bot, reply; never raises |

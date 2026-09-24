@@ -85,8 +85,7 @@ async def daily(sheet: CommandSheet, today: date) -> Reply | None:
 
 async def weekly(sheet: CommandSheet, today: date) -> Reply:
     reply = await week_text(sheet, today - timedelta(days=6), today)
-    # week_text maps a sheet failure to a plain-text warning; its summary is always HTML.
-    if not reply.html:
+    if reply.failed:
         raise SheetDown(reply.text)
     return reply
 

@@ -222,8 +222,8 @@ checks: token unset → 404, wrong/missing token → 403, body not `{"kind": "da
   is missing.
 - Weekly covers `today − 6 … today`; the Sunday job therefore sends Mon–Sun. A week without data
   still sends "Sem registros na semana …" (a useful nudge, not an error).
-- A sheet failure (daily `day.get` not ok; weekly detected by `week_text` returning a plain-text
-  reply, since its summary is always HTML) is logged and sends nothing to anyone.
+- A sheet failure (daily `day.get` not ok; weekly by `Reply.failed`, which `sheet_failure` sets) is
+  logged and sends nothing to anyone.
 - Chats are sent in ascending id order, each in `format.split` chunks as HTML; a failing chat is
   logged and skipped. Answer: `sent N`, `sent N of M`, `nothing to send` (also after a sheet
   failure), or 502 `sent 0 of M` when there was something to send and no chat got it, so the

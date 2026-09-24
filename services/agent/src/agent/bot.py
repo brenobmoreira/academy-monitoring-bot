@@ -16,6 +16,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
+from agent.format import escape
 from agent.summary import confirmation
 from agent.tools import Journal, SheetApi, build_tools
 
@@ -146,9 +147,11 @@ class Bot:
 
 
 def compose(lines: list[str], model_text: str, note: str = "") -> str:
+    """The HTML reply: confirmation lines (already HTML), then the escaped model text and the note."""
     text = model_text.strip()
     if lines and text.lower().rstrip(".!") == "ok":
         text = ""
+    text = escape(text)
     blocks = ["\n".join(lines)] if lines else []
     blocks += [b for b in (text, note) if b]
     return "\n\n".join(blocks) or "Nada gravado."

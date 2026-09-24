@@ -1,8 +1,13 @@
-"""Confirmation text built from what the sheet API reports it wrote, never from model output."""
+"""Confirmation text built from what the sheet API reports it wrote, never from model output.
+
+The lines are Telegram HTML: every value that came from the sheet is escaped.
+"""
 
 from __future__ import annotations
 
 from typing import Any
+
+from agent.format import bold, escape
 
 LABELS = {
     "weightKg": "Peso kg",
@@ -40,18 +45,22 @@ def confirmation(writes: list[Write]) -> list[str]:
 
 
 def _diary(group: dict[str, Any]) -> list[str]:
-    parts = [f"{LABELS.get(k, k)} {_value(v)}" for k, v in group["fields"].items()]
-    return [" · ".join([_day(group["date"]), *parts])]
+    parts = [f"{escape(LABELS.get(k, k))} {_value(v)}" for k, v in group["fields"].items()]
+    return [" · ".join([bold(_day(group["date"])), *parts])]
 
 
 def _workout(group: dict[str, Any]) -> list[str]:
-    lines = [f"{_day(group['date'])} · {group['session']} ({group['phase']}):"]
+    lines = [bold(f"{_day(group['date'])} · {escape(group['session'])} ({escape(group['phase'])}):")]
     for ex in group["exercises"].values():
         sets = _sets(ex["sets"])
-        extras = [f"RIR {ex['rir']}"] if ex.get("rir") is not None else []
+        extras = [f"RIR {escape(ex['rir'])}"] if ex.get("rir") is not None else []
         if ex.get("pain") is not None:
-            extras.append(f"dor {ex['pain']}")
-        lines.append(f"• {ex['name']} {sets}" + (f" ({', '.join(extras)})" if extras else "") + _versus(ex))
+            extras.append(f"dor {escape(ex['pain'])}")
+        lines.append(
+            f"• {bold(escape(ex['name']))} {sets}"
+            + (f" ({', '.join(extras)})" if extras else "")
+            + _versus(ex)
+        )
     return lines
 
 
@@ -95,7 +104,7 @@ def _delta(diff: float, unit: str = "") -> str:
 
 
 def _day(ymd: str) -> str:
-    return f"{ymd[8:10]}/{ymd[5:7]}"
+    return escape(f"{ymd[8:10]}/{ymd[5:7]}")
 
 
 def _value(v: Any) -> str:
@@ -103,4 +112,4 @@ def _value(v: Any) -> str:
         return "Sim" if v else "Não"
     if isinstance(v, float) and v.is_integer():
         v = int(v)
-    return str(v).replace(".", ",") if isinstance(v, int | float) else str(v)
+    return str(v).replace(".", ",") if isinstance(v, int | float) else escape(v)

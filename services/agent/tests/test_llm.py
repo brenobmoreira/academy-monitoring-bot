@@ -73,7 +73,7 @@ async def test_a_rejected_payload_goes_back_to_the_model_through_litellm():
     reply = await Bot(sheet, build_model(settings(), client=client), timezone="America/Sao_Paulo").reply(
         "dormi 7h30"
     )
-    assert reply == "22/09 · Sono h 7,5"
+    assert reply == "<b>22/09</b> · Sono h 7,5"
     tool_message = client.requests[1]["messages"][-1]
     assert tool_message["role"] == "tool"
     assert json.loads(tool_message["content"]) == rejected
@@ -86,4 +86,4 @@ async def test_a_litellm_timeout_is_reported_after_what_was_written():
             litellm.Timeout("timed out", model="claude-sonnet-5", llm_provider="anthropic"),
         ]
     )
-    assert await run(build_model(settings(), client=client)) == f"21/09 · Peso kg 82,4\n\n{MODEL_FAILED}"
+    assert await run(build_model(settings(), client=client)) == f"<b>21/09</b> · Peso kg 82,4\n\n{MODEL_FAILED}"

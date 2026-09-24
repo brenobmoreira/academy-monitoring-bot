@@ -27,7 +27,7 @@ def test_instruction_states_today_weekday_and_the_retry_rule():
 async def test_replies_with_the_confirmation_and_hides_a_bare_ok():
     sheet = FakeSheet(diary_upsert=[OK_DIARY])
     b, llm = bot(sheet, [call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}), say("ok")])
-    assert await b.reply("peso 82,4") == "21/09 · Peso kg 82,4"
+    assert await b.reply("peso 82,4") == "<b>21/09</b> · Peso kg 82,4"
     assert "2026-09-21" in llm.requests[0].config.system_instruction
 
 
@@ -46,7 +46,7 @@ async def test_fixes_the_payload_after_the_sheet_rejects_it():
             say("ok"),
         ],
     )
-    assert await b.reply("dormi 7h30") == "21/09 · Sono h 7,5"
+    assert await b.reply("dormi 7h30") == "<b>21/09</b> · Sono h 7,5"
     assert [args["fields"] for _, args in sheet.calls] == [{"sleepH": "7h30"}, {"sleepH": 7.5}]
     assert llm.requests[1].contents[-1].parts[0].function_response.response == rejected
 
@@ -62,7 +62,7 @@ async def test_model_notes_follow_the_confirmation():
     )
     assert (
         await b.reply("peso 82,4, remada 40x10")
-        == "21/09 · Peso kg 82,4\n\nRemada curvada não está no catálogo."
+        == "<b>21/09</b> · Peso kg 82,4\n\nRemada curvada não está no catálogo."
     )
 
 
@@ -74,7 +74,7 @@ async def test_call_budget_stops_the_loop_and_reports_what_was_saved():
     ] * 5
     b, _ = bot(sheet, script, max_llm_calls=3)
     reply = await b.reply("peso 82,4 dormi 7")
-    assert reply.startswith("21/09 · Peso kg 82,4")
+    assert reply.startswith("<b>21/09</b> · Peso kg 82,4")
     assert "limite de tentativas" in reply
 
 
@@ -91,7 +91,7 @@ async def test_model_failure_after_a_write_keeps_the_confirmation():
     b, _ = bot(
         sheet, [call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}), TimeoutError("slow")]
     )
-    assert await b.reply("peso 82,4") == f"21/09 · Peso kg 82,4\n\n{MODEL_FAILED}"
+    assert await b.reply("peso 82,4") == f"<b>21/09</b> · Peso kg 82,4\n\n{MODEL_FAILED}"
 
 
 async def test_model_failure_before_any_write_says_nothing_was_saved(sheet):
@@ -128,7 +128,7 @@ async def test_sheet_outage_after_a_write_shows_the_confirmation_and_the_model_t
     )
     assert (
         await b.reply("peso 82,4, upper")
-        == "21/09 · Peso kg 82,4\n\nA planilha não respondeu ao gravar o treino."
+        == "<b>21/09</b> · Peso kg 82,4\n\nA planilha não respondeu ao gravar o treino."
     )
 
 
@@ -140,3 +140,8 @@ async def test_other_errors_reach_the_handler():
     b, _ = bot(BrokenSheet(), [call("save_diary", date="2026-09-21", fields={"weightKg": 82.4})])
     with pytest.raises(ValueError, match="bug"):
         await b.reply("peso 82,4")
+
+
+async def test_model_text_is_escaped_for_html(sheet):
+    b, _ = bot(sheet, [say("Use <b>kg</b> & reps")])
+    assert await b.reply("oi") == "Use &lt;b&gt;kg&lt;/b&gt; &amp; reps"

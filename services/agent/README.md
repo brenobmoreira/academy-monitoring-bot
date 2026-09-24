@@ -20,10 +20,11 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `llm.py` | `build_model`: the LiteLLM model from `LLM_MODEL`, `LLM_API_KEY`, `LLM_API_BASE` |
 | `sheet_client.py` | Calls the sheet API; network failures become `{ok:false, errors:[{code:"unavailable"}]}` |
 | `tools.py` | ADK tools; return the API body as-is so the model fixes rejected payloads; `Journal` of writes and error codes |
-| `summary.py` | Confirmation text built from what the sheet reports it wrote, each exercise compared with its previous session |
-| `bot.py` | Instruction, one ADK run per message, `MAX_LLM_CALLS` budget, failure replies |
-| `telegram.py` | `sendMessage`, `sendChatAction`, `getUpdates` |
-| `handler.py` | Allowlist, `/start`, run the bot while showing "typing…" (re-sent every 4 s), reply; never raises |
+| `format.py` | Telegram HTML: `escape`, `bold`, `split` (≤ 4096 chars, cut on line boundaries) |
+| `summary.py` | Confirmation text built from what the sheet reports it wrote (HTML; bold date/session and exercise names), each exercise compared with its previous session |
+| `bot.py` | Instruction, one ADK run per message, `MAX_LLM_CALLS` budget, failure replies; the model's text is escaped |
+| `telegram.py` | `sendMessage` (optional `parse_mode=HTML`, `reply_markup`, reply-to; returns the sent Message), `sendChatAction`, `getUpdates` |
+| `handler.py` | Allowlist, `/start`, run the bot while showing "typing…" (re-sent every 4 s), reply as HTML in as many messages as needed; never raises |
 | `webhook.py` | What every HTTP entry does: `X-Telegram-Bot-Api-Secret-Token` check, hand the update over |
 | `main.py` (+ root `main.py` shim) | Functions Framework entry — Cloud Run functions |
 | `asgi.py` | ASGI app — uvicorn in any container; `GET /healthz` (`make serve`) |
@@ -202,6 +203,6 @@ uv export --no-dev --no-emit-project --no-hashes --format requirements-txt -o re
 
 ## Smoke test
 
-Send `peso 82,4 dormi 7h30` to the bot → `21/09 · Peso kg 82,4 · Sono h 7,5` and today's row in
+Send `peso 82,4 dormi 7h30` to the bot → `21/09 · Peso kg 82,4 · Sono h 7,5` (date in bold) and today's row in
 `Diário`. Send `upper: supino inclinado 60x8 62x8 rir 2` → a row in `Registro de treino`.
 Nothing back? Cloud Run → Logs for the function, and Apps Script → Executions for `doPost`.

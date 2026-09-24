@@ -87,6 +87,14 @@ const Validator = {
     return c.result({ from: args.from, to: args.to });
   },
 
+  writeUndo(args) {
+    const c = new Checker_();
+    if (!c.object(args, 'args')) return c.result(null);
+    c.onlyKeys(args, 'args', ['writeId']);
+    if (args.writeId !== undefined) c.value(args.writeId, 'args.writeId', { type: 'text', maxLength: 20 });
+    return c.result({ writeId: args.writeId });
+  },
+
   sets_(c, sets, path) {
     if (sets === undefined) { c.add(path, 'required', 'campo obrigatório'); return; }
     if (!Array.isArray(sets)) { c.add(path, 'wrong_type', `esperado lista, recebido ${Checker_.show(sets)}`); return; }

@@ -4,6 +4,8 @@ import pytest
 
 from agent.handler import HELP, Handler
 
+from .fakes import FakeSheet
+
 pytestmark = pytest.mark.unit
 
 
@@ -132,3 +134,23 @@ async def test_a_failing_typing_action_does_not_affect_the_reply():
     await Handler({42}, bot, tg, typing_every=0.01).handle_update(update())
     assert tg.actions == [(42, "typing")]  # gives up after the first failure
     assert tg.sent == [(42, "ok")]
+
+
+async def test_desfazer_undoes_through_the_sheet_without_the_model():
+    undone = {"op": "diary.upsert", "date": "2026-09-24", "fields": ["weightKg"]}
+    sheet = FakeSheet(write_undo=[{"ok": True, "result": {"writeId": "w1", "undone": undone}}])
+    bot, tg = FakeBot(), FakeTelegram()
+    await Handler({42}, bot, tg, sheet=sheet).handle_update(update("/desfazer@fitness_bot"))
+    assert bot.texts == []
+    assert sheet.calls == [("write.undo", {})]
+    assert tg.sent == [(42, "↩️ Desfeito: 24/09 · Diário (Peso kg)")]
+
+
+async def test_desfazer_failures_become_the_short_warning():
+    class BrokenSheet:
+        async def undo(self, write_id=None):
+            raise RuntimeError("boom")
+
+    tg = FakeTelegram()
+    await Handler({42}, FakeBot(), tg, sheet=BrokenSheet()).handle_update(update("/desfazer"))
+    assert tg.sent[0][1].startswith("⚠")

@@ -96,3 +96,12 @@ def test_rejected_payloads_are_not_a_sheet_failure():
     journal.check({"ok": False})
     assert journal.error_codes == ["invalid_date"]
     assert not journal.sheet_failed
+
+
+def test_journal_lists_the_write_ids_of_the_message_in_order():
+    journal = Journal()
+    journal.record("diary.upsert", {"ok": True, "result": {"date": "2026-09-21", "writeId": "a1"}})
+    journal.record("workout.upsert", {"ok": False, "errors": []})
+    journal.record("workout.upsert", {"ok": True, "result": {"date": "2026-09-21", "writeId": "b2"}})
+    journal.record("diary.upsert", {"ok": True, "result": {"date": "2026-09-21"}})
+    assert journal.write_ids == ["a1", "b2"]

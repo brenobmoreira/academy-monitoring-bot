@@ -71,6 +71,9 @@ class SheetClient:
     async def workout_range(self, date_from: str, date_to: str) -> Response:
         return await self.call("workout.range", {"from": date_from, "to": date_to})
 
+    async def undo(self, write_id: str | None = None) -> Response:
+        return await self.call("write.undo", {} if write_id is None else {"writeId": write_id})
+
 
 def _unavailable(message: str) -> Response:
     return {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": message}]}

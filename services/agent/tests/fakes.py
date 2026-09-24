@@ -45,6 +45,9 @@ class FakeSheet:
     async def workout_range(self, date_from, date_to):
         return self._next("workout.range", {"from": date_from, "to": date_to})
 
+    async def undo(self, write_id=None):
+        return self._next("write.undo", {} if write_id is None else {"writeId": write_id})
+
 
 class ScriptedLlm(BaseLlm):
     """Replays model turns in order (an exception in the script is raised) and keeps every

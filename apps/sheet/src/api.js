@@ -33,10 +33,12 @@ const SheetApi = {
       write: true,
       validate: (args, ctx) => Validator.diaryUpsert(args, ctx),
       run: (args) => {
-        const r = DiaryRepo.upsert(Sheets.localDate(args.date), args.fields);
+        const capture = UndoLog.capture();
+        const r = DiaryRepo.upsert(Sheets.localDate(args.date), args.fields, capture);
         const fields = {};
         r.written.forEach((f) => { fields[f] = args.fields[f]; });
-        return { date: args.date, row: r.row, fields };
+        const writeId = UndoLog.record(capture, { op: 'diary.upsert', date: args.date, fields: r.written });
+        return { date: args.date, row: r.row, fields, ...(writeId ? { writeId } : {}) };
       },
     },
     'workout.upsert': {
@@ -44,9 +46,18 @@ const SheetApi = {
       validate: (args, ctx) => Validator.workoutUpsert(args, ctx),
       run: (args) => {
         const phase = args.phase || HojeScreen.currentPhase() || Schema.DEFAULT_PHASE;
-        const r = WorkoutRepo.saveSession(Sheets.localDate(args.date), { ...args, phase });
-        return { date: args.date, session: args.session, phase: r.phase, sessionId: r.sessionId, exercises: r.exercises };
+        const capture = UndoLog.capture();
+        const r = WorkoutRepo.saveSession(Sheets.localDate(args.date), { ...args, phase }, capture);
+        const writeId = UndoLog.record(capture, {
+          op: 'workout.upsert', date: args.date, session: args.session, exercises: r.exercises.map((ex) => ex.name),
+        });
+        return { date: args.date, session: args.session, phase: r.phase, sessionId: r.sessionId, exercises: r.exercises, ...(writeId ? { writeId } : {}) };
       },
+    },
+    'write.undo': {
+      write: true,
+      validate: (args) => Validator.writeUndo(args),
+      run: (args) => UndoLog.undo(args.writeId),
     },
     'exercise.history': {
       write: false,
@@ -98,7 +109,11 @@ const SheetApi = {
     return SheetApi.run(request.op, request.args === undefined ? {} : request.args);
   },
 
-  /** In-process entry (sheet menu, tests): validate, lock for writes, run. */
+  /**
+   * In-process entry (sheet menu, tests): validate, lock for writes, run. An op refuses with
+   * {ok: false} by throwing an error that carries `apiErrors` (see UndoLog.error_).
+   * The menu's writes go through here too, so they enter the undo log like the agent's.
+   */
   run(op, args) {
     const spec = Object.prototype.hasOwnProperty.call(SheetApi.OPS, op) ? SheetApi.OPS[op] : null;
     if (!spec) return SheetApi.fail_('op', 'unknown_op', `operação desconhecida ${JSON.stringify(op)}; aceitas: ${Object.keys(SheetApi.OPS).join(', ')}`);
@@ -113,6 +128,7 @@ const SheetApi = {
       }
       return { ok: true, result: spec.run(valid) };
     } catch (err) {
+      if (err.apiErrors) return { ok: false, errors: err.apiErrors };
       console.error(err);
       return SheetApi.fail_('', 'internal', err.message);
     } finally {

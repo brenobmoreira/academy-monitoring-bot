@@ -63,7 +63,7 @@ credentials, so the API key in the body is what authenticates it. The URL is
 Every later change:
 
 ```bash
-clasp push
+clasp push                                 # or, from the repo root: make push-sheet
 clasp deploy -i <deploymentId> -d "note"   # same URL, new code
 ```
 
@@ -100,3 +100,5 @@ curl -sL -H 'Content-Type: application/json' \
 npm test        # Node built-in test runner against Apps Script fakes (no network, no Google)
 npm run check   # syntax check of src/
 ```
+
+`make test-sheet` runs `npm test`; `make lint` includes `npm run check`.

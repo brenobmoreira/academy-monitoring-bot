@@ -26,8 +26,8 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `handler.py` | Allowlist, `/start`, run the bot, reply; never raises |
 | `webhook.py` | What every HTTP entry does: `X-Telegram-Bot-Api-Secret-Token` check, hand the update over |
 | `main.py` (+ root `main.py` shim) | Functions Framework entry — Cloud Run functions |
-| `asgi.py` | ASGI app — uvicorn in any container; `GET /healthz` |
-| `poll.py` | Local long polling (`uv run agent-poll`) |
+| `asgi.py` | ASGI app — uvicorn in any container; `GET /healthz` (`make serve`) |
+| `poll.py` | Local long polling (`uv run agent-poll`, `make poll`) |
 
 ## Configuration
 
@@ -96,7 +96,7 @@ it runs.
 | Mode | Entry | Run locally | Where |
 |------|-------|-------------|-------|
 | Functions Framework | `agent.main:telegram_webhook` (root `main.py` re-exports it) | `uv run functions-framework --source main.py --target telegram_webhook --port 8080` | Cloud Run **functions** (`gcloud run deploy --function telegram_webhook`) |
-| ASGI | `agent.asgi:app` | `uv run uvicorn agent.asgi:app --port 8080` | any container: Cloud Run **service**, docker compose, a VM |
+| ASGI | `agent.asgi:app` | `uv run uvicorn agent.asgi:app --port 8080` (or `make serve PORT=8080` from the repo root) | any container: Cloud Run **service**, docker compose, a VM |
 
 Local check of either one (a wrong secret must give 403):
 
@@ -115,11 +115,13 @@ cp .env.example .env                    # fill in; .env is gitignored
 uv run agent-poll
 ```
 
-Checks:
+From the repo root the same is `make install`, `make webhook-delete`, `make poll`.
+
+Checks (from the repo root: `make lint`, `make test-agent`; `make fmt` applies ruff's fixes):
 
 ```bash
-uv run ruff check src tests && uv run ruff format --check src tests
-uv run ty check src tests
+uv run ruff check . && uv run ruff format --check .
+uv run ty check
 uv run pytest            # unit tests, no network: fake sheet API, scripted model
 ```
 
@@ -167,8 +169,8 @@ Then register the webhook:
 ```bash
 export TELEGRAM_BOT_TOKEN=... TELEGRAM_WEBHOOK_SECRET=...
 export AGENT_URL=$(gcloud run services describe fitness-agent --region $REGION --format 'value(status.url)')
-../../scripts/set-webhook.sh set
-../../scripts/set-webhook.sh info
+../../scripts/set-webhook.sh set          # or, from the repo root: make webhook-set
+../../scripts/set-webhook.sh info         #                         make webhook-info
 ```
 
 ### Continuous deployment from GitHub

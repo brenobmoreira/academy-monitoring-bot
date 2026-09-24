@@ -133,6 +133,17 @@ Telegram limits `callback_data` to 64 bytes. Format `<verb>:<arg>`:
 `scripts/set-webhook.sh` registers `allowed_updates=["message","callback_query"]`, and
 `TelegramClient.get_updates` asks for the same.
 
+As built (F9, `agent/buttons.py`, `Handler._callback`): `Bot.reply` returns `Answer(text,
+write_ids, wrote)` (`agent/bot.py`); the keyboard goes under any reply that wrote, ↩️ only when
+there are ids that fit. The ✏️ prompt repeats the confirmation ("✏️ Envie a correção para esta
+mensagem:\n\n<callback_query.message.text>", escaped, cut at 3500 chars), since the answer's
+`reply_to_message` is the prompt and Telegram does not nest a second level. The undo reply quotes
+the confirmation and has one line per write (repeats merged): `undone_line`, "Já estava
+desfeito." (`already_undone`), a pruned-log hint (`not_found`), "⚠ Não desfiz: <message>"
+otherwise; an outage stops the run and keeps the keyboard so a later tap finishes it. Taps from
+other chats are answered but ignored; a failing tap is answered with the `FAILURE` toast.
+`agent.telegram.ALLOWED_UPDATES` and the script's list are kept equal by a test.
+
 ### Context (F10)
 
 No agent-side storage. Two sources, both put into the agent instruction as a "Contexto recente"

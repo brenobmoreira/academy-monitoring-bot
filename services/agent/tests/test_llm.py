@@ -26,7 +26,9 @@ def settings(**overrides: Any) -> Settings:
 
 
 async def run(model, text="peso 82,4"):
-    return await Bot(FakeSheet(diary_upsert=[OK_DIARY]), model, timezone="America/Sao_Paulo").reply(text)
+    return (
+        await Bot(FakeSheet(diary_upsert=[OK_DIARY]), model, timezone="America/Sao_Paulo").reply(text)
+    ).text
 
 
 async def test_model_key_and_base_reach_litellm():
@@ -80,7 +82,7 @@ async def test_a_rejected_payload_goes_back_to_the_model_through_litellm():
     reply = await Bot(sheet, build_model(settings(), client=client), timezone="America/Sao_Paulo").reply(
         "dormi 7h30"
     )
-    assert reply == "<b>22/09</b> · Sono h 7,5"
+    assert reply.text == "<b>22/09</b> · Sono h 7,5"
     tool_message = client.requests[1]["messages"][-1]
     assert tool_message["role"] == "tool"
     assert json.loads(tool_message["content"]) == rejected

@@ -210,6 +210,27 @@ secret setting `REMINDER_TOKEN`; unset → 404. Body `{"kind": "daily" | "weekly
 
 Scheduling is a Cloud Scheduler job per kind (documented, not automated).
 
+As built (F12, `agent/reminder.py`): `process(token, body) -> (text, status)` is server-free like
+`webhook.process`; the Functions Framework function sends `request.path == "/remind"` there
+(other paths stay the webhook) and answers 405 to a non-POST, like the ASGI route. Order of
+checks: token unset → 404, wrong/missing token → 403, body not `{"kind": "daily"|"weekly"}` →
+400. Details:
+
+- Daily text: "Faltou registrar hoje: peso, sono." plus a line "É só mandar, por exemplo: peso
+  82,4, dormi 7h30" with the example of each missing field. A field counts as recorded when
+  `day.get` returns any value for it (a hand-typed text included); only an absent or blank value
+  is missing.
+- Weekly covers `today − 6 … today`; the Sunday job therefore sends Mon–Sun. A week without data
+  still sends "Sem registros na semana …" (a useful nudge, not an error).
+- A sheet failure (daily `day.get` not ok; weekly detected by `week_text` returning a plain-text
+  reply, since its summary is always HTML) is logged and sends nothing to anyone.
+- Chats are sent in ascending id order, each in `format.split` chunks as HTML; a failing chat is
+  logged and skipped. Answer: `sent N`, `sent N of M`, `nothing to send` (also after a sheet
+  failure), or 502 `sent 0 of M` when there was something to send and no chat got it, so the
+  Scheduler job shows as failed.
+- Chosen schedules: daily 21:00, weekly Sunday 20:00, `America/Sao_Paulo`. `make remind KIND=…`
+  posts to a local server; `e2e/run.py` posts `/remind daily` after its message (asks for steps).
+
 ### Media (F13)
 
 - `voice`/`audio` (≤ 5 MB) and `photo` (largest size ≤ 5 MB) are downloaded with `getFile` and

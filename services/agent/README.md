@@ -31,8 +31,9 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `buttons.py` | The inline keyboard under a confirmation and its `callback_data` (`ok`, `undo:<ids>`, `fix`); the ✏️ prompt |
 | `undo.py` | `write.undo`: the latest write (`/desfazer`) or a message's writes (↩️ button); reply built from what the sheet undid |
 | `webhook.py` | What every HTTP entry does: `X-Telegram-Bot-Api-Secret-Token` check, hand the update over |
-| `main.py` (+ root `main.py` shim) | Functions Framework entry — Cloud Run functions |
-| `asgi.py` | ASGI app — uvicorn in any container; `GET /healthz` (`make serve`) |
+| `reminder.py` | `POST /remind` (Cloud Scheduler): `X-Reminder-Token` check, daily "Faltou registrar hoje: …" and the weekly summary to every allowed chat |
+| `main.py` (+ root `main.py` shim) | Functions Framework entry — Cloud Run functions; `/remind` goes to `reminder.py`, any other path is the webhook |
+| `asgi.py` | ASGI app — uvicorn in any container; `POST /remind`, `GET /healthz` (`make serve`) |
 | `poll.py` | Local long polling (`uv run agent-poll`, `make poll`) |
 
 ## Context between messages
@@ -151,6 +152,7 @@ Environment only (account-specific or secret; a YAML file containing a secret is
 | `SHEET_API_URL` | yes | Apps Script Web App URL, ends with `/exec` |
 | `SHEET_API_KEY` | yes | secret; same value as the Script Property |
 | `TELEGRAM_WEBHOOK_SECRET` | webhook only | secret; without it every webhook call gets 403 |
+| `REMINDER_TOKEN` | reminders only | secret; the `X-Reminder-Token` of `POST /remind`; unset → `/remind` answers 404 |
 | `SETTINGS_FILE` | no | path of the YAML to load; default `settings.yaml` here |
 
 Model examples (`LLM_MODEL` → what else it needs):
@@ -199,6 +201,32 @@ Local check of either one (a wrong secret must give 403):
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/ \
   -H 'X-Telegram-Bot-Api-Secret-Token: wrong' -H 'Content-Type: application/json' -d '{}'
+```
+
+## Reminders (`POST /remind`)
+
+Two pushes the bot sends without being asked, each triggered by a Cloud Scheduler job calling
+the agent's URL at `/remind` (same function or service as the webhook, no extra deploy):
+
+| Body | Sends to every chat in `ALLOWED_CHAT_IDS` |
+|------|-------------------------------------------|
+| `{"kind":"daily"}` | when today (`TIMEZONE`) lacks weight, sleep or steps in `Diário` (`day.get`): "Faltou registrar hoje: peso, sono." with an example of how to send them, only the missing ones; nothing when all three are there |
+| `{"kind":"weekly"}` | the `/semana` summary of the 7 days that end today (Sunday's job covers Mon–Sun) |
+
+The request must carry `X-Reminder-Token: <REMINDER_TOKEN>`. Answers: 404 when
+`REMINDER_TOKEN` is unset (the endpoint is off), 403 for a wrong or missing token, 400 for any
+other body, 200 with `sent N`, `sent N of M` (a chat failed; the others still got it) or
+`nothing to send`, and 502 `sent 0 of M` when no chat could be reached. If the sheet does not
+answer, nothing is sent and the answer is `nothing to send` (logged as a warning): an
+unattended job should not message an error every night.
+
+Try it locally with `make serve` (the `.env` needs `REMINDER_TOKEN`) and, in another terminal,
+`make remind KIND=daily` (it reads `REMINDER_TOKEN` from the environment or
+`services/agent/.env`), or:
+
+```bash
+curl -s -X POST localhost:8080/remind -H "X-Reminder-Token: $REMINDER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"kind":"daily"}'
 ```
 
 ## Local development
@@ -273,6 +301,40 @@ export AGENT_URL=$(gcloud run services describe fitness-agent --region $REGION -
 command is added: `uv run agent-commands` (reads the same settings as the agent). The script
 keeps its own copy of the list; `tests/test_commands.py` fails when it drifts from the registry.
 
+### Reminder jobs (optional)
+
+Create the secret, give it to the function, then one Cloud Scheduler job per kind:
+
+```bash
+openssl rand -hex 24 | tr -d '\n' | gcloud secrets create REMINDER_TOKEN --data-file=-
+gcloud secrets add-iam-policy-binding REMINDER_TOKEN --member=serviceAccount:$SA --role=roles/secretmanager.secretAccessor
+gcloud run services update fitness-agent --region $REGION --update-secrets REMINDER_TOKEN=REMINDER_TOKEN:latest
+
+gcloud services enable cloudscheduler.googleapis.com
+AGENT_URL=$(gcloud run services describe fitness-agent --region $REGION --format 'value(status.url)')
+TOKEN=$(gcloud secrets versions access latest --secret REMINDER_TOKEN)
+
+gcloud scheduler jobs create http agent-remind-daily --location $REGION \
+  --schedule "0 21 * * *" --time-zone America/Sao_Paulo \
+  --uri "$AGENT_URL/remind" --http-method POST \
+  --headers X-Reminder-Token=$TOKEN,Content-Type=application/json \
+  --message-body '{"kind":"daily"}'
+
+gcloud scheduler jobs create http agent-remind-weekly --location $REGION \
+  --schedule "0 20 * * 0" --time-zone America/Sao_Paulo \
+  --uri "$AGENT_URL/remind" --http-method POST \
+  --headers X-Reminder-Token=$TOKEN,Content-Type=application/json \
+  --message-body '{"kind":"weekly"}'
+
+gcloud scheduler jobs run agent-remind-daily --location $REGION   # try it now
+```
+
+Daily at 21:00 and Sundays at 20:00, São Paulo time; change `--schedule` to taste. The token
+also lives in the jobs' headers, so a new token means `gcloud scheduler jobs update http <job>
+--location $REGION --update-headers X-Reminder-Token=<new>` on both jobs. Without the secret the
+endpoint answers 404 and the jobs fail harmlessly. Secrets set on the service are kept by the
+continuous deployment below, like the others.
+
 ### Continuous deployment from GitHub
 
 Cloud Run console → service `fitness-agent` → **Connect repo** (continuous deployment) →
@@ -296,3 +358,5 @@ Under a confirmation, ↩️ Desfazer does the same for that message's writes, �
 and ✏️ Corrigir asks for the correction as a reply.
 `/hoje` then shows both, and typing `/` lists the commands.
 Nothing back? Cloud Run → Logs for the function, and Apps Script → Executions for `doPost`.
+With the reminder jobs: `gcloud scheduler jobs run agent-remind-daily --location $REGION` on a
+day without steps → "Faltou registrar hoje: passos." in the chat.

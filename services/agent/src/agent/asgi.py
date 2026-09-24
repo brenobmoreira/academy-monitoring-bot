@@ -2,7 +2,8 @@
 
     uv run uvicorn agent.asgi:app --host 0.0.0.0 --port 8080
 
-Routes: POST / receives the Telegram webhook, GET /healthz answers liveness checks.
+Routes: POST / receives the Telegram webhook, POST /remind the scheduled reminders (reminder.py),
+GET /healthz answers liveness checks.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
-from agent import webhook
+from agent import reminder, webhook
 
 logging.basicConfig(level=logging.INFO)
 
@@ -28,8 +29,23 @@ async def telegram(request: Request) -> PlainTextResponse:
     return PlainTextResponse(text, status_code=status)
 
 
+async def remind(request: Request) -> PlainTextResponse:
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    text, status = await reminder.process(request.headers.get(reminder.TOKEN_HEADER), body)
+    return PlainTextResponse(text, status_code=status)
+
+
 async def healthz(_request: Request) -> PlainTextResponse:
     return PlainTextResponse("ok")
 
 
-app = Starlette(routes=[Route("/", telegram, methods=["POST"]), Route("/healthz", healthz, methods=["GET"])])
+app = Starlette(
+    routes=[
+        Route("/", telegram, methods=["POST"]),
+        Route(reminder.PATH, remind, methods=["POST"]),
+        Route("/healthz", healthz, methods=["GET"]),
+    ]
+)

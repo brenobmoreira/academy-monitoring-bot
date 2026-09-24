@@ -27,6 +27,7 @@ const SheetApi = {
         sessions: WorkoutPlan.sessions(),
         exercises: WorkoutPlan.catalogue(),
         plan: WorkoutPlan.planRows(),
+        lastWorkout: WorkoutRepo.last(),
       }),
     },
     'diary.upsert': {
@@ -81,6 +82,11 @@ const SheetApi = {
       write: false,
       validate: (args, ctx) => Validator.dateRange(args, ctx),
       run: (args) => ({ from: args.from, to: args.to, rows: WorkoutRepo.range(args.from, args.to) }),
+    },
+    'day.get': {
+      write: false,
+      validate: (args, ctx) => Validator.dayGet(args, ctx),
+      run: (args) => ({ date: args.date, diary: DiaryRepo.read(Sheets.localDate(args.date)), workout: WorkoutRepo.day(args.date) }),
     },
   },
 

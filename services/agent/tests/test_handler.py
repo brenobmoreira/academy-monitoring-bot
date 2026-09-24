@@ -1,8 +1,10 @@
 import asyncio
+from datetime import datetime
 
 import pytest
 
-from agent.handler import HELP, Handler
+from agent.commands import Reply, help_text
+from agent.handler import FAILURE, Handler
 
 from .fakes import FakeSheet
 
@@ -66,7 +68,7 @@ async def test_long_replies_go_out_in_chunks_with_the_markup_on_the_last():
     lines = [f"linha {i:04d} " + "x" * 90 for i in range(100)]
     tg = FakeTelegram()
     handler = Handler({42}, FakeBot(), tg)
-    await handler._send(42, "\n".join(lines), reply_markup={"inline_keyboard": []})
+    await handler._send(42, Reply("\n".join(lines), html=True, reply_markup={"inline_keyboard": []}))
     assert len(tg.sent) == 3
     assert all(len(text) <= 4096 for _, text in tg.sent)
     assert "\n".join(text for _, text in tg.sent) == "\n".join(lines)
@@ -97,8 +99,31 @@ async def test_start_and_help_answer_without_the_model():
     await Handler({42}, bot, tg).handle_update(update("/start"))
     await Handler({42}, bot, tg).handle_update(update("/help@fitness_bot"))
     assert bot.texts == []
-    assert tg.sent == [(42, HELP), (42, HELP)]
+    assert tg.sent == [(42, help_text()), (42, help_text())]
     assert tg.actions == []
+
+
+async def test_commands_read_the_sheet_for_the_configured_day_and_skip_the_model():
+    bot, tg = FakeBot(), FakeTelegram()
+    empty = {"ok": True, "result": {"date": "2026-09-20", "diary": {}, "workout": []}}
+    sheet = FakeSheet(day_get=[empty])
+    handler = Handler({42}, bot, tg, sheet=sheet, clock=lambda: datetime(2026, 9, 21, 0, 30))
+    await handler.handle_update(update("/hoje@fitness_bot ontem"))
+    assert bot.texts == []
+    assert sheet.calls == [("day.get", {"date": "2026-09-20"})]
+    assert tg.sent == [(42, "Nada registrado em 20/09.")]
+
+
+async def test_unregistered_slash_words_still_go_to_the_model():
+    bot, tg = FakeBot(), FakeTelegram()
+    await Handler({42}, bot, tg).handle_update(update("/peso 82"))
+    assert bot.texts == [("/peso 82", "42")]
+
+
+async def test_a_failing_command_becomes_the_short_warning():
+    bot, tg = FakeBot(), FakeTelegram()
+    await Handler({42}, bot, tg).handle_update(update("/ficha"))  # no sheet API configured
+    assert tg.sent == [(42, FAILURE)]
 
 
 async def test_bot_failures_become_a_short_warning():
@@ -147,7 +172,7 @@ async def test_desfazer_undoes_through_the_sheet_without_the_model():
 
 
 async def test_desfazer_failures_become_the_short_warning():
-    class BrokenSheet:
+    class BrokenSheet(FakeSheet):
         async def undo(self, write_id=None):
             raise RuntimeError("boom")
 

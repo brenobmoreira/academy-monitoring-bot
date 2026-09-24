@@ -75,3 +75,18 @@ async def test_api_errors_raise_with_the_description():
 
     with pytest.raises(TelegramError, match="webhook is active"):
         await client(handler).get_updates()
+
+
+async def test_set_my_commands_sends_the_menu():
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    await client(handler).set_my_commands([("hoje", "o dia"), ("help", "ajuda")])
+    assert seen["url"] == "https://api.telegram.org/bottok/setMyCommands"
+    assert seen["body"] == {
+        "commands": [{"command": "hoje", "description": "o dia"}, {"command": "help", "description": "ajuda"}]
+    }

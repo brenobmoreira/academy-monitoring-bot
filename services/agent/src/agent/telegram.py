@@ -51,6 +51,11 @@ class TelegramClient:
         """Telegram shows the action for about 5 s or until the next message arrives."""
         await self._call("sendChatAction", {"chat_id": chat_id, "action": action}, seconds=10.0)
 
+    async def set_my_commands(self, commands: list[tuple[str, str]]) -> None:
+        """Replaces the command menu Telegram shows: (name without the slash, description)."""
+        payload = [{"command": name, "description": description} for name, description in commands]
+        await self._call("setMyCommands", {"commands": payload})
+
     async def get_updates(self, offset: int | None = None, wait: int = 50) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {"timeout": wait, "allowed_updates": ["message"]}
         if offset is not None:

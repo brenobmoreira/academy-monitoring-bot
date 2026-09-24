@@ -48,6 +48,9 @@ class FakeSheet:
     async def undo(self, write_id=None):
         return self._next("write.undo", {} if write_id is None else {"writeId": write_id})
 
+    async def day(self, date):
+        return self._next("day.get", {"date": date})
+
 
 class ScriptedLlm(BaseLlm):
     """Replays model turns in order (an exception in the script is raised) and keeps every

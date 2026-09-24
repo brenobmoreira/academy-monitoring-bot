@@ -24,8 +24,9 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `format.py` | Telegram HTML: `escape`, `bold`, `split` (≤ 4096 chars, cut on line boundaries) |
 | `summary.py` | Confirmation text built from what the sheet reports it wrote (HTML; bold date/session and exercise names), each exercise compared with its previous session |
 | `bot.py` | Instruction, one ADK run per message, `MAX_LLM_CALLS` budget, failure replies; the model's text is escaped |
-| `telegram.py` | `sendMessage` (optional `parse_mode=HTML`, `reply_markup`, reply-to; returns the sent Message), `sendChatAction`, `getUpdates` |
-| `handler.py` | Allowlist, `/start`, `/desfazer`, run the bot while showing "typing…" (re-sent every 4 s), reply as HTML in as many messages as needed; never raises |
+| `telegram.py` | `sendMessage` (optional `parse_mode=HTML`, `reply_markup`, reply-to; returns the sent Message), `sendChatAction`, `getUpdates`, `setMyCommands` |
+| `commands.py` | `COMMANDS` registry: `/hoje`, `/ficha`, `/exercicios`, `/desfazer`, `/help`, `/start`, answered from the sheet without the model; `uv run agent-commands` publishes the menu |
+| `handler.py` | Allowlist, dispatch registered commands, otherwise run the bot while showing "typing…" (re-sent every 4 s), reply as HTML in as many messages as needed; never raises |
 | `undo.py` | `/desfazer`: `write.undo` on the latest write, reply built from what the sheet undid |
 | `webhook.py` | What every HTTP entry does: `X-Telegram-Bot-Api-Secret-Token` check, hand the update over |
 | `main.py` (+ root `main.py` shim) | Functions Framework entry — Cloud Run functions |
@@ -45,6 +46,23 @@ The reply always starts with the confirmation of what was written before the fai
 
 Each case is logged, model failures and unexpected errors with the traceback.
 
+## Commands
+
+Deterministic replies read from the sheet API; they never call the model. The handler
+dispatches a message whose first word (without `@botname`) is in `agent.commands.COMMANDS`;
+any other text, including an unknown `/word`, goes to the agent.
+
+| Command | Reply |
+|---------|-------|
+| `/hoje [data]` | what the sheet has for the day (`day.get`), in the confirmation format; `data` is `ontem`, `dd/mm` (the latest such day, so `30/12` in January is last year's) or `yyyy-mm-dd`; "Nada registrado em dd/mm." when empty |
+| `/ficha [sessão]` | the plan rows of a session with the sets of the current phase and the rep range; without a name, the session after the last logged one (`catalog.lastWorkout`) in plan order, or the first |
+| `/exercicios [grupo]` | exact catalogue names by muscle group; the group matches ignoring case and accents |
+| `/desfazer` | undoes the latest sheet write not yet undone, from the bot or the sheet menu (`write.undo`); replies with what was undone |
+| `/help`, `/start` | examples and the command list (`/start` stays out of the menu) |
+
+A new command is an `@command(name, description)` function in `commands.py` plus the same
+entry in `scripts/set-webhook.sh`.
+
 ## Configuration
 
 All settings are fields of `Settings` in `src/agent/settings.py`, named after their environment
@@ -58,7 +76,7 @@ Everything is read once when the process starts.
 |-----|---------|-|
 | `LLM_MODEL` | `gemini/gemini-3.8-flash` | LiteLLM `<provider>/<model>`; switching provider is only this plus the key |
 | `MAX_LLM_CALLS` | `8` | model calls per message, corrections included |
-| `TIMEZONE` | `America/Sao_Paulo` | resolves "hoje" and "ontem" |
+| `TIMEZONE` | `America/Sao_Paulo` | resolves "hoje" and "ontem", in messages and in `/hoje` |
 
 Environment only (account-specific or secret; a YAML file containing a secret is refused):
 
@@ -185,9 +203,13 @@ Then register the webhook:
 ```bash
 export TELEGRAM_BOT_TOKEN=... TELEGRAM_WEBHOOK_SECRET=...
 export AGENT_URL=$(gcloud run services describe fitness-agent --region $REGION --format 'value(status.url)')
-../../scripts/set-webhook.sh set          # or, from the repo root: make webhook-set
-../../scripts/set-webhook.sh info         #                         make webhook-info
+../../scripts/set-webhook.sh set          # webhook and the command menu; or, from the repo root: make webhook-set
+../../scripts/set-webhook.sh info         #                                                        make webhook-info
 ```
+
+`set` also sends the command menu (`setMyCommands`). To refresh only the menu, e.g. after a
+command is added: `uv run agent-commands` (reads the same settings as the agent). The script
+keeps its own copy of the list; `tests/test_commands.py` fails when it drifts from the registry.
 
 ### Continuous deployment from GitHub
 
@@ -208,4 +230,5 @@ uv export --no-dev --no-emit-project --no-hashes --format requirements-txt -o re
 Send `peso 82,4 dormi 7h30` to the bot → `21/09 · Peso kg 82,4 · Sono h 7,5` (date in bold) and today's row in
 `Diário`. Send `upper: supino inclinado 60x8 62x8 rir 2` → a row in `Registro de treino`.
 Send `/desfazer` → `↩️ Desfeito: 21/09 · Upper (Supino inclinado)` and the row is empty again.
+`/hoje` then shows both, and typing `/` lists the commands.
 Nothing back? Cloud Run → Logs for the function, and Apps Script → Executions for `doPost`.

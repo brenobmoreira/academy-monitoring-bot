@@ -114,7 +114,7 @@ error; nothing is written in that case.
    ```bash
    export TELEGRAM_BOT_TOKEN=<token> TELEGRAM_WEBHOOK_SECRET=<secret>
    export AGENT_URL=$(gcloud run services describe fitness-agent --region us-central1 --format 'value(status.url)')
-   scripts/set-webhook.sh set       # or: make webhook-set
+   scripts/set-webhook.sh set       # webhook and the /command menu; or: make webhook-set
    scripts/set-webhook.sh info      # or: make webhook-info; "url" set, no "last_error_message"
    ```
 4. Continuous deployment: Cloud Run console → `fitness-agent` → **Connect repo** → this GitHub

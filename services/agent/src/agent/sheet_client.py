@@ -74,6 +74,9 @@ class SheetClient:
     async def undo(self, write_id: str | None = None) -> Response:
         return await self.call("write.undo", {} if write_id is None else {"writeId": write_id})
 
+    async def day(self, date: str) -> Response:
+        return await self.call("day.get", {"date": date})
+
 
 def _unavailable(message: str) -> Response:
     return {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": message}]}

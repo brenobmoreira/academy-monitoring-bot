@@ -78,11 +78,12 @@ A plain `clasp push` does not change what the URL serves.
 
 | op | args |
 |----|------|
-| `catalog` | `{}` → today, time zone, current phase, sessions, exercises, plan |
+| `catalog` | `{}` → today, time zone, current phase, sessions, exercises, plan, `lastWorkout` (`{date, session}` of the most recent log row, or `null`) |
 | `diary.upsert` | `{"date": "2026-09-21", "fields": {"weightKg": 82.4, "sleepH": 7.5, "muayThai": true}}` |
 | `workout.upsert` | `{"date": "2026-09-21", "session": "Upper", "exercises": [{"name": "Supino inclinado", "sets": [{"kg": 60, "reps": 8}], "rir": 2}]}` |
 | `exercise.history` | `{"name": "Supino inclinado", "limit": 10}` |
 | `write.undo` | `{"writeId": "mfu3k2x09ab1"}` or `{}` for the latest write not yet undone → `{writeId, undone: {op, date, session?, fields?, exercises?}}` |
+| `day.get` | `{"date": "2026-09-21"}` → `{date, diary: {weightKg: 82.4, muayThai: true, …}, workout: [{session, phase, exercises: [{name, sets, setsDone, volume, rir?, pain?}]}]}`; empty cells are left out, `Sim`/`Não` read back as `true`/`false` |
 | `diary.range` | `{"from": "2026-09-08", "to": "2026-09-21"}` → `{from, to, days: [{date, weightKg, muayThai, ...}]}`: only days with at least one filled field, oldest first, empty cells left out, `Sim`/`Não` read back as booleans |
 | `workout.range` | `{"from": "2026-09-14", "to": "2026-09-20"}` → `{from, to, rows: [{date, session, exercise, group, setsDone, volume, prescribedSets, rir?, pain?}]}`: log rows oldest first, `group` from `Exercícios` (`null` if the name is not there) |
 

@@ -229,6 +229,46 @@ const WorkoutRepo = {
       });
   },
 
+  /**
+   * Sessions logged on one day, in sheet order, with their exercises. setsDone and volume are
+   * null when the cell is empty; rir and pain are left out then.
+   * @param {string} key  yyyy-MM-dd
+   * @returns {{session: string, phase: string|null, exercises: Object[]}[]}
+   */
+  day(key) {
+    const H = WorkoutRepo.HEADERS;
+    const empty = (v) => v === '' || v === undefined || v === null;
+    const sessions = [];
+    Sheets.readRows(WorkoutRepo.sheet_(), Config.headerRow())
+      .filter((r) => r[H.date] instanceof Date && Sheets.dayKey(r[H.date]) === key && String(r[H.exercise] || '').trim())
+      .forEach((r) => {
+        const name = String(r[H.session] || '').trim();
+        let session = sessions.find((s) => s.session === name);
+        if (!session) {
+          session = { session: name, phase: String(r[H.phase] || '').trim() || null, exercises: [] };
+          sessions.push(session);
+        }
+        const ex = {
+          name: String(r[H.exercise]).trim(), sets: WorkoutRepo.loggedSets(r),
+          setsDone: empty(r[H.setsDone]) ? null : r[H.setsDone], volume: empty(r[H.volume]) ? null : r[H.volume],
+        };
+        if (!empty(r[H.rir])) ex.rir = r[H.rir];
+        if (!empty(r[H.pain])) ex.pain = r[H.pain];
+        session.exercises.push(ex);
+      });
+    return sessions;
+  },
+
+  /** {date, session} of the most recent log row (latest date, the lower row on a tie), or null. */
+  last() {
+    const H = WorkoutRepo.HEADERS;
+    let best = null;
+    Sheets.readRows(WorkoutRepo.sheet_(), Config.headerRow()).forEach((r) => {
+      if (r[H.date] instanceof Date && String(r[H.session] || '').trim() && (!best || r[H.date] >= best[H.date])) best = r;
+    });
+    return best ? { date: Sheets.dayKey(best[H.date]), session: String(best[H.session]).trim() } : null;
+  },
+
   findExisting_(rows, date, session, exercise) {
     const H = WorkoutRepo.HEADERS;
     const key = Sheets.dayKey(date);

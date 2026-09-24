@@ -50,7 +50,8 @@ def _diary(group: dict[str, Any]) -> list[str]:
 
 
 def _workout(group: dict[str, Any]) -> list[str]:
-    lines = [bold(f"{_day(group['date'])} · {escape(group['session'])} ({escape(group['phase'])}):")]
+    phase = f" ({escape(group['phase'])})" if group.get("phase") else ""  # hand-typed rows may lack it
+    lines = [bold(f"{_day(group['date'])} · {escape(group['session'])}{phase}:")]
     for ex in group["exercises"].values():
         sets = _sets(ex["sets"])
         extras = [f"RIR {escape(ex['rir'])}"] if ex.get("rir") is not None else []

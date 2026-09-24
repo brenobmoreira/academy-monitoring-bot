@@ -19,15 +19,28 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `settings.py` | `Settings`: every external value (env, `.env`, `settings.yaml`) |
 | `llm.py` | `build_model`: the LiteLLM model from `LLM_MODEL`, `LLM_API_KEY`, `LLM_API_BASE` |
 | `sheet_client.py` | Calls the sheet API; network failures become `{ok:false, errors:[{code:"unavailable"}]}` |
-| `tools.py` | ADK tools; return the API body as-is so the model fixes rejected payloads |
+| `tools.py` | ADK tools; return the API body as-is so the model fixes rejected payloads; `Journal` of writes and error codes |
 | `summary.py` | Confirmation text built from what the sheet reports it wrote |
-| `bot.py` | Instruction, one ADK run per message, `MAX_LLM_CALLS` budget |
+| `bot.py` | Instruction, one ADK run per message, `MAX_LLM_CALLS` budget, failure replies |
 | `telegram.py` | `sendMessage`, `sendChatAction`, `getUpdates` |
 | `handler.py` | Allowlist, `/start`, run the bot while showing "typing…" (re-sent every 4 s), reply; never raises |
 | `webhook.py` | What every HTTP entry does: `X-Telegram-Bot-Api-Secret-Token` check, hand the update over |
 | `main.py` (+ root `main.py` shim) | Functions Framework entry — Cloud Run functions |
 | `asgi.py` | ASGI app — uvicorn in any container; `GET /healthz` (`make serve`) |
 | `poll.py` | Local long polling (`uv run agent-poll`, `make poll`) |
+
+## When something fails
+
+The reply always starts with the confirmation of what was written before the failure. Then:
+
+| Cause | Reply |
+|-------|-------|
+| Model call failed (LiteLLM/provider error, timeout; caught by the agent's `on_model_error_callback`) | "⚠ O modelo não respondeu agora. Nada novo foi gravado além do que aparece acima." — or "… Nada foi gravado." when nothing was |
+| A tool response of the run had code `unavailable` or `internal`, and nothing was written | "⚠ A planilha não respondeu. Tente de novo em alguns minutos." (with writes: the confirmation and the model's text) |
+| `MAX_LLM_CALLS` reached | the confirmation and "Parei no limite de tentativas; …" |
+| Anything else | `handler.FAILURE`: "⚠ Não consegui processar agora. Confira a planilha antes de reenviar." |
+
+Each case is logged, model failures and unexpected errors with the traceback.
 
 ## Configuration
 

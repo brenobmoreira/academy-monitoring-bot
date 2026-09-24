@@ -64,3 +64,24 @@ async def test_read_tools_pass_through(sheet):
     await t["get_catalog"]()
     await t["get_exercise_history"]("Leg press", 3)
     assert sheet.calls == [("catalog", {}), ("exercise.history", {"name": "Leg press", "limit": 3})]
+
+
+async def test_error_codes_of_reads_and_writes_are_kept():
+    internal = {"ok": False, "errors": [{"path": "", "code": "internal", "message": "m"}]}
+    rejected = {"ok": False, "errors": [{"path": "args.date", "code": "invalid_date", "message": "m"}]}
+    sheet = FakeSheet(catalog=[internal], diary_upsert=[rejected])
+    journal = Journal()
+    t = tools(sheet, journal)
+    await t["get_catalog"]()
+    await t["save_diary"]("ontem", DiaryFields(sleepH=7))
+    assert journal.error_codes == ["internal", "invalid_date"]
+    assert journal.sheet_failed
+    assert journal.writes == []
+
+
+def test_rejected_payloads_are_not_a_sheet_failure():
+    journal = Journal()
+    journal.record("diary.upsert", {"ok": False, "errors": [{"code": "invalid_date"}]})
+    journal.check({"ok": False})
+    assert journal.error_codes == ["invalid_date"]
+    assert not journal.sheet_failed

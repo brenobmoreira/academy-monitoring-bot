@@ -8,9 +8,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError
 from google.adk.agents.run_config import RunConfig
-from google.adk.models import BaseLlm
+from google.adk.models import BaseLlm, LlmRequest
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -30,6 +31,11 @@ WEEKDAYS = [
     "sábado",
     "domingo",
 ]
+
+# What the user sees when the run cannot finish normally (see Bot.reply).
+MODEL_FAILED = "⚠ O modelo não respondeu agora. Nada novo foi gravado além do que aparece acima."
+MODEL_FAILED_NOTHING_WRITTEN = "⚠ O modelo não respondeu agora. Nada foi gravado."
+SHEET_FAILED = "⚠ A planilha não respondeu. Tente de novo em alguns minutos."
 
 INSTRUCTION = """\
 Você registra o diário de saúde e treino de uma pessoa numa planilha do Google, a partir de \
@@ -87,8 +93,21 @@ class Bot:
         self._max_llm_calls = max_llm_calls
 
     async def reply(self, text: str, user_id: str = "telegram") -> str:
-        """Runs the agent on one message. No memory between messages: each one is a fresh session."""
+        """Runs the agent on one message. No memory between messages: each one is a fresh session.
+
+        A failed model call (provider error, timeout) and a sheet that did not answer get their
+        own replies, always after the confirmation of what was written before; any other error
+        propagates to the handler.
+        """
         journal = Journal()
+        model_errors: list[Exception] = []
+
+        def on_model_error(
+            callback_context: CallbackContext, llm_request: LlmRequest, error: Exception
+        ) -> None:
+            # Only marks the error as the model's; returning None lets ADK re-raise it.
+            model_errors.append(error)
+
         now = self._clock()
         agent = LlmAgent(
             name="fitness_logger",
@@ -96,6 +115,7 @@ class Bot:
             # A callable instruction is not treated as a template, so literal braces are safe.
             instruction=lambda _ctx: instruction(now),
             tools=build_tools(self._sheet, journal),
+            on_model_error_callback=on_model_error,
         )
         sessions = InMemorySessionService()
         runner = Runner(app_name=APP_NAME, agent=agent, session_service=sessions)
@@ -114,6 +134,14 @@ class Bot:
         except LlmCallsLimitExceededError:
             log.warning("LLM call budget exhausted for message %r", text)
             note = "Parei no limite de tentativas; o que não aparece acima não foi gravado."
+        except Exception as err:
+            if err not in model_errors:
+                raise
+            log.exception("model call failed for message %r", text)
+            note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
+        if journal.sheet_failed and not journal.writes:
+            log.warning("sheet unavailable for message %r: %s", text, journal.error_codes)
+            return SHEET_FAILED
         return compose(confirmation(journal.writes), final, note)
 
 

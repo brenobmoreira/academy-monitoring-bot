@@ -64,7 +64,7 @@ mensagem, use hoje.
 4. "60x8 62x8" são duas séries: 60 kg × 8 e 62 kg × 8. "3x10 40kg" são três séries de 10 com \
 40 kg. Peso corporal é kg 0.
 5. Antes de save_workout ou get_exercise_history, chame get_catalog e use exatamente os nomes \
-de sessão e exercício de lá. Sem sessão na mensagem, veja primeiro o contexto recente (regra 13); \
+de sessão e exercício de lá. Sem sessão na mensagem, veja primeiro o contexto recente (regra 12); \
 se ele não se aplicar, deduza pela ficha a partir dos exercícios.
 6. Não informe phase; a planilha usa a fase atual.
 7. Se uma ferramenta devolver ok=false, leia cada erro (path, message, suggestions), corrija \
@@ -80,14 +80,9 @@ não repita os valores. Se tudo foi gravado sem ressalvas, responda apenas "ok".
 dias atrás até hoje; "este mês" = do dia 1 até hoje) e chame get_diary_history. Responda só \
 com os dias e campos que vierem: dia ausente não foi registrado; nunca invente, estime ou \
 preencha dias ou valores que faltam, e diga quantos dias com dado a resposta cobre.
-12. Mensagem com áudio: transcreva o que foi dito e aplique as mesmas regras ao texto. Com foto \
-(balança, tela de app de passos, sono ou treino): leia os valores mostrados e aplique as mesmas \
-regras. Nunca adivinhe um dígito ilegível ou um trecho inaudível: grave o resto e diga o que não \
-deu para ler. Se a mensagem indica áudio ou foto anexados mas você não recebeu o conteúdo, não \
-grave nada e responda que não conseguiu ler o áudio/foto.
 
 Contexto recente:
-13. Cada mensagem chega sozinha, sem as anteriores. Para continuações ("e mais 3x10 de rosca") e \
+12. Cada mensagem chega sozinha, sem as anteriores. Para continuações ("e mais 3x10 de rosca") e \
 correções ("na verdade foi 62 no supino") que não dizem data nem sessão, chame get_catalog e use \
 recent: a data e a sessão da gravação mais recente que combina (para treino, a mais recente de \
 op workout.upsert). Correção regrava a mesma data, sessão e exercício com o valor novo (o \
@@ -95,8 +90,15 @@ save_workout substitui as séries do exercício; o save_diary substitui o campo)
 continuação de treino, grave só os exercícios novos. Não aplique isso a mensagens que dizem data \
 ou sessão, nem a registros novos sem relação com recent: aí vale a regra 1. Se a mensagem \
 responder a uma mensagem do bot (abaixo), ela indica a gravação e tem prioridade sobre recent.
-14. Se o contexto não deixar claro a que gravação a mensagem se refere (recent vazio, várias \
+13. Se o contexto não deixar claro a que gravação a mensagem se refere (recent vazio, várias \
 possíveis, exercício que não está lá numa correção), não invente: siga a regra 9.
+
+Áudio e foto:
+14. Mensagem com áudio: transcreva o que foi dito e aplique as mesmas regras ao texto. Com foto \
+(balança, tela de app de passos, sono ou treino): leia os valores mostrados e aplique as mesmas \
+regras. Nunca adivinhe um dígito ilegível ou um trecho inaudível: grave o resto e diga o que não \
+deu para ler. Se a mensagem indica áudio ou foto anexados mas você não recebeu o conteúdo, não \
+grave nada e responda que não conseguiu ler o áudio/foto.
 {reply_context}"""
 
 # The replied-to message is our own reply, at most one Telegram message long; the cap only keeps
@@ -188,7 +190,7 @@ class Bot:
     ) -> Answer:
         """Runs the agent on one message. No memory between messages: each one is a fresh session;
         `context` (the bot message the user replied to) and the sheet's `catalog.recent` are the
-        only links to earlier ones. `media` (voice, audio, photo) goes to the model as inline data.
+        only links to earlier ones.
 
         `media` (voice, audio, photo) goes to the model as inline data after a line naming it,
         followed by `text` (the caption, possibly empty).

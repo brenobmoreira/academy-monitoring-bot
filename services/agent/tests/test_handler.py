@@ -17,8 +17,8 @@ pytestmark = pytest.mark.unit
 class FakeBot:
     def __init__(self, reply="ok", error=None, seconds=0.0, events=None):
         self.texts = []
-        self.contexts = []
         self.media = []
+        self.contexts = []
         self._reply = reply if isinstance(reply, Answer) else Answer(reply)
         self._error = error
         self._seconds = seconds
@@ -485,3 +485,13 @@ async def test_media_from_other_chats_and_other_kinds_of_message_are_ignored():
     await Handler({42}, bot, tg).handle_update(media_update(sticker={"file_id": "s1"}))
     await Handler({42}, bot, tg).handle_update(media_update(document={"file_id": "d1"}, caption="x"))
     assert tg.fetched == [] and tg.sent == [] and bot.texts == []
+
+
+async def test_a_photo_replying_to_the_bot_carries_the_context_and_gets_the_buttons():
+    bot = FakeBot(Answer("<b>24/09</b> · Peso kg 82", ("w1",), wrote=True))
+    tg = FakeTelegram(files=file("p-large", b"jpeg"))
+    replied = {"message_id": 5, "from": {"is_bot": True}, "text": "24/09 · Peso kg 81"}
+    await Handler({42}, bot, tg).handle_update(media_update(photo=PHOTO_SIZES, reply_to_message=replied))
+    assert bot.contexts == ["24/09 · Peso kg 81"]
+    assert bot.media == [[Media("image/jpeg", b"jpeg")]]
+    assert tg.options[-1]["reply_markup"] == keyboard(("w1",))

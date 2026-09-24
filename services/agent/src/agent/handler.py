@@ -155,25 +155,20 @@ class Handler:
             if parsed is not None:
                 reply = await self._command(*parsed, chat_id=chat_id)
             else:
-                reply = await self._run_bot(
-                    text, chat_id, update.get("update_id"), context=replied_text(message)
-                )
+                reply = await self._run_bot(text, message, update.get("update_id"))
         try:
             await self._send(chat_id, reply)
         except Exception:
             log.exception("could not send the reply to chat %s", chat_id)
 
     async def _run_bot(
-        self,
-        text: str,
-        chat_id: int,
-        update_id: Any,
-        media: list[Media] | None = None,
-        context: str | None = None,
+        self, text: str, message: dict[str, Any], update_id: Any, media: list[Media] | None = None
     ) -> Reply:
+        chat_id = message["chat"]["id"]
         typing = asyncio.create_task(self._keep_typing(chat_id))
         await asyncio.sleep(0)  # let the first action go out before the bot starts
         try:
+            context = replied_text(message)
             if media:
                 answer = await self._bot.reply(text, user_id=str(chat_id), context=context, media=media)
             else:
@@ -207,8 +202,7 @@ class Handler:
         except Exception:
             log.exception("could not download the file of update %s", update_id)
             return Reply(DOWNLOAD_FAILED)
-        media = [Media(ref.mime_type, data)]
-        return await self._run_bot(caption, chat_id, update_id, media=media, context=replied_text(message))
+        return await self._run_bot(caption, message, update_id, media=[Media(ref.mime_type, data)])
 
     async def _download(self, ref: MediaRef) -> bytes:
         file = await self._telegram.get_file(ref.file_id)

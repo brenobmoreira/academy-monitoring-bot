@@ -223,7 +223,7 @@ Scheduling is a Cloud Scheduler job per kind (documented, not automated).
 - The instruction gains: transcribe what is said / read the scale or app screen, then apply the
   same rules; never guess an unreadable digit.
 
-As built (F13): `Bot.reply(text, user_id, *, media: list[Media] | None)` with
+As built (F13): `Bot.reply(text, user_id, *, context=None, media: list[Media] | None = None) -> Answer` with
 `Media = (mime_type, data)`; the user turn is the inline parts followed by one text part
 `[Anexo: áudio|foto]` + the caption. ADK 2.9's LiteLLM adapter sends images as `image_url` data
 URIs and audio as `input_audio` (`format` = MIME subtype, `ogg` for voice); a MIME type it
@@ -231,7 +231,7 @@ cannot convert raises `ValueError` before any provider call. "Rejected media" = 
 a message with media that is that `ValueError` or a LiteLLM `BadRequestError` /
 `UnprocessableEntityError` (400/422, subclasses included); timeouts, connection errors and 5xx
 keep the F3 reply. LiteLLM 1.102 **drops `input_audio` silently for Anthropic** (and Bedrock), so
-no error exists to detect: the `[Anexo: …]` label plus instruction rule 12 make the model say it
+no error exists to detect: the `[Anexo: …]` label plus instruction rule 14 make the model say it
 could not read the audio instead of logging the caption alone. `MEDIA_ENABLED: false` answers
 with the same hint as a rejection. Other replies: a file over `MEDIA_MAX_BYTES` (Telegram's
 announced `file_size`, else the downloaded length) → "O arquivo passa de N MB, …" without

@@ -261,7 +261,8 @@ def main_run() -> None:
     finally:
         proc.kill()
 
-    reply = next((t["body"]["text"] for t in timeline if t["kind"] == "telegram_reply"), None)
+    replies = (t for t in timeline if t["kind"] == "telegram_reply" and t["method"] == "sendMessage")
+    reply = next((t["body"]["text"] for t in replies), None)
     trace = {
         "scenario": {
             "llm": f"{settings.LLM_MODEL} via LiteLLM" + ("" if args.real else " (provider scripted)"),

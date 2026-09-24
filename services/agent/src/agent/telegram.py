@@ -33,6 +33,10 @@ class TelegramClient:
     async def send_message(self, chat_id: int, text: str) -> None:
         await self._call("sendMessage", {"chat_id": chat_id, "text": text[:MAX_TEXT]})
 
+    async def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
+        """Telegram shows the action for about 5 s or until the next message arrives."""
+        await self._call("sendChatAction", {"chat_id": chat_id, "action": action}, seconds=10.0)
+
     async def get_updates(self, offset: int | None = None, wait: int = 50) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {"timeout": wait, "allowed_updates": ["message"]}
         if offset is not None:

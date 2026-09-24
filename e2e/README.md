@@ -32,7 +32,7 @@ Output: `e2e/out/run-<timestamp>.json` (gitignored):
 |-----|---------|
 | `scenario` | model, message, date, elapsed time |
 | `webhook` | the request Telegram would send (headers + update) and the function's answer |
-| `timeline` | every hop in order: `llm` (what the model received and returned), `sheet_api` (request and response of the Apps Script API), `telegram_reply` |
+| `timeline` | every hop in order: `llm` (what the model received and returned), `sheet_api` (request and response of the Apps Script API), `telegram_reply` (each Bot API call: `sendChatAction` while the bot works, then `sendMessage`) |
 | `reply_sent_to_telegram` | the final message, one line per item |
 | `sheet_after` | rows of `Diário` and `Registro de treino` after the run |
 

@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from agent.handler import HELP, Handler
@@ -6,27 +8,41 @@ pytestmark = pytest.mark.unit
 
 
 class FakeBot:
-    def __init__(self, reply="ok", error=None):
+    def __init__(self, reply="ok", error=None, seconds=0.0, events=None):
         self.texts = []
         self._reply = reply
         self._error = error
+        self._seconds = seconds
+        self._events = events if events is not None else []
 
     async def reply(self, text, user_id="telegram"):
         self.texts.append((text, user_id))
+        self._events.append("bot")
+        if self._seconds:
+            await asyncio.sleep(self._seconds)
         if self._error:
             raise self._error
         return self._reply
 
 
 class FakeTelegram:
-    def __init__(self, error=None):
+    def __init__(self, error=None, action_error=None, events=None):
         self.sent = []
+        self.actions = []
         self._error = error
+        self._action_error = action_error
+        self._events = events if events is not None else []
 
     async def send_message(self, chat_id, text):
         if self._error:
             raise self._error
         self.sent.append((chat_id, text))
+
+    async def send_chat_action(self, chat_id, action="typing"):
+        self.actions.append((chat_id, action))
+        self._events.append(action)
+        if self._action_error:
+            raise self._action_error
 
 
 def update(text="peso 82", chat_id=42):
@@ -55,6 +71,7 @@ async def test_ignores_other_chats_and_non_text_updates(u):
     await Handler({42}, bot, tg).handle_update(u)
     assert bot.texts == []
     assert tg.sent == []
+    assert tg.actions == []
 
 
 async def test_start_and_help_answer_without_the_model():
@@ -63,6 +80,7 @@ async def test_start_and_help_answer_without_the_model():
     await Handler({42}, bot, tg).handle_update(update("/help@fitness_bot"))
     assert bot.texts == []
     assert tg.sent == [(42, HELP), (42, HELP)]
+    assert tg.actions == []
 
 
 async def test_bot_failures_become_a_short_warning():
@@ -73,3 +91,28 @@ async def test_bot_failures_become_a_short_warning():
 
 async def test_never_raises_even_when_telegram_fails():
     await Handler({42}, FakeBot(), FakeTelegram(error=RuntimeError("net"))).handle_update(update())
+
+
+async def test_shows_typing_before_the_bot_runs():
+    events = []
+    bot, tg = FakeBot(events=events), FakeTelegram(events=events)
+    await Handler({42}, bot, tg).handle_update(update())
+    assert events == ["typing", "bot"]
+    assert tg.actions == [(42, "typing")]
+
+
+async def test_keeps_typing_while_the_bot_runs_and_stops_after():
+    bot, tg = FakeBot(seconds=0.05), FakeTelegram()
+    await Handler({42}, bot, tg, typing_every=0.01).handle_update(update())
+    count = len(tg.actions)
+    assert count >= 3
+    await asyncio.sleep(0.03)
+    assert len(tg.actions) == count
+    assert tg.sent == [(42, "ok")]
+
+
+async def test_a_failing_typing_action_does_not_affect_the_reply():
+    bot, tg = FakeBot(seconds=0.05), FakeTelegram(action_error=RuntimeError("net"))
+    await Handler({42}, bot, tg, typing_every=0.01).handle_update(update())
+    assert tg.actions == [(42, "typing")]  # gives up after the first failure
+    assert tg.sent == [(42, "ok")]

@@ -26,6 +26,19 @@ async def test_send_message_posts_to_the_bot_api_and_truncates():
     assert len(seen["body"]["text"]) == 4096
 
 
+async def test_send_chat_action_posts_typing_by_default():
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    await client(handler).send_chat_action(42)
+    assert seen["url"] == "https://api.telegram.org/bottok/sendChatAction"
+    assert seen["body"] == {"chat_id": 42, "action": "typing"}
+
+
 async def test_get_updates_returns_results_and_passes_offset():
     seen = {}
 

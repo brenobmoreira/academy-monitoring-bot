@@ -22,8 +22,8 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `tools.py` | ADK tools; return the API body as-is so the model fixes rejected payloads |
 | `summary.py` | Confirmation text built from what the sheet reports it wrote |
 | `bot.py` | Instruction, one ADK run per message, `MAX_LLM_CALLS` budget |
-| `telegram.py` | `sendMessage`, `getUpdates` |
-| `handler.py` | Allowlist, `/start`, run the bot, reply; never raises |
+| `telegram.py` | `sendMessage`, `sendChatAction`, `getUpdates` |
+| `handler.py` | Allowlist, `/start`, run the bot while showing "typing…" (re-sent every 4 s), reply; never raises |
 | `webhook.py` | What every HTTP entry does: `X-Telegram-Bot-Api-Secret-Token` check, hand the update over |
 | `main.py` (+ root `main.py` shim) | Functions Framework entry — Cloud Run functions |
 | `asgi.py` | ASGI app — uvicorn in any container; `GET /healthz` |

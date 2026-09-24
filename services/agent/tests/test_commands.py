@@ -5,7 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from agent.commands import COMMANDS, SHEET_DOWN, Context, help_text, menu, parse_command, parse_day
+from agent.commands import (
+    COMMANDS,
+    SHEET_DOWN,
+    Context,
+    help_text,
+    menu,
+    parse_command,
+    parse_day,
+    week_text,
+)
 
 from .fakes import FakeSheet
 
@@ -211,3 +220,59 @@ def test_set_webhook_script_sends_the_same_menu():
     assert match, "commands='[...]' not found in scripts/set-webhook.sh"
     listed = [(c["command"], c["description"]) for c in json.loads(match[1])]
     assert listed == menu()
+
+
+def week(days=(), rows=()):
+    return {
+        "diary_range": [{"ok": True, "result": {"from": "", "to": "", "days": list(days)}}],
+        "workout_range": [{"ok": True, "result": {"from": "", "to": "", "rows": list(rows)}}],
+    }
+
+
+async def test_semana_asks_the_sheet_for_the_week_containing_today():
+    text, calls = await run("semana", **week(days=[{"date": "2026-09-21", "weightKg": 82}]))
+    assert sorted(calls) == [
+        ("diary.range", {"from": "2026-09-21", "to": "2026-09-27"}),
+        ("workout.range", {"from": "2026-09-21", "to": "2026-09-27"}),
+    ]
+    assert text == "<b>Semana 21/09–27/09</b>\nPeso médio 82 kg (1 dia)"
+
+
+async def test_semana_n_goes_back_n_weeks():
+    text, calls = await run("semana", " 2 ", **week())
+    assert ("diary.range", {"from": "2026-09-07", "to": "2026-09-13"}) in calls
+    assert text == "Sem registros na semana 07/09–13/09."
+    _, calls = await run("semana", "12", **week())
+    assert ("workout.range", {"from": "2026-06-29", "to": "2026-07-05"}) in calls
+
+
+@pytest.mark.parametrize("args", ["13", "-1", "passada", "1.5", "²"])
+async def test_semana_rejects_other_arguments_without_calling_the_sheet(args):
+    text, calls = await run("semana", args)
+    assert text.startswith("Use /semana para esta semana ou /semana n (0 a 12)")
+    assert calls == []
+
+
+async def test_semana_reports_sheet_errors():
+    down = {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": "HTTP 500"}]}
+    ok = week()
+    text, _ = await run("semana", diary_range=ok["diary_range"], workout_range=[down])
+    assert text == SHEET_DOWN
+    bad = {"ok": False, "errors": [{"path": "args.to", "code": "out_of_range", "message": "Período longo"}]}
+    text, _ = await run("semana", diary_range=[bad], workout_range=ok["workout_range"])
+    assert text == "⚠ A planilha recusou o pedido: Período longo"
+
+
+async def test_week_text_serves_any_period_as_html():
+    exercise = {
+        "date": "2026-09-27",
+        "session": "Upper",
+        "exercise": "Rosca",
+        "group": "Bíceps",
+        "setsDone": 2,
+        "volume": 300,
+        "prescribedSets": 2,
+    }
+    reply = await week_text(FakeSheet(**week(rows=[exercise])), date(2026, 9, 21), date(2026, 9, 27))
+    assert reply.html
+    assert reply.text.splitlines()[-1] == "Adesão à ficha: 100% (2 de 2 séries)"

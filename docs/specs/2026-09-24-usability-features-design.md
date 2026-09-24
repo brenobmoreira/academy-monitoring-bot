@@ -155,6 +155,24 @@ days they cover), weight delta first→last, Muay Thai days, diet-complete days,
 sessions done and volume per muscle group, adherence (`setsDone / prescribedSets` over rows with
 a prescription). Missing data is omitted, never shown as zero.
 
+As built (F11): `weekly.py` holds the pure parts, `week_bounds(today, weeks_back)` and
+`week_summary(start, end, days, rows) -> str` (Telegram HTML); `commands.week_text(sheet, start,
+end) -> Reply` makes the two range calls concurrently and maps a failure through `sheet_failure`,
+and is what F12's weekly push should call with `(today - 6 days, today)`. Details:
+
+- `/semana` takes nothing or an integer 0–12 (ASCII digits); anything else gets a usage hint and
+  no sheet call.
+- A value counts only when it is a number (booleans for Muay Thai/diet); a hand-typed text in a
+  number cell is ignored like an empty one. Averages: weight and sleep to one decimal, steps
+  whole. The weight line adds `dd/mm first → dd/mm last (±x kg)` when two or more days have one.
+- Muay Thai and diet are shown as `n de m dias`, `m` = days where the field was answered, so a
+  recorded "Não" still shows (a real zero); a week with no answer leaves the line out.
+- Sessions are distinct `(date, session)` pairs listed as `Upper 22/09, …`; volume per group is
+  sorted by volume, `Sem grupo` for names missing from `Exercícios`; adherence counts an empty
+  `setsDone` as 0 over rows with `prescribedSets > 0`, shown as `85% (17 de 20 séries)`.
+- "Sem registros na semana dd/mm–dd/mm." also when rows exist but none feeds a line (e.g. a
+  day with only notes, hunger or fatigue, which the summary does not use).
+
 ### Reminder (F12)
 
 `POST /remind` on both entry points (ASGI route; the Functions Framework function dispatches on

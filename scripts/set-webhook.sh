@@ -23,6 +23,7 @@ commands='[
   {"command": "hoje", "description": "O que está registrado no dia: /hoje, /hoje ontem, /hoje 21/09"},
   {"command": "ficha", "description": "Exercícios de uma sessão da ficha; sem nome, a próxima a fazer"},
   {"command": "exercicios", "description": "Nomes exatos dos exercícios por grupo; /exercicios peito filtra"},
+  {"command": "semana", "description": "Resumo da semana (seg–dom); /semana 1 é a semana passada"},
   {"command": "desfazer", "description": "Desfaz a última gravação na planilha (do bot ou do menu)"},
   {"command": "help", "description": "Exemplos de mensagem e esta lista de comandos"}
 ]'

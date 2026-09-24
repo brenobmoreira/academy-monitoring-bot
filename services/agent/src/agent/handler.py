@@ -7,12 +7,12 @@ import contextlib
 import logging
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 from zoneinfo import ZoneInfo
 
 import httpx
 
-from agent.bot import Bot
+from agent.bot import MEDIA_UNREADABLE, Bot, Media
 from agent.commands import COMMANDS, CommandSheet, Context, Reply, parse_command
 from agent.format import escape, split
 from agent.llm import build_model
@@ -24,10 +24,19 @@ log = logging.getLogger(__name__)
 
 FAILURE = "⚠ Não consegui processar agora. Confira a planilha antes de reenviar."
 TYPING_EVERY = 4.0  # seconds; Telegram clears the "typing…" status after about 5 s
+MEDIA_MAX_BYTES = 5_000_000
+DOWNLOAD_FAILED = "⚠ Não consegui baixar o arquivo do Telegram. Tente de novo ou envie em texto."
+
+
+def too_large(max_bytes: int) -> str:
+    size = f"{max_bytes / 1_000_000:.1f}".rstrip("0").rstrip(".").replace(".", ",")
+    return f"O arquivo passa de {size} MB, o máximo que eu leio; envie em texto ou um arquivo menor."
 
 
 class Replier(Protocol):
-    async def reply(self, text: str, user_id: str = "telegram") -> str: ...
+    async def reply(
+        self, text: str, user_id: str = "telegram", *, media: list[Media] | None = None
+    ) -> str: ...
 
 
 class Sender(Protocol):
@@ -43,6 +52,53 @@ class Sender(Protocol):
 
     async def send_chat_action(self, chat_id: int, action: str = "typing") -> None: ...
 
+    async def get_file(self, file_id: str) -> dict[str, Any]: ...
+
+    async def download_file(self, file_path: str) -> bytes: ...
+
+
+class MediaRef(NamedTuple):
+    """The file of a voice, audio or photo message, before download."""
+
+    file_id: str
+    size: int | None  # as Telegram reports it; may be absent
+    mime_type: str
+
+    def fits(self, max_bytes: int) -> bool:
+        return self.size is None or self.size <= max_bytes
+
+
+class TooLarge(Exception):
+    pass
+
+
+def media_ref(message: dict[str, Any], max_bytes: int) -> MediaRef | None:
+    """The file to read from a voice, audio or photo message; None for any other message.
+
+    Telegram sends each photo in several sizes (always JPEG): the largest that fits `max_bytes`
+    is taken, or the smallest when none does (so the caller sees it is too large).
+    """
+    for key, default_mime in (("voice", "audio/ogg"), ("audio", "audio/mpeg")):
+        item = message.get(key)
+        if isinstance(item, dict) and isinstance(item.get("file_id"), str):
+            return MediaRef(item["file_id"], _size(item), item.get("mime_type") or default_mime)
+    photos = [
+        MediaRef(p["file_id"], _size(p), "image/jpeg")
+        for p in message.get("photo") or []
+        if isinstance(p, dict) and isinstance(p.get("file_id"), str)
+    ]
+    if not photos:
+        return None
+    fitting = [p for p in photos if p.fits(max_bytes)]
+    if fitting:
+        return max(fitting, key=lambda p: p.size or 0)
+    return min(photos, key=lambda p: p.size or 0)
+
+
+def _size(item: dict[str, Any]) -> int | None:
+    size = item.get("file_size")
+    return size if isinstance(size, int) else None
+
 
 class Handler:
     def __init__(
@@ -54,6 +110,8 @@ class Handler:
         timezone: str = "America/Sao_Paulo",
         clock: Callable[[], datetime] | None = None,
         typing_every: float = TYPING_EVERY,
+        media_enabled: bool = True,
+        media_max_bytes: int = MEDIA_MAX_BYTES,
     ) -> None:
         self._allowed = allowed_chat_ids
         self._bot = bot
@@ -62,33 +120,83 @@ class Handler:
         zone = ZoneInfo(timezone)
         self._clock = clock or (lambda: datetime.now(zone))
         self._typing_every = typing_every
+        self._media_enabled = media_enabled
+        self._media_max_bytes = media_max_bytes
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         """Never raises: a webhook that errors makes Telegram resend the same update."""
         message = update.get("message") or {}
         text = message.get("text")
         chat_id = (message.get("chat") or {}).get("id")
-        if not isinstance(text, str) or not text.strip() or chat_id not in self._allowed:
+        if chat_id not in self._allowed:
             return
-        parsed = parse_command(text)
-        if parsed is not None:
-            reply = await self._command(*parsed, chat_id=chat_id)
+        if not isinstance(text, str) or not text.strip():
+            reply = await self._media(message, chat_id, update.get("update_id"))
+            if reply is None:
+                return
         else:
-            typing = asyncio.create_task(self._keep_typing(chat_id))
-            await asyncio.sleep(0)  # let the first action go out before the bot starts
-            try:
-                reply = Reply(await self._bot.reply(text, user_id=str(chat_id)), html=True)
-            except Exception:
-                log.exception("bot failed on update %s", update.get("update_id"))
-                reply = Reply(FAILURE)
-            finally:
-                typing.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await typing
+            parsed = parse_command(text)
+            if parsed is not None:
+                reply = await self._command(*parsed, chat_id=chat_id)
+            else:
+                reply = await self._run_bot(text, chat_id, update.get("update_id"))
         try:
             await self._send(chat_id, reply)
         except Exception:
             log.exception("could not send the reply to chat %s", chat_id)
+
+    async def _run_bot(
+        self, text: str, chat_id: int, update_id: Any, media: list[Media] | None = None
+    ) -> Reply:
+        typing = asyncio.create_task(self._keep_typing(chat_id))
+        await asyncio.sleep(0)  # let the first action go out before the bot starts
+        try:
+            if media:
+                answer = await self._bot.reply(text, user_id=str(chat_id), media=media)
+            else:
+                answer = await self._bot.reply(text, user_id=str(chat_id))
+            return Reply(answer, html=True)
+        except Exception:
+            log.exception("bot failed on update %s", update_id)
+            return Reply(FAILURE)
+        finally:
+            typing.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await typing
+
+    async def _media(self, message: dict[str, Any], chat_id: int, update_id: Any) -> Reply | None:
+        """Voice, audio and photo messages (caption optional); None for anything else (stickers,
+        documents, service messages), which gets no reply."""
+        ref = media_ref(message, self._media_max_bytes)
+        if ref is None:
+            return None
+        if not self._media_enabled:
+            return Reply(MEDIA_UNREADABLE)
+        if not ref.fits(self._media_max_bytes):
+            return Reply(too_large(self._media_max_bytes))
+        caption = message.get("caption")
+        caption = caption if isinstance(caption, str) else ""
+        try:
+            data = await self._download(ref)
+        except TooLarge:
+            return Reply(too_large(self._media_max_bytes))
+        except Exception:
+            log.exception("could not download the file of update %s", update_id)
+            return Reply(DOWNLOAD_FAILED)
+        return await self._run_bot(caption, chat_id, update_id, media=[Media(ref.mime_type, data)])
+
+    async def _download(self, ref: MediaRef) -> bytes:
+        file = await self._telegram.get_file(ref.file_id)
+        size = file.get("file_size")
+        if isinstance(size, int) and size > self._media_max_bytes:
+            raise TooLarge
+        path = file.get("file_path")
+        if not isinstance(path, str) or not path:
+            raise ValueError("getFile returned no file_path")
+        data = await self._telegram.download_file(path)
+        if len(data) > self._media_max_bytes:
+            raise TooLarge
+        return data
 
     async def _command(self, name: str, args: str, chat_id: int) -> Reply:
         """Registered commands answer from the sheet alone; they never reach the model."""
@@ -122,4 +230,12 @@ def build_handler(settings: Settings, http: httpx.AsyncClient) -> Handler:
     sheet = SheetClient(settings.SHEET_API_URL, settings.SHEET_API_KEY.get_secret_value(), http)
     bot = Bot(sheet, build_model(settings), timezone=settings.TIMEZONE, max_llm_calls=settings.MAX_LLM_CALLS)
     telegram = TelegramClient(settings.TELEGRAM_BOT_TOKEN.get_secret_value(), http)
-    return Handler(settings.ALLOWED_CHAT_IDS, bot, telegram, sheet=sheet, timezone=settings.TIMEZONE)
+    return Handler(
+        settings.ALLOWED_CHAT_IDS,
+        bot,
+        telegram,
+        sheet=sheet,
+        timezone=settings.TIMEZONE,
+        media_enabled=settings.MEDIA_ENABLED,
+        media_max_bytes=settings.MEDIA_MAX_BYTES,
+    )

@@ -1,4 +1,5 @@
 import json
+import traceback
 
 import httpx
 import pytest
@@ -90,3 +91,45 @@ async def test_set_my_commands_sends_the_menu():
     assert seen["body"] == {
         "commands": [{"command": "hoje", "description": "o dia"}, {"command": "help", "description": "ajuda"}]
     }
+
+
+async def test_get_file_asks_for_the_file_path():
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        result = {"file_id": "v1", "file_size": 9000, "file_path": "voice/file_3.oga"}
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    assert (await client(handler).get_file("v1"))["file_path"] == "voice/file_3.oga"
+    assert seen["url"] == "https://api.telegram.org/bottok/getFile"
+    assert seen["body"] == {"file_id": "v1"}
+
+
+async def test_download_file_gets_the_bytes_from_the_file_endpoint():
+    seen = {}
+
+    def handler(request):
+        seen["method"] = request.method
+        seen["url"] = str(request.url)
+        return httpx.Response(200, content=b"OggS\x00")
+
+    assert await client(handler).download_file("voice/file_3.oga") == b"OggS\x00"
+    assert seen == {"method": "GET", "url": "https://api.telegram.org/file/bottok/voice/file_3.oga"}
+
+
+def not_found(request):
+    return httpx.Response(404, text="Not Found: https://api.telegram.org/file/bottok/x")
+
+
+def unreachable(request):
+    raise httpx.ConnectError("cannot reach https://api.telegram.org/file/bottok/x", request=request)
+
+
+@pytest.mark.parametrize("handler", [not_found, unreachable])
+async def test_download_errors_never_carry_the_token(handler):
+    with pytest.raises(TelegramError) as caught:
+        await client(handler).download_file("voice/x.oga")
+    logged = "".join(traceback.format_exception(caught.value))  # what log.exception would print
+    assert "bottok" not in logged

@@ -18,6 +18,8 @@ ALL_KEYS = [
     "LLM_API_BASE",
     "MAX_LLM_CALLS",
     "TIMEZONE",
+    "MEDIA_ENABLED",
+    "MEDIA_MAX_BYTES",
 ]
 
 
@@ -80,3 +82,22 @@ def test_bad_values_are_rejected(env, monkeypatch):
 def test_a_missing_yaml_falls_back_to_defaults(env, monkeypatch, tmp_path):
     monkeypatch.setenv("SETTINGS_FILE", str(tmp_path / "absent.yaml"))
     assert Settings.load().LLM_MODEL == "gemini/gemini-3.8-flash"
+
+
+def test_media_is_on_by_default_up_to_5_mb(env):
+    s = Settings.load()
+    assert s.MEDIA_ENABLED is True
+    assert s.MEDIA_MAX_BYTES == 5_000_000
+
+
+def test_media_settings_come_from_the_environment(env, monkeypatch):
+    monkeypatch.setenv("MEDIA_ENABLED", "false")
+    monkeypatch.setenv("MEDIA_MAX_BYTES", "1000")
+    s = Settings.load()
+    assert (s.MEDIA_ENABLED, s.MEDIA_MAX_BYTES) == (False, 1000)
+
+
+def test_media_max_bytes_stays_within_the_bot_api_limit(env, monkeypatch):
+    monkeypatch.setenv("MEDIA_MAX_BYTES", "30000000")
+    with pytest.raises(ConfigError, match="MEDIA_MAX_BYTES"):
+        Settings.load()

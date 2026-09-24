@@ -1,9 +1,19 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import httpx
+import litellm
 import pytest
 
-from agent.bot import MODEL_FAILED, MODEL_FAILED_NOTHING_WRITTEN, SHEET_FAILED, Bot, instruction
+from agent.bot import (
+    MEDIA_UNREADABLE,
+    MODEL_FAILED,
+    MODEL_FAILED_NOTHING_WRITTEN,
+    SHEET_FAILED,
+    Bot,
+    Media,
+    instruction,
+)
 
 from .fakes import OK_DIARY, FakeSheet, ScriptedLlm, call, say
 
@@ -177,3 +187,56 @@ async def test_other_errors_reach_the_handler():
 async def test_model_text_is_escaped_for_html(sheet):
     b, _ = bot(sheet, [say("Use <b>kg</b> & reps")])
     assert await b.reply("oi") == "Use &lt;b&gt;kg&lt;/b&gt; &amp; reps"
+
+
+def test_instruction_covers_audio_and_photos_and_forbids_guessing_digits():
+    text = instruction(NOW)
+    assert "transcreva" in text
+    assert "balança" in text
+    assert "Nunca adivinhe um dígito" in text
+
+
+async def test_media_goes_to_the_model_as_inline_data_next_to_the_caption():
+    sheet = FakeSheet(diary_upsert=[OK_DIARY])
+    b, llm = bot(sheet, [call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}), say("ok")])
+    reply = await b.reply("de hoje", media=[Media("image/jpeg", b"\xff\xd8jpeg")])
+    assert reply == "<b>21/09</b> · Peso kg 82,4"
+    parts = llm.requests[0].contents[-1].parts
+    assert parts[0].inline_data.mime_type == "image/jpeg"
+    assert parts[0].inline_data.data == b"\xff\xd8jpeg"
+    assert parts[1].text == "[Anexo: foto]\nde hoje"
+
+
+async def test_a_voice_message_without_caption_is_labelled_for_the_model(sheet):
+    b, llm = bot(sheet, [say("Não entendi o áudio.")])
+    await b.reply("", media=[Media("audio/ogg", b"OggS")])
+    parts = llm.requests[0].contents[-1].parts
+    assert (parts[0].inline_data.mime_type, parts[1].text) == ("audio/ogg", "[Anexo: áudio]")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ValueError("LiteLlm(BaseLlm) does not support content part with MIME type audio/ogg."),
+        litellm.BadRequestError("audio format not supported", model="gpt", llm_provider="openai"),
+        litellm.UnprocessableEntityError(
+            "bad media",
+            model="m",
+            llm_provider="p",
+            response=httpx.Response(422, request=httpx.Request("POST", "https://llm")),
+        ),
+    ],
+)
+async def test_a_model_that_rejects_the_media_asks_for_text(sheet, error):
+    b, _ = bot(sheet, [error])
+    assert await b.reply("", media=[Media("audio/ogg", b"OggS")]) == MEDIA_UNREADABLE
+
+
+async def test_a_transient_failure_with_media_is_still_a_model_failure(sheet):
+    b, _ = bot(sheet, [litellm.Timeout("slow", model="m", llm_provider="p")])
+    assert await b.reply("", media=[Media("audio/ogg", b"OggS")]) == MODEL_FAILED_NOTHING_WRITTEN
+
+
+async def test_a_bad_request_without_media_is_a_model_failure(sheet):
+    b, _ = bot(sheet, [litellm.BadRequestError("bad", model="m", llm_provider="p")])
+    assert await b.reply("peso 82,4") == MODEL_FAILED_NOTHING_WRITTEN

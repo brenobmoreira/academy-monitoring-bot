@@ -5,7 +5,7 @@ import litellm
 import pytest
 from pydantic import SecretStr
 
-from agent.bot import MODEL_FAILED, Bot
+from agent.bot import MEDIA_UNREADABLE, MODEL_FAILED, Bot, Media
 from agent.llm import build_model
 from agent.settings import Settings
 
@@ -96,3 +96,34 @@ async def test_a_litellm_timeout_is_reported_after_what_was_written():
     assert (
         await run(build_model(settings(), client=client)) == f"<b>21/09</b> · Peso kg 82,4\n\n{MODEL_FAILED}"
     )
+
+
+async def media_request(media: Media, caption: str = "") -> list:
+    client = FakeLiteLLMClient([text_response("ok")])
+    bot = Bot(FakeSheet(), build_model(settings(LLM_MODEL="gemini/gemini-3.8-flash"), client=client), "UTC")
+    await bot.reply(caption, media=[media])
+    user = [m for m in client.requests[0]["messages"] if m["role"] == "user"][-1]
+    return user["content"]
+
+
+async def test_a_photo_reaches_litellm_as_an_image_url_data_uri():
+    content = await media_request(Media("image/jpeg", b"\xff\xd8"), "balança")
+    assert content == [
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9g="}},
+        {"type": "text", "text": "[Anexo: foto]\nbalança"},
+    ]
+
+
+async def test_a_voice_message_reaches_litellm_as_input_audio_in_ogg_format():
+    content = await media_request(Media("audio/ogg", b"OggS"))
+    assert content == [
+        {"type": "input_audio", "input_audio": {"data": "T2dnUw==", "format": "ogg"}},
+        {"type": "text", "text": "[Anexo: áudio]"},
+    ]
+
+
+async def test_a_media_type_adk_cannot_convert_asks_for_text():
+    client = FakeLiteLLMClient([text_response("ok")])
+    bot = Bot(FakeSheet(), build_model(settings(), client=client), "UTC")
+    assert await bot.reply("", media=[Media("application/x-unknown", b"??")]) == MEDIA_UNREADABLE
+    assert client.requests == []  # refused while converting, before any provider call

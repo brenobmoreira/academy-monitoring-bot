@@ -81,6 +81,11 @@ A plain `clasp push` does not change what the URL serves.
 | `diary.upsert` | `{"date": "2026-09-21", "fields": {"weightKg": 82.4, "sleepH": 7.5, "muayThai": true}}` |
 | `workout.upsert` | `{"date": "2026-09-21", "session": "Upper", "exercises": [{"name": "Supino inclinado", "sets": [{"kg": 60, "reps": 8}], "rir": 2}]}` |
 | `exercise.history` | `{"name": "Supino inclinado", "limit": 10}` |
+| `diary.range` | `{"from": "2026-09-08", "to": "2026-09-21"}` → `{from, to, days: [{date, weightKg, muayThai, ...}]}`: only days with at least one filled field, oldest first, empty cells left out, `Sim`/`Não` read back as booleans |
+| `workout.range` | `{"from": "2026-09-14", "to": "2026-09-20"}` → `{from, to, rows: [{date, session, exercise, group, setsDone, volume, prescribedSets, rir?, pain?}]}`: log rows oldest first, `group` from `Exercícios` (`null` if the name is not there) |
+
+The range ops read at most 92 days (`from` and `to` inclusive, `from ≤ to`); dates after today
+are accepted, so a week that has not ended yet can be asked for whole.
 
 Nothing is coerced (`"82,4"` and `"sim"` are rejected), every error is reported at once, and a
 request with any error writes nothing. The full rules are in

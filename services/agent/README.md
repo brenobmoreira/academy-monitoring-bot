@@ -10,7 +10,8 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
                     asgi.app (uvicorn)                            ├─▶ webhook.process ─▶ Handler ─▶ Bot
                                                                   ┘      (secret check)             │
                      ADK LlmAgent ─▶ LiteLlm ─▶ LLM_MODEL (gemini/…, anthropic/…, openai/…, ollama/…)
-                        │ get_catalog / save_diary / save_workout / get_exercise_history
+                        │ get_catalog / save_diary / save_workout / get_exercise_history /
+                        │ get_diary_history
                         └──▶ SheetClient ─POST JSON─▶ Apps Script
 ```
 
@@ -19,7 +20,7 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `settings.py` | `Settings`: every external value (env, `.env`, `settings.yaml`) |
 | `llm.py` | `build_model`: the LiteLLM model from `LLM_MODEL`, `LLM_API_KEY`, `LLM_API_BASE` |
 | `sheet_client.py` | Calls the sheet API; network failures become `{ok:false, errors:[{code:"unavailable"}]}` |
-| `tools.py` | ADK tools; return the API body as-is so the model fixes rejected payloads |
+| `tools.py` | ADK tools; return the API body as-is so the model fixes rejected payloads. `get_diary_history` reads `diary.range` for questions about a period |
 | `summary.py` | Confirmation text built from what the sheet reports it wrote |
 | `bot.py` | Instruction, one ADK run per message, `MAX_LLM_CALLS` budget |
 | `telegram.py` | `sendMessage`, `getUpdates` |

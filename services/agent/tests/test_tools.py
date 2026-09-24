@@ -11,9 +11,15 @@ def tools(sheet, journal=None):
     return {t.__name__: t for t in build_tools(sheet, journal or Journal())}
 
 
-def test_exposes_the_four_tools_with_docstrings(sheet):
+def test_exposes_the_tools_with_docstrings(sheet):
     t = tools(sheet)
-    assert list(t) == ["get_catalog", "save_diary", "save_workout", "get_exercise_history"]
+    assert list(t) == [
+        "get_catalog",
+        "save_diary",
+        "save_workout",
+        "get_exercise_history",
+        "get_diary_history",
+    ]
     assert all(fn.__doc__ for fn in t.values())
 
 
@@ -63,4 +69,9 @@ async def test_read_tools_pass_through(sheet):
     t = tools(sheet)
     await t["get_catalog"]()
     await t["get_exercise_history"]("Leg press", 3)
-    assert sheet.calls == [("catalog", {}), ("exercise.history", {"name": "Leg press", "limit": 3})]
+    await t["get_diary_history"]("2026-09-08", "2026-09-21")
+    assert sheet.calls == [
+        ("catalog", {}),
+        ("exercise.history", {"name": "Leg press", "limit": 3}),
+        ("diary.range", {"from": "2026-09-08", "to": "2026-09-21"}),
+    ]

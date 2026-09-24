@@ -197,6 +197,18 @@ Tool `get_diary_history(date_from, date_to)` over `diary.range`. The instruction
 questions such as "como está meu peso nas últimas 2 semanas?"; the model answers from the data
 and must not invent days that are absent.
 
+Details fixed while implementing (both range ops share `Validator.dateRange`):
+
+- `from` and `to` are inclusive; the period is at most 92 days counted that way. `from > to` is
+  `invalid_range`, a longer period `out_of_range`, both on `args.to`.
+- Dates after today are accepted (unlike the upserts), so F11 can ask for a whole Mon–Sun week
+  that has not ended yet.
+- `diary.range` leaves out a dated row with no diary field filled in, so a pre-dated template
+  row does not read as a logged day. Values are read back with `Schema.fromCell`: `Sim`/`Não`
+  (or a checkbox) → boolean, text trimmed, a hand-typed non-number kept as the text it is.
+- `workout.range` rows: oldest first, sheet order within a day; `group` is `null` for a name
+  missing from `Exercícios`; `setsDone`, `volume`, `prescribedSets` are `null` when empty.
+
 ## Settings added
 
 | Setting | Secret | Default | Feature |

@@ -39,4 +39,29 @@ const DiaryRepo = {
     });
     return { row, written };
   },
+
+  /**
+   * Days between from and to (yyyy-MM-dd, inclusive) that have a row, oldest first, as
+   * {date, <field>: value}. Empty cells are left out, and so is a dated row with no field filled
+   * in, so a pre-dated template row does not read as a logged day. With two rows for one date
+   * the first wins, as in upsert.
+   */
+  range(from, to) {
+    const sheet = DiaryRepo.sheet_();
+    const rows = Sheets.readRows(sheet, Config.headerRow());
+    const byDate = {};
+    rows.forEach((r) => {
+      const d = r[Schema.DATE_HEADER];
+      if (!(d instanceof Date)) return;
+      const key = Sheets.dayKey(d);
+      if (key < from || key > to || byDate[key]) return;
+      const day = {};
+      Object.keys(Schema.DIARY_FIELDS).forEach((field) => {
+        const value = Schema.fromCell(field, r[Schema.DIARY_FIELDS[field].header]);
+        if (value !== undefined) day[field] = value;
+      });
+      if (Object.keys(day).length) byDate[key] = { date: key, ...day };
+    });
+    return Object.keys(byDate).sort().map((key) => byDate[key]);
+  },
 };

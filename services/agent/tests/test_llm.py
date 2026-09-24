@@ -51,8 +51,15 @@ async def test_tools_are_declared_to_the_provider_in_openai_format():
     client = FakeLiteLLMClient([text_response("ok")])
     await run(build_model(settings(), client=client))
     tools = {t["function"]["name"]: t["function"]["parameters"] for t in client.requests[0]["tools"]}
-    assert list(tools) == ["get_catalog", "save_diary", "save_workout", "get_exercise_history"]
+    assert list(tools) == [
+        "get_catalog",
+        "save_diary",
+        "save_workout",
+        "get_exercise_history",
+        "get_diary_history",
+    ]
     assert "exercises" in tools["save_workout"]["properties"]
+    assert tools["get_diary_history"]["required"] == ["date_from", "date_to"]
 
 
 async def test_a_rejected_payload_goes_back_to_the_model_through_litellm():

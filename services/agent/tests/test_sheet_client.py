@@ -65,6 +65,22 @@ async def test_optional_arguments_are_omitted():
     ]
 
 
+async def test_range_ops_send_from_and_to():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    c = client(handler)
+    await c.diary_range("2026-09-08", "2026-09-21")
+    await c.workout_range("2026-09-14", "2026-09-20")
+    assert [(b["op"], b["args"]) for b in seen] == [
+        ("diary.range", {"from": "2026-09-08", "to": "2026-09-21"}),
+        ("workout.range", {"from": "2026-09-14", "to": "2026-09-20"}),
+    ]
+
+
 @pytest.mark.parametrize(
     ("response", "hint"),
     [

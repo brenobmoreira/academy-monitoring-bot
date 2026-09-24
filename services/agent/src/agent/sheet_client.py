@@ -65,6 +65,12 @@ class SheetClient:
             args["limit"] = limit
         return await self.call("exercise.history", args)
 
+    async def diary_range(self, date_from: str, date_to: str) -> Response:
+        return await self.call("diary.range", {"from": date_from, "to": date_to})
+
+    async def workout_range(self, date_from: str, date_to: str) -> Response:
+        return await self.call("workout.range", {"from": date_from, "to": date_to})
+
 
 def _unavailable(message: str) -> Response:
     return {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": message}]}

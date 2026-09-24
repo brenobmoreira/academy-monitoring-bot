@@ -69,6 +69,24 @@ const Validator = {
     return c.result({ name: args.name, limit: args.limit === undefined ? 10 : args.limit });
   },
 
+  /** diary.range and workout.range: {from, to}, inclusive, at most MAX_RANGE_DAYS days. */
+  dateRange(args, ctx) {
+    const c = new Checker_();
+    if (!c.object(args, 'args')) return c.result(null);
+    c.onlyKeys(args, 'args', ['from', 'to']);
+    // Future days are allowed: reading them is harmless and a week can end after today.
+    const from = c.date(args.from, 'args.from', ctx.today, true);
+    const to = c.date(args.to, 'args.to', ctx.today, true);
+    if (from && to) {
+      const days = (Date.parse(args.to) - Date.parse(args.from)) / 86400000 + 1;
+      if (days < 1) c.add('args.to', 'invalid_range', `"to" (${args.to}) é antes de "from" (${args.from})`);
+      else if (days > Schema.MAX_RANGE_DAYS) {
+        c.add('args.to', 'out_of_range', `período de no máximo ${Schema.MAX_RANGE_DAYS} dias, recebido ${days}; divida em consultas menores`);
+      }
+    }
+    return c.result({ from: args.from, to: args.to });
+  },
+
   sets_(c, sets, path) {
     if (sets === undefined) { c.add(path, 'required', 'campo obrigatório'); return; }
     if (!Array.isArray(sets)) { c.add(path, 'wrong_type', `esperado lista, recebido ${Checker_.show(sets)}`); return; }
@@ -163,14 +181,15 @@ class Checker_ {
     return true;
   }
 
-  date(v, path, today) {
+  /** yyyy-MM-dd on the calendar; not after today unless allowFuture. */
+  date(v, path, today, allowFuture) {
     if (v === undefined) return this.add(path, 'required', 'campo obrigatório (yyyy-MM-dd)');
     const m = typeof v === 'string' && /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
     const d = m && new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
     if (!d || d.getUTCMonth() !== Number(m[2]) - 1 || d.getUTCDate() !== Number(m[3])) {
       return this.add(path, 'invalid_date', `data inválida ${Checker_.show(v)}; use yyyy-MM-dd, ex.: ${today}`);
     }
-    if (v > today) return this.add(path, 'date_in_future', `data ${v} é depois de hoje (${today})`);
+    if (!allowFuture && v > today) return this.add(path, 'date_in_future', `data ${v} é depois de hoje (${today})`);
     return true;
   }
 

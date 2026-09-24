@@ -21,6 +21,8 @@ class SheetApi(Protocol):
         self, date: str, session: str, exercises: list[dict[str, Any]], phase: str | None = None
     ) -> dict[str, Any]: ...
     async def exercise_history(self, name: str, limit: int | None = None) -> dict[str, Any]: ...
+    async def diary_range(self, date_from: str, date_to: str) -> dict[str, Any]: ...
+    async def workout_range(self, date_from: str, date_to: str) -> dict[str, Any]: ...
 
 
 class DiaryFields(BaseModel):
@@ -103,7 +105,18 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         """
         return await sheet.exercise_history(name, limit)
 
-    return [get_catalog, save_diary, save_workout, get_exercise_history]
+    async def get_diary_history(date_from: str, date_to: str) -> dict[str, Any]:
+        """Dados do Diário num período, do dia mais antigo ao mais recente. Só vêm os dias que
+        têm registro, e em cada dia só os campos preenchidos: dia ou campo ausente não foi
+        registrado.
+
+        Args:
+            date_from: primeiro dia, yyyy-MM-dd.
+            date_to: último dia, yyyy-MM-dd; no máximo 92 dias depois de date_from.
+        """
+        return await sheet.diary_range(date_from, date_to)
+
+    return [get_catalog, save_diary, save_workout, get_exercise_history, get_diary_history]
 
 
 def _plain(value: Any) -> Any:

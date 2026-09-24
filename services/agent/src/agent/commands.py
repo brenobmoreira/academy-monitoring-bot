@@ -24,6 +24,7 @@ from agent.settings import Settings
 from agent.summary import confirmation
 from agent.telegram import TelegramClient
 from agent.undo import undo_last
+from agent.weekly import week_bounds, week_summary
 
 log = logging.getLogger(__name__)
 
@@ -37,12 +38,15 @@ EXAMPLES = (
 )
 SHEET_DOWN = "⚠ A planilha não respondeu. Tente de novo em alguns minutos."
 ADAPTATION = "Adaptação"
+MAX_WEEKS_BACK = 12
 
 
 class CommandSheet(Protocol):
     async def catalog(self) -> dict[str, Any]: ...
     async def day(self, date: str) -> dict[str, Any]: ...
     async def undo(self, write_id: str | None = None) -> dict[str, Any]: ...
+    async def diary_range(self, date_from: str, date_to: str) -> dict[str, Any]: ...
+    async def workout_range(self, date_from: str, date_to: str) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -170,6 +174,29 @@ async def exercicios(ctx: Context, args: str) -> Reply:
         groups = chosen
     blocks = [f"{group}:\n" + "\n".join(f"• {name}" for name in names) for group, names in groups.items()]
     return Reply("\n\n".join(blocks))
+
+
+@command("semana", "Resumo da semana (seg–dom); /semana 1 é a semana passada")
+async def semana(ctx: Context, args: str) -> Reply:
+    word = args.strip()
+    if word and not (re.fullmatch(r"[0-9]{1,2}", word) and int(word) <= MAX_WEEKS_BACK):
+        return Reply(
+            f"Use /semana para esta semana ou /semana n (0 a {MAX_WEEKS_BACK}) para n semanas atrás."
+        )
+    start, end = week_bounds(ctx.today, int(word or 0))
+    return await week_text(ctx.api(), start, end)
+
+
+async def week_text(sheet: CommandSheet, start: date, end: date) -> Reply:
+    """The weekly summary for `start`..`end` (inclusive); also sent by the weekly reminder."""
+    days, rows = await asyncio.gather(
+        sheet.diary_range(start.isoformat(), end.isoformat()),
+        sheet.workout_range(start.isoformat(), end.isoformat()),
+    )
+    for response in (days, rows):
+        if not response.get("ok"):
+            return sheet_failure(response)
+    return Reply(week_summary(start, end, days["result"]["days"], rows["result"]["rows"]), html=True)
 
 
 @command("desfazer", "Desfaz a última gravação na planilha (do bot ou do menu)")

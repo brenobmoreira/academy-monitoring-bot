@@ -25,8 +25,9 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `summary.py` | Confirmation text built from what the sheet reports it wrote (HTML; bold date/session and exercise names), each exercise compared with its previous session |
 | `bot.py` | Instruction (with the "Contexto recente" rules and the replied-to message), one ADK run per message, `MAX_LLM_CALLS` budget, failure replies; the model's text is escaped |
 | `telegram.py` | `sendMessage` (optional `parse_mode=HTML`, `reply_markup`, reply-to; returns the sent Message), `sendChatAction`, `getUpdates`, `setMyCommands` |
-| `commands.py` | `COMMANDS` registry: `/hoje`, `/ficha`, `/exercicios`, `/desfazer`, `/help`, `/start`, answered from the sheet without the model; `uv run agent-commands` publishes the menu |
+| `commands.py` | `COMMANDS` registry: `/hoje`, `/ficha`, `/exercicios`, `/semana`, `/desfazer`, `/help`, `/start`, answered from the sheet without the model; `uv run agent-commands` publishes the menu |
 | `handler.py` | Allowlist, dispatch registered commands, otherwise run the bot (with the text of the bot message being replied to, if any) while showing "typing…" (re-sent every 4 s), reply as HTML in as many messages as needed; never raises |
+| `weekly.py` | `/semana` text: Mon–Sun bounds and the summary built from `diary.range` + `workout.range` (pure, no model) |
 | `undo.py` | `/desfazer`: `write.undo` on the latest write, reply built from what the sheet undid |
 | `webhook.py` | What every HTTP entry does: `X-Telegram-Bot-Api-Secret-Token` check, hand the update over |
 | `main.py` (+ root `main.py` shim) | Functions Framework entry — Cloud Run functions |
@@ -71,6 +72,7 @@ any other text, including an unknown `/word`, goes to the agent.
 | `/hoje [data]` | what the sheet has for the day (`day.get`), in the confirmation format; `data` is `ontem`, `dd/mm` (the latest such day, so `30/12` in January is last year's) or `yyyy-mm-dd`; "Nada registrado em dd/mm." when empty |
 | `/ficha [sessão]` | the plan rows of a session with the sets of the current phase and the rep range; without a name, the session after the last logged one (`catalog.lastWorkout`) in plan order, or the first |
 | `/exercicios [grupo]` | exact catalogue names by muscle group; the group matches ignoring case and accents |
+| `/semana [n]` | summary of the Mon–Sun week containing today, or `n` (0–12) weeks back, from `diary.range` + `workout.range`: average weight (with first→last change), sleep and steps with the days they cover, Muay Thai and diet-complete days out of the days answered, cardio minutes, sessions, volume per muscle group, adherence (sets done / prescribed sets); a line without data is left out; "Sem registros na semana dd/mm–dd/mm." when empty |
 | `/desfazer` | undoes the latest sheet write not yet undone, from the bot or the sheet menu (`write.undo`); replies with what was undone |
 | `/help`, `/start` | examples and the command list (`/start` stays out of the menu) |
 

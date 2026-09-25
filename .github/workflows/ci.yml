@@ -19,7 +19,7 @@ jobs:
       sheet: ${{ steps.filter.outputs.sheet }}
       agent: ${{ steps.filter.outputs.agent }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -39,10 +39,10 @@ jobs:
     if: needs.changes.outputs.sheet == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - run: npm run check
       - run: npm test
 
@@ -54,12 +54,12 @@ jobs:
       run:
         working-directory: services/agent
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # e2e/sheet_server.js runs the real Apps Script sources in Node.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - uses: astral-sh/setup-uv@v6
+          node-version: 22
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: services/agent/uv.lock
@@ -70,7 +70,7 @@ jobs:
       - run: uv run pytest
       # Scripted provider only: no LLM key, no network.
       - run: uv run python ../../e2e/run.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: e2e-trace

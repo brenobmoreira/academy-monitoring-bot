@@ -93,12 +93,14 @@ const WorkoutRepo = {
   },
 
   /**
-   * Names are expected to be exact catalogue names (see Validator.workoutUpsert).
+   * Names are expected to be exact catalogue names (see Validator.workoutUpsert). Each saved
+   * exercise carries `previous`, its latest session before `date` (see previousSessions_).
    * @param {Date} date
    * @param {{session: string, phase?: string, exercises: Array}} workout
+   * @param {UndoCapture_} [capture]  records the previous cell values (see UndoLog)
    * @returns {{phase: string, sessionId: string, rows: number[], exercises: Object[]}}
    */
-  saveSession(date, workout) {
+  saveSession(date, workout, capture = UndoLog.capture()) {
     const sheet = WorkoutRepo.sheet_();
     const headerRow = Config.headerRow();
     const columns = Sheets.columnIndex(sheet, headerRow);
@@ -109,6 +111,7 @@ const WorkoutRepo = {
     const planVersion = WorkoutPlan.currentPlanVersion();
     const existing = Sheets.readRows(sheet, headerRow);
     const sessionId = WorkoutRepo.sessionId(date, workout.session);
+    const previous = WorkoutRepo.previousSessions_(existing, date);
     const result = { phase, sessionId, rows: [], exercises: [] };
 
     workout.exercises.forEach((ex) => {
@@ -140,15 +143,19 @@ const WorkoutRepo = {
         cells[WorkoutRepo.repsHeader(n)] = s ? Number(s.reps) || '' : '';
       }
 
-      const row = WorkoutRepo.findExisting_(existing, date, workout.session, ex.name)
-        || Sheets.nextEmptyRow(sheet, headerRow + 1, columns[H.date]);
+      let row = WorkoutRepo.findExisting_(existing, date, workout.session, ex.name);
+      if (!row) {
+        row = Sheets.nextEmptyRow(sheet, headerRow + 1, columns[H.date]);
+        capture.newRow(sheet, row);
+      }
       Object.keys(cells).forEach((header) => {
-        if (columns[header]) sheet.getRange(row, columns[header]).setValue(cells[header]);
+        if (columns[header]) capture.set(sheet, row, columns[header], cells[header]);
       });
       existing.push({ __row: row, [H.date]: date, [H.session]: workout.session, [H.exercise]: ex.name });
       result.rows.push(row);
       const saved = { name: ex.name, row, sets: sets.map((set) => ({ kg: set.kg, reps: set.reps })), setsDone, volume };
       ['rir', 'pain', 'note', 'equipment'].forEach((k) => { if (ex[k] !== undefined) saved[k] = ex[k]; });
+      saved.previous = previous[WorkoutPlan.normalize(ex.name)] || null;
       result.exercises.push(saved);
     });
     return result;
@@ -162,6 +169,104 @@ const WorkoutRepo = {
       .filter((r) => r[H.date] instanceof Date && WorkoutPlan.normalize(r[H.exercise]) === key)
       .sort((a, b) => b[H.date] - a[H.date])
       .slice(0, limit);
+  },
+
+  /** Sets logged in a log row (reps filled), in set order; a blank load is bodyweight (kg 0). */
+  loggedSets(row) {
+    const sets = [];
+    for (let n = 1; n <= Schema.MAX_SETS; n++) {
+      const reps = row[WorkoutRepo.repsHeader(n)];
+      if (reps !== '' && reps !== undefined) sets.push({ kg: Number(row[WorkoutRepo.kgHeader(n)]) || 0, reps: Number(reps) });
+    }
+    return sets;
+  },
+
+  /**
+   * Latest session of every exercise strictly before `date`, from log rows read before the write,
+   * so a same-date rewrite never compares with itself. On a day logged twice (two sessions)
+   * the later row wins.
+   * @returns {Object<string, {date: string, sets: Object[], volume: ?number, setsDone: ?number}>} by normalized name
+   */
+  previousSessions_(rows, date) {
+    const H = WorkoutRepo.HEADERS;
+    const key = Sheets.dayKey(date);
+    const cell = (v) => (v === '' || v === undefined ? null : v);
+    const latest = {};
+    rows.forEach((r) => {
+      if (!(r[H.date] instanceof Date)) return;
+      const day = Sheets.dayKey(r[H.date]);
+      const name = WorkoutPlan.normalize(r[H.exercise]);
+      if (day >= key || (latest[name] && latest[name].date > day)) return;
+      latest[name] = { date: day, sets: WorkoutRepo.loggedSets(r), volume: cell(r[H.volume]), setsDone: cell(r[H.setsDone]) };
+    });
+    return latest;
+  },
+
+  /**
+   * Log rows dated from..to (yyyy-MM-dd, inclusive), oldest first and in sheet order within a
+   * day. group comes from "Exercícios" (null when the name is not there); rir and pain are left
+   * out when empty; setsDone, volume and prescribedSets are null when empty.
+   */
+  range(from, to) {
+    const H = WorkoutRepo.HEADERS;
+    const groups = new Map(WorkoutPlan.catalogue().map((e) => [WorkoutPlan.normalize(e.name), e.group || null]));
+    const cell = (v) => (v === '' || v === undefined || v === null ? null : v);
+    return Sheets.readRows(WorkoutRepo.sheet_(), Config.headerRow())
+      .filter((r) => r[H.date] instanceof Date && String(r[H.exercise] || '').trim())
+      .map((r) => ({ r, date: Sheets.dayKey(r[H.date]) }))
+      .filter(({ date }) => date >= from && date <= to)
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.r.__row - b.r.__row))
+      .map(({ r, date }) => {
+        const exercise = String(r[H.exercise]).trim();
+        const row = {
+          date, session: String(r[H.session] || '').trim(), exercise,
+          group: groups.get(WorkoutPlan.normalize(exercise)) || null,
+          setsDone: cell(r[H.setsDone]), volume: cell(r[H.volume]), prescribedSets: cell(r[H.prescribedSets]),
+        };
+        if (cell(r[H.rir]) !== null) row.rir = r[H.rir];
+        if (cell(r[H.pain]) !== null) row.pain = r[H.pain];
+        return row;
+      });
+  },
+
+  /**
+   * Sessions logged on one day, in sheet order, with their exercises. setsDone and volume are
+   * null when the cell is empty; rir and pain are left out then.
+   * @param {string} key  yyyy-MM-dd
+   * @returns {{session: string, phase: string|null, exercises: Object[]}[]}
+   */
+  day(key) {
+    const H = WorkoutRepo.HEADERS;
+    const empty = (v) => v === '' || v === undefined || v === null;
+    const sessions = [];
+    Sheets.readRows(WorkoutRepo.sheet_(), Config.headerRow())
+      .filter((r) => r[H.date] instanceof Date && Sheets.dayKey(r[H.date]) === key && String(r[H.exercise] || '').trim())
+      .forEach((r) => {
+        const name = String(r[H.session] || '').trim();
+        let session = sessions.find((s) => s.session === name);
+        if (!session) {
+          session = { session: name, phase: String(r[H.phase] || '').trim() || null, exercises: [] };
+          sessions.push(session);
+        }
+        const ex = {
+          name: String(r[H.exercise]).trim(), sets: WorkoutRepo.loggedSets(r),
+          setsDone: empty(r[H.setsDone]) ? null : r[H.setsDone], volume: empty(r[H.volume]) ? null : r[H.volume],
+        };
+        if (!empty(r[H.rir])) ex.rir = r[H.rir];
+        if (!empty(r[H.pain])) ex.pain = r[H.pain];
+        session.exercises.push(ex);
+      });
+    return sessions;
+  },
+
+  /** {date, session} of the most recent log row (latest date, the lower row on a tie), or null. */
+  last() {
+    const H = WorkoutRepo.HEADERS;
+    let best = null;
+    Sheets.readRows(WorkoutRepo.sheet_(), Config.headerRow()).forEach((r) => {
+      if (r[H.date] instanceof Date && String(r[H.session] || '').trim() && (!best || r[H.date] >= best[H.date])) best = r;
+    });
+    return best ? { date: Sheets.dayKey(best[H.date]), session: String(best[H.session]).trim() } : null;
   },
 
   findExisting_(rows, date, session, exercise) {

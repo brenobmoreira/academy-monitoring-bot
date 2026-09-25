@@ -3,8 +3,8 @@
   "private": true,
   "description": "Telegram fitness-log bot: Python ADK agent plus an Apps Script sheet API",
   "scripts": {
-    "test": "node --test \"apps/**/test/*.test.js\"",
+    "test": "TZ=America/Sao_Paulo node --test \"apps/**/test/*.test.js\"",
     "check": "for f in apps/*/src/*.js; do node --check \"$f\" || exit 1; done"
   },
-  "engines": { "node": ">=20" }
+  "engines": { "node": ">=22" }
 }

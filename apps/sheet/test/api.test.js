@@ -28,7 +28,7 @@ test('reports malformed envelopes: bad JSON, unknown op, unknown field', () => {
   assert.deepEqual(codes(call(ctx, '{nope')), ['body:invalid_json']);
   assert.deepEqual(codes(call(ctx, req('diary.delete', {}))), ['op:unknown_op']);
   assert.deepEqual(codes(call(ctx, { ...req('catalog', {}), extra: 1 })), ['extra:unknown_field']);
-  assert.match(call(ctx, req('nope', {})).errors[0].message, /catalog, diary\.upsert, workout\.upsert, exercise\.history/);
+  assert.match(call(ctx, req('nope', {})).errors[0].message, /catalog, diary\.upsert, workout\.upsert, write\.undo, exercise\.history, diary\.range, workout\.range/);
 });
 
 test('catalog lists today, sessions, exercises, plan and the current phase', () => {
@@ -46,7 +46,9 @@ test('catalog lists today, sessions, exercises, plan and the current phase', () 
 test('diary.upsert writes and echoes exactly the stored fields', () => {
   const ctx = boot();
   const res = call(ctx, req('diary.upsert', { date: '2026-09-21', fields: { weightKg: 82.4, muayThai: true } }));
-  assert.deepEqual(res, { ok: true, result: { date: '2026-09-21', row: 6, fields: { weightKg: 82.4, muayThai: true } } });
+  const { writeId, ...result } = res.result;
+  assert.deepEqual(result, { date: '2026-09-21', row: 6, fields: { weightKg: 82.4, muayThai: true } });
+  assert.match(writeId, /^[0-9a-z]{1,20}$/);
   assert.equal(diaryCell(ctx, 6, 'Peso kg'), 82.4);
   assert.equal(diaryCell(ctx, 6, 'Muay Thai'), 'Sim');
 });
@@ -65,9 +67,11 @@ test('workout.upsert fills prescription columns and returns rows per exercise', 
   const res = call(ctx, req('workout.upsert', { date: '2026-09-21', session: 'Upper', exercises: [
     { name: 'Supino inclinado', sets: [{ kg: 60, reps: 8 }, { kg: 62.5, reps: 8 }], rir: 2 },
   ] }));
-  assert.deepEqual(res.result, {
+  const { writeId, ...result } = res.result;
+  assert.match(writeId, /^[0-9a-z]{1,20}$/);
+  assert.deepEqual(result, {
     date: '2026-09-21', session: 'Upper', phase: 'Adaptação', sessionId: '2026-09-21/Upper',
-    exercises: [{ name: 'Supino inclinado', row: 6, sets: [{ kg: 60, reps: 8 }, { kg: 62.5, reps: 8 }], setsDone: 2, volume: 980, rir: 2 }],
+    exercises: [{ name: 'Supino inclinado', row: 6, sets: [{ kg: 60, reps: 8 }, { kg: 62.5, reps: 8 }], setsDone: 2, volume: 980, rir: 2, previous: null }],
   });
   assert.equal(workoutCell(ctx, 6, 'Séries prescritas'), 2);
   assert.equal(workoutCell(ctx, 6, 'Fase'), 'Adaptação');
@@ -94,6 +98,92 @@ test('exercise.history returns the latest sessions of one exercise, newest first
     { date: '2026-09-21', session: 'Upper', sets: [{ kg: 60, reps: 8 }], setsDone: 1, volume: 480, rir: 2, pain: null },
     { date: '2026-09-17', session: 'Upper', sets: [{ kg: 59, reps: 8 }], setsDone: 1, volume: 472, rir: 2, pain: null },
   ] });
+});
+
+test('diary.range returns only the days with data, oldest first, with cells read back', () => {
+  const ctx = boot();
+  const diary = ctx.__spreadsheet.getSheetByName('Diário');
+  call(ctx, req('diary.upsert', { date: '2026-09-21', fields: { weightKg: 82.4, muayThai: false, notes: 'ok' } }));
+  call(ctx, req('diary.upsert', { date: '2026-09-10', fields: { weightKg: 83, sleepH: 7.5, dietComplete: true } }));
+  call(ctx, req('diary.upsert', { date: '2026-09-01', fields: { steps: 8000 } }));
+  diary.setCell_(9, 1, new ctx.Date('2026-09-15T00:00:00')); // dated row with nothing filled in
+  ctx.__locks.length = 0;
+  const res = call(ctx, req('diary.range', { from: '2026-09-05', to: '2026-09-27' }));
+  assert.deepEqual(res, { ok: true, result: { from: '2026-09-05', to: '2026-09-27', days: [
+    { date: '2026-09-10', weightKg: 83, sleepH: 7.5, dietComplete: true },
+    { date: '2026-09-21', weightKg: 82.4, muayThai: false, notes: 'ok' },
+  ] } });
+  assert.deepEqual(call(ctx, req('diary.range', { from: '2026-08-01', to: '2026-08-31' })).result.days, []);
+  assert.deepEqual(ctx.__locks, [], 'reads take no lock');
+});
+
+test('diary.range and workout.range reject bad periods before reading', () => {
+  const ctx = boot();
+  assert.deepEqual(codes(call(ctx, req('diary.range', { from: '2026-09-21', to: '2026-09-01' }))), ['args.to:invalid_range']);
+  assert.deepEqual(codes(call(ctx, req('workout.range', { from: '2026-01-01', to: '2026-09-21' }))), ['args.to:out_of_range']);
+});
+
+test('workout.range returns log rows in the period with their muscle group', () => {
+  const ctx = boot();
+  call(ctx, req('workout.upsert', { date: '2026-09-18', session: 'Lower', exercises: [{ name: 'Leg press', sets: [{ kg: 100, reps: 10 }, { kg: 100, reps: 9 }], pain: 2 }] }));
+  call(ctx, req('workout.upsert', { date: '2026-09-14', session: 'Upper', exercises: [
+    { name: 'Supino inclinado', sets: [{ kg: 60, reps: 8 }], rir: 2 },
+    { name: 'Puxada aberta', sets: [{ kg: 50, reps: 10 }] },
+  ] }));
+  call(ctx, req('workout.upsert', { date: '2026-09-07', session: 'Upper', exercises: [{ name: 'Supino inclinado', sets: [{ kg: 58, reps: 8 }] }] }));
+  const log = ctx.__spreadsheet.getSheetByName('Registro de treino');
+  log.setCell_(10, 1, new ctx.Date('2026-09-15T00:00:00')); // hand-typed row, name outside the catalogue
+  log.setCell_(10, 2, 'Upper'); log.setCell_(10, 3, 'Rosca direta');
+  const res = call(ctx, req('workout.range', { from: '2026-09-14', to: '2026-09-20' }));
+  assert.deepEqual(res.result, { from: '2026-09-14', to: '2026-09-20', rows: [
+    { date: '2026-09-14', session: 'Upper', exercise: 'Supino inclinado', group: 'Peito', setsDone: 1, volume: 480, prescribedSets: 3, rir: 2 },
+    { date: '2026-09-14', session: 'Upper', exercise: 'Puxada aberta', group: 'Costas', setsDone: 1, volume: 500, prescribedSets: 3 },
+    { date: '2026-09-15', session: 'Upper', exercise: 'Rosca direta', group: null, setsDone: null, volume: null, prescribedSets: null },
+    { date: '2026-09-18', session: 'Lower', exercise: 'Leg press', group: 'Quadríceps', setsDone: 2, volume: 1900, prescribedSets: 3, pain: 2 },
+  ] });
+});
+
+test('catalog reports the most recent logged session, or null before the first one', () => {
+  const ctx = boot();
+  assert.equal(call(ctx, req('catalog', {})).result.lastWorkout, null);
+  const save = (date, session, name) => call(ctx, req('workout.upsert', { date, session, exercises: [{ name, sets: [{ kg: 50, reps: 10 }] }] }));
+  save('2026-09-20', 'Lower', 'Leg press'); save('2026-09-18', 'Upper', 'Supino inclinado');
+  assert.deepEqual(call(ctx, req('catalog', {})).result.lastWorkout, { date: '2026-09-20', session: 'Lower' });
+  save('2026-09-20', 'Upper', 'Puxada aberta');
+  assert.deepEqual(call(ctx, req('catalog', {})).result.lastWorkout, { date: '2026-09-20', session: 'Upper' });
+});
+
+test('day.get returns the diary row and the workout of one day as the API writes them', () => {
+  const hoje = Array.from({ length: 23 }, () => []); hoje[22] = ['Sessão', '', '', 'Fase', 'Adaptação'];
+  const ctx = boot({ hoje });
+  call(ctx, req('diary.upsert', { date: '2026-09-21', fields: { weightKg: 82.4, sleepH: 7.5, muayThai: true, dietComplete: false, notes: 'ok' } }));
+  call(ctx, req('workout.upsert', { date: '2026-09-21', session: 'Upper', exercises: [
+    { name: 'Supino inclinado', sets: [{ kg: 60, reps: 8 }, { kg: 62.5, reps: 8 }], rir: 2 },
+    { name: 'Puxada aberta', sets: [{ kg: 50, reps: 10 }], pain: 1 },
+  ] }));
+  call(ctx, req('workout.upsert', { date: '2026-09-20', session: 'Lower', exercises: [{ name: 'Leg press', sets: [{ kg: 100, reps: 10 }] }] }));
+  assert.deepEqual(call(ctx, req('day.get', { date: '2026-09-21' })), { ok: true, result: {
+    date: '2026-09-21',
+    diary: { weightKg: 82.4, sleepH: 7.5, muayThai: true, dietComplete: false, notes: 'ok' },
+    workout: [{ session: 'Upper', phase: 'Adaptação', exercises: [
+      { name: 'Supino inclinado', sets: [{ kg: 60, reps: 8 }, { kg: 62.5, reps: 8 }], setsDone: 2, volume: 980, rir: 2 },
+      { name: 'Puxada aberta', sets: [{ kg: 50, reps: 10 }], setsDone: 1, volume: 500, pain: 1 },
+    ] }],
+  } });
+  assert.deepEqual(call(ctx, req('day.get', { date: '2026-09-20' })).result.diary, {});
+  assert.deepEqual(call(ctx, req('day.get', { date: '2026-09-19' })).result, { date: '2026-09-19', diary: {}, workout: [] });
+});
+
+test('day.get maps hand-typed yes/no cells and skips values it cannot read back', () => {
+  const ctx = boot({ diaryRows: [['', 83, '', '', '', 'Não', 'talvez']] });
+  ctx.__spreadsheet.getSheetByName('Diário').setCell_(6, 1, ctx.Sheets.localDate('2026-09-21'));
+  assert.deepEqual(call(ctx, req('day.get', { date: '2026-09-21' })).result.diary, { weightKg: 83, muayThai: false });
+});
+
+test('day.get validates the date like the writes do', () => {
+  const ctx = boot();
+  assert.deepEqual(codes(call(ctx, req('day.get', { date: '2026-09-22' }))), ['args.date:date_in_future']);
+  assert.deepEqual(codes(call(ctx, req('day.get', { date: 'ontem' }))), ['args.date:invalid_date']);
 });
 
 test('sheet problems come back as internal errors instead of throwing', () => {

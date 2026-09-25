@@ -11,9 +11,15 @@ def tools(sheet, journal=None):
     return {t.__name__: t for t in build_tools(sheet, journal or Journal())}
 
 
-def test_exposes_the_four_tools_with_docstrings(sheet):
+def test_exposes_the_tools_with_docstrings(sheet):
     t = tools(sheet)
-    assert list(t) == ["get_catalog", "save_diary", "save_workout", "get_exercise_history"]
+    assert list(t) == [
+        "get_catalog",
+        "save_diary",
+        "save_workout",
+        "get_exercise_history",
+        "get_diary_history",
+    ]
     assert all(fn.__doc__ for fn in t.values())
 
 
@@ -63,4 +69,39 @@ async def test_read_tools_pass_through(sheet):
     t = tools(sheet)
     await t["get_catalog"]()
     await t["get_exercise_history"]("Leg press", 3)
-    assert sheet.calls == [("catalog", {}), ("exercise.history", {"name": "Leg press", "limit": 3})]
+    await t["get_diary_history"]("2026-09-08", "2026-09-21")
+    assert sheet.calls == [
+        ("catalog", {}),
+        ("exercise.history", {"name": "Leg press", "limit": 3}),
+        ("diary.range", {"from": "2026-09-08", "to": "2026-09-21"}),
+    ]
+
+
+async def test_error_codes_of_reads_and_writes_are_kept():
+    internal = {"ok": False, "errors": [{"path": "", "code": "internal", "message": "m"}]}
+    rejected = {"ok": False, "errors": [{"path": "args.date", "code": "invalid_date", "message": "m"}]}
+    sheet = FakeSheet(catalog=[internal], diary_upsert=[rejected])
+    journal = Journal()
+    t = tools(sheet, journal)
+    await t["get_catalog"]()
+    await t["save_diary"]("ontem", DiaryFields(sleepH=7))
+    assert journal.error_codes == ["internal", "invalid_date"]
+    assert journal.sheet_failed
+    assert journal.writes == []
+
+
+def test_rejected_payloads_are_not_a_sheet_failure():
+    journal = Journal()
+    journal.record("diary.upsert", {"ok": False, "errors": [{"code": "invalid_date"}]})
+    journal.check({"ok": False})
+    assert journal.error_codes == ["invalid_date"]
+    assert not journal.sheet_failed
+
+
+def test_journal_lists_the_write_ids_of_the_message_in_order():
+    journal = Journal()
+    journal.record("diary.upsert", {"ok": True, "result": {"date": "2026-09-21", "writeId": "a1"}})
+    journal.record("workout.upsert", {"ok": False, "errors": []})
+    journal.record("workout.upsert", {"ok": True, "result": {"date": "2026-09-21", "writeId": "b2"}})
+    journal.record("diary.upsert", {"ok": True, "result": {"date": "2026-09-21"}})
+    assert journal.write_ids == ["a1", "b2"]

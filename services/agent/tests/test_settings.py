@@ -13,11 +13,14 @@ REQUIRED = {
 ALL_KEYS = [
     *REQUIRED,
     "TELEGRAM_WEBHOOK_SECRET",
+    "REMINDER_TOKEN",
     "LLM_MODEL",
     "LLM_API_KEY",
     "LLM_API_BASE",
     "MAX_LLM_CALLS",
     "TIMEZONE",
+    "MEDIA_ENABLED",
+    "MEDIA_MAX_BYTES",
 ]
 
 
@@ -43,6 +46,7 @@ def test_yaml_fills_what_the_environment_does_not(env):
     assert s.ALLOWED_CHAT_IDS == frozenset({42, 7})
     assert s.TELEGRAM_BOT_TOKEN.get_secret_value() == "tok"
     assert s.TELEGRAM_WEBHOOK_SECRET is None
+    assert s.REMINDER_TOKEN is None
 
 
 def test_environment_overrides_yaml(env, monkeypatch):
@@ -60,6 +64,16 @@ def test_secrets_in_yaml_are_refused(env):
     env.write_text("LLM_MODEL: x\nLLM_API_KEY: leaked\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="LLM_API_KEY"):
         Settings.load()
+
+
+def test_the_reminder_token_is_a_secret(env, monkeypatch):
+    env.write_text("REMINDER_TOKEN: leaked\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="REMINDER_TOKEN"):
+        Settings.load()
+    env.write_text("LLM_MODEL: x\n", encoding="utf-8")
+    monkeypatch.setenv("REMINDER_TOKEN", "from-env")
+    token = Settings.load().REMINDER_TOKEN
+    assert token is not None and token.get_secret_value() == "from-env"
 
 
 def test_missing_required_values_are_listed_together(env, monkeypatch):
@@ -80,3 +94,22 @@ def test_bad_values_are_rejected(env, monkeypatch):
 def test_a_missing_yaml_falls_back_to_defaults(env, monkeypatch, tmp_path):
     monkeypatch.setenv("SETTINGS_FILE", str(tmp_path / "absent.yaml"))
     assert Settings.load().LLM_MODEL == "gemini/gemini-3.8-flash"
+
+
+def test_media_is_on_by_default_up_to_5_mb(env):
+    s = Settings.load()
+    assert s.MEDIA_ENABLED is True
+    assert s.MEDIA_MAX_BYTES == 5_000_000
+
+
+def test_media_settings_come_from_the_environment(env, monkeypatch):
+    monkeypatch.setenv("MEDIA_ENABLED", "false")
+    monkeypatch.setenv("MEDIA_MAX_BYTES", "1000")
+    s = Settings.load()
+    assert (s.MEDIA_ENABLED, s.MEDIA_MAX_BYTES) == (False, 1000)
+
+
+def test_media_max_bytes_stays_within_the_bot_api_limit(env, monkeypatch):
+    monkeypatch.setenv("MEDIA_MAX_BYTES", "30000000")
+    with pytest.raises(ConfigError, match="MEDIA_MAX_BYTES"):
+        Settings.load()

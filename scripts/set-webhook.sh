@@ -8,7 +8,7 @@
 #                            Telegram sends it back in the X-Telegram-Bot-Api-Secret-Token header
 #
 # Usage:
-#   scripts/set-webhook.sh set     # register webhook
+#   scripts/set-webhook.sh set     # register webhook (messages and button taps) and the command menu
 #   scripts/set-webhook.sh info    # show current webhook
 #   scripts/set-webhook.sh delete  # remove webhook (needed before local polling)
 set -euo pipefail
@@ -17,6 +17,21 @@ cmd="${1:-info}"
 : "${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN}"
 api="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
 
+# Update kinds the bot handles: messages and inline-button taps. Same list as
+# agent.telegram.ALLOWED_UPDATES (polling); services/agent/tests/test_telegram.py checks it.
+allowed_updates='["message","callback_query"]'
+
+# Command menu, the same list `uv run agent-commands` sends from agent.commands.COMMANDS;
+# services/agent/tests/test_commands.py fails when the two differ.
+commands='[
+  {"command": "hoje", "description": "O que está registrado no dia: /hoje, /hoje ontem, /hoje 21/09"},
+  {"command": "ficha", "description": "Exercícios de uma sessão da ficha; sem nome, a próxima a fazer"},
+  {"command": "exercicios", "description": "Nomes exatos dos exercícios por grupo; /exercicios peito filtra"},
+  {"command": "semana", "description": "Resumo da semana (seg–dom); /semana 1 é a semana passada"},
+  {"command": "desfazer", "description": "Desfaz a última gravação na planilha (do bot ou do menu)"},
+  {"command": "help", "description": "Exemplos de mensagem e esta lista de comandos"}
+]'
+
 case "$cmd" in
   set)
     : "${AGENT_URL:?set AGENT_URL}"
@@ -24,8 +39,10 @@ case "$cmd" in
     curl -sS "${api}/setWebhook" \
       --data-urlencode "url=${AGENT_URL}" \
       --data-urlencode "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
-      --data-urlencode "allowed_updates=[\"message\"]" \
+      --data-urlencode "allowed_updates=${allowed_updates}" \
       --data-urlencode "drop_pending_updates=true"
+    echo
+    curl -sS "${api}/setMyCommands" --data-urlencode "commands=${commands}"
     ;;
   info)   curl -sS "${api}/getWebhookInfo" ;;
   delete) curl -sS "${api}/deleteWebhook" ;;

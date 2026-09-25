@@ -44,6 +44,7 @@ Script Properties (Project Settings → Script Properties):
 | `SHEET_API_KEY` | long random string (`openssl rand -hex 24`); the agent sends the same value |
 | `DIARY_SHEET` | optional, default `Diário` |
 | `HEADER_ROW` | optional, default `5` |
+| `UNDO_LOG` | written by the script (undo log, see API below); do not edit |
 
 Reload the spreadsheet: the **Registro** menu appears (Salvar dia, Salvar treino, Atualizar
 progressão). The first use asks you to authorize the script.
@@ -63,7 +64,7 @@ credentials, so the API key in the body is what authenticates it. The URL is
 Every later change:
 
 ```bash
-clasp push
+clasp push                                 # or, from the repo root: make push-sheet
 clasp deploy -i <deploymentId> -d "note"   # same URL, new code
 ```
 
@@ -77,10 +78,29 @@ A plain `clasp push` does not change what the URL serves.
 
 | op | args |
 |----|------|
-| `catalog` | `{}` → today, time zone, current phase, sessions, exercises, plan |
+| `catalog` | `{}` → today, time zone, current phase, sessions, exercises, plan, `lastWorkout` (`{date, session}` of the most recent log row, or `null`), `recent` (writes of the last 30 minutes from the undo log, newest first, undone ones left out: `[{writeId, at, op, date, session?, exercises?, fields?}]`) |
 | `diary.upsert` | `{"date": "2026-09-21", "fields": {"weightKg": 82.4, "sleepH": 7.5, "muayThai": true}}` |
 | `workout.upsert` | `{"date": "2026-09-21", "session": "Upper", "exercises": [{"name": "Supino inclinado", "sets": [{"kg": 60, "reps": 8}], "rir": 2}]}` |
 | `exercise.history` | `{"name": "Supino inclinado", "limit": 10}` |
+| `write.undo` | `{"writeId": "mfu3k2x09ab1"}` or `{}` for the latest write not yet undone → `{writeId, undone: {op, date, session?, fields?, exercises?}}` |
+| `day.get` | `{"date": "2026-09-21"}` → `{date, diary: {weightKg: 82.4, muayThai: true, …}, workout: [{session, phase, exercises: [{name, sets, setsDone, volume, rir?, pain?}]}]}`; empty cells are left out, `Sim`/`Não` read back as `true`/`false` |
+| `diary.range` | `{"from": "2026-09-08", "to": "2026-09-21"}` → `{from, to, days: [{date, weightKg, muayThai, ...}]}`: only days with at least one filled field, oldest first, empty cells left out, `Sim`/`Não` read back as booleans |
+| `workout.range` | `{"from": "2026-09-14", "to": "2026-09-20"}` → `{from, to, rows: [{date, session, exercise, group, setsDone, volume, prescribedSets, rir?, pain?}]}`: log rows oldest first, `group` from `Exercícios` (`null` if the name is not there) |
+
+The range ops read at most 92 days (`from` and `to` inclusive, `from ≤ to`); dates after today
+are accepted, so a week that has not ended yet can be asked for whole.
+
+Each exercise in the `workout.upsert` result also carries `previous`: the date, sets, volume and
+sets done of its latest session before the written date, or `null`. The bot's confirmation
+compares against it.
+
+**Undo.** `diary.upsert` and `workout.upsert` return a `writeId` (≤ 20 chars) and log the
+previous value of every cell they changed in the Script Property `UNDO_LOG` (last 30 writes,
+pruned to stay under the 9 kB property limit; menu saves are logged too). `write.undo` puts
+those values back; a row the write created is cleared, not deleted, and formula columns the
+write did not set are never touched. Errors: `nothing_to_undo`, `not_found` (unknown or pruned
+id), `already_undone`, `conflict` (the row no longer holds the write's date, e.g. the tab was
+sorted; nothing is changed) and `not_undoable` (a write too large for the log).
 
 Nothing is coerced (`"82,4"` and `"sim"` are rejected), every error is reported at once, and a
 request with any error writes nothing. The full rules are in
@@ -100,3 +120,5 @@ curl -sL -H 'Content-Type: application/json' \
 npm test        # Node built-in test runner against Apps Script fakes (no network, no Google)
 npm run check   # syntax check of src/
 ```
+
+`make test-sheet` runs `npm test`; `make lint` includes `npm run check`.

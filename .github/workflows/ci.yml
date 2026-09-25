@@ -19,7 +19,7 @@ jobs:
       sheet: ${{ steps.filter.outputs.sheet }}
       agent: ${{ steps.filter.outputs.agent }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -39,7 +39,7 @@ jobs:
     if: needs.changes.outputs.sheet == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -54,7 +54,7 @@ jobs:
       run:
         working-directory: services/agent
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # e2e/sheet_server.js runs the real Apps Script sources in Node.
       - uses: actions/setup-node@v4
         with:

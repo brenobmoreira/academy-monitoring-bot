@@ -65,6 +65,18 @@ class SheetClient:
             args["limit"] = limit
         return await self.call("exercise.history", args)
 
+    async def diary_range(self, date_from: str, date_to: str) -> Response:
+        return await self.call("diary.range", {"from": date_from, "to": date_to})
+
+    async def workout_range(self, date_from: str, date_to: str) -> Response:
+        return await self.call("workout.range", {"from": date_from, "to": date_to})
+
+    async def undo(self, write_id: str | None = None) -> Response:
+        return await self.call("write.undo", {} if write_id is None else {"writeId": write_id})
+
+    async def day(self, date: str) -> Response:
+        return await self.call("day.get", {"date": date})
+
 
 def _unavailable(message: str) -> Response:
     return {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": message}]}

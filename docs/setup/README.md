@@ -18,6 +18,7 @@ Keep these values at hand as you go; none of them belongs in the repo:
 | `TELEGRAM_BOT_TOKEN` | BotFather | the agent, `set-webhook.sh` |
 | chat id (`ALLOWED_CHAT_IDS`) | `getUpdates` | the agent |
 | `TELEGRAM_WEBHOOK_SECRET` | `openssl rand -hex 24` | Cloud Run and `set-webhook.sh` |
+| `REMINDER_TOKEN` (optional) | `openssl rand -hex 24` | Cloud Run and the Cloud Scheduler jobs |
 
 ## 1. Apps Script in the spreadsheet
 
@@ -48,7 +49,7 @@ curl -sL -H 'Content-Type: application/json' \
   https://script.google.com/macros/s/<deploymentId>/exec
 ```
 
-Later code changes: `clasp push` then `clasp deploy -i <deploymentId> -d "note"`. A plain push
+Later code changes: `clasp push` (or `make push-sheet` from the repo root) then `clasp deploy -i <deploymentId> -d "note"`. A plain push
 does not change what the URL serves.
 
 Details: [`apps/sheet/docs/setup.md`](../../apps/sheet/docs/setup.md).
@@ -90,6 +91,9 @@ uv sync
 uv run agent-poll
 ```
 
+The repo-root `Makefile` has the same steps: `make webhook-delete`, `make install`, `make poll`
+(`make` lists every target).
+
 **Check** — send to the bot:
 
 - `peso 82,4 dormi 7h30` → reply `DD/MM · Peso kg 82,4 · Sono h 7,5`, today's row in `Diário`.
@@ -111,13 +115,20 @@ error; nothing is written in that case.
    ```bash
    export TELEGRAM_BOT_TOKEN=<token> TELEGRAM_WEBHOOK_SECRET=<secret>
    export AGENT_URL=$(gcloud run services describe fitness-agent --region us-central1 --format 'value(status.url)')
-   scripts/set-webhook.sh set
-   scripts/set-webhook.sh info      # "url" set, no "last_error_message"
+   scripts/set-webhook.sh set       # webhook and the /command menu; or: make webhook-set
+   scripts/set-webhook.sh info      # or: make webhook-info; "url" set, no "last_error_message"
    ```
 4. Continuous deployment: Cloud Run console → `fitness-agent` → **Connect repo** → this GitHub
    repository, branch `^main$`, buildpacks, build context `/services/agent`, entry point
    `telegram_webhook`; in the generated Cloud Build trigger set **Included files filter** to
    `services/agent/**`. From then on, every push to `main` that touches the agent redeploys it.
 
+5. Optional reminders: a nightly "Faltou registrar hoje: …" when weight, sleep or steps are
+   missing, and the weekly summary on Sunday evening. Follow **Reminder jobs** in
+   [`services/agent/README.md`](../../services/agent/README.md): the `REMINDER_TOKEN` secret and
+   two Cloud Scheduler jobs calling `POST /remind`. Skip it and the bot only answers messages.
+
 **Check** — repeat the two messages from stage 3 with polling stopped. Nothing back? Cloud Run →
-the function's **Logs**, and Apps Script → **Executions** for `doPost`.
+the function's **Logs**, and Apps Script → **Executions** for `doPost`. With the reminders:
+`gcloud scheduler jobs run agent-remind-weekly --location us-central1` → the week's summary in
+the chat.

@@ -21,3 +21,10 @@ MAX_LLM_CALLS: 8
 
 # Resolves "hoje", "ontem" and weekdays in the agent instruction.
 TIMEZONE: America/Sao_Paulo
+
+# Voice, audio and photo messages go to the model (which must accept audio and images; Gemini
+# does). false = they get a "send it as text" reply and are never downloaded.
+MEDIA_ENABLED: true
+
+# Largest voice/audio/photo downloaded, in bytes (at most 20000000, the Bot API's limit).
+MEDIA_MAX_BYTES: 5000000

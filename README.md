@@ -21,10 +21,12 @@ repo.
 
 ```
 Telegram ──webhook──▶ Cloud Run function (Python, ADK agent + LiteLLM)
-                         │ tools: get_catalog, save_diary, save_workout, get_exercise_history
+                         │ tools: get_catalog, save_diary, save_workout, get_exercise_history,
+                         │        get_diary_history
                          │        └──POST JSON──▶ Apps Script Web App ──▶ Sheets
                          │             ◀── {ok, result} | {ok:false, errors[]}
-                         └──▶ Telegram reply
+                         └──▶ Telegram reply (+ buttons ✅ Ok · ↩️ Desfazer · ✏️ Corrigir)
+                       /hoje, /ficha, /exercicios, /semana, /desfazer: Sheet API only, no model call
 
 Sheet menu "Registro" ──▶ Hoje screen ──▶ same validator ──▶ same repos ──▶ Sheets
 ```
@@ -49,7 +51,23 @@ Design and decisions: [`docs/specs`](docs/specs), [`docs/adr`](docs/adr), [`docs
 - The model is reached through LiteLLM: provider and key are configuration (`LLM_MODEL`,
   `LLM_API_KEY` in Secret Manager), so switching provider needs no code change.
 
+## Common tasks
+
+A root `Makefile` wraps the everyday commands; run `make` (or `make help`) from the repo root to
+list them: `install`, `test`, `lint`, `fmt`, `e2e`, `poll`, `serve`, `webhook-set` /
+`webhook-info` / `webhook-delete`, `commands`, `push-sheet`. Each target is a thin wrapper, so the
+underlying commands in the READMEs still work as written. CI calls the tools directly.
+
 ## Testing
+
+```bash
+make install      # once: cd services/agent && uv sync --locked
+make test         # both suites: npm test (Apps Script) + uv run pytest (agent)
+make lint         # ruff check, ruff format --check, ty check, npm run check
+make e2e          # whole stack locally with the scripted provider (e2e/)
+```
+
+Or directly:
 
 ```bash
 npm test                                   # Apps Script, Node runner with in-memory fakes

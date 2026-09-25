@@ -38,6 +38,10 @@ class FakeRange {
       return v === null || v === undefined ? '' : String(v);
     }));
   }
+  /** Cells hold formulas as text starting with "="; any other cell has no formula. */
+  getFormulas() {
+    return this.getValues().map((line) => line.map((v) => (typeof v === 'string' && v.startsWith('=') ? v : '')));
+  }
   getValue() { return this.getValues()[0][0]; }
   setValues(values) {
     if (values.length !== this.numRows || values[0].length !== this.numCols) {
@@ -47,6 +51,7 @@ class FakeRange {
     return this;
   }
   setValue(v) { this.sheet.setCell_(this.row, this.col, v); return this; }
+  setFormula(f) { this.sheet.setCell_(this.row, this.col, f); return this; }
   clearContent() {
     for (let r = 0; r < this.numRows; r++) for (let c = 0; c < this.numCols; c++) this.sheet.setCell_(this.row + r, this.col + c, '');
     return this;
@@ -117,7 +122,7 @@ function createContext({ sheets = [], properties = {}, fetchResponses = [], now 
   const ctx = {
     console: { log: (...a) => logs.push(a), error: (...a) => logs.push(a), warn: (...a) => logs.push(a) },
     JSON, Object, Array, Number, String, Boolean, Math, Date, Error, RegExp, Map, Set, Intl,
-    __fetchCalls: fetchCalls, __sentMessages: sentMessages, __triggers: triggers, __logs: logs, __spreadsheet: spreadsheet,
+    __fetchCalls: fetchCalls, __sentMessages: sentMessages, __triggers: triggers, __logs: logs, __spreadsheet: spreadsheet, __properties: props,
     SpreadsheetApp: {
       getActive: () => spreadsheet,
       getActiveSpreadsheet: () => spreadsheet,

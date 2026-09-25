@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     SECRETS: ClassVar[frozenset[str]] = frozenset(
-        {"TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "SHEET_API_KEY", "LLM_API_KEY"}
+        {"TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "SHEET_API_KEY", "LLM_API_KEY", "REMINDER_TOKEN"}
     )
 
     # --- Telegram -----------------------------------------------------------------------------
@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     # Only the webhook entry needs it; local polling runs without one.
     TELEGRAM_WEBHOOK_SECRET: SecretStr | None = None
     ALLOWED_CHAT_IDS: Annotated[frozenset[int], NoDecode]
+    # Header X-Reminder-Token of POST /remind (Cloud Scheduler); unset = the endpoint answers 404.
+    REMINDER_TOKEN: SecretStr | None = None
 
     # --- Sheet API (Apps Script Web App) -------------------------------------------------------
     SHEET_API_URL: str
@@ -59,6 +61,12 @@ class Settings(BaseSettings):
     LLM_API_BASE: str | None = None
     MAX_LLM_CALLS: int = Field(8, ge=1, le=30)
     TIMEZONE: str = "America/Sao_Paulo"
+
+    # --- Voice and photo messages -------------------------------------------------------------
+    # Off: voice, audio and photos get a "send it as text" reply and are never downloaded.
+    MEDIA_ENABLED: bool = True
+    # Largest file downloaded and sent to the model; the Bot API's getFile stops at 20 MB.
+    MEDIA_MAX_BYTES: int = Field(5_000_000, ge=1, le=20_000_000)
 
     @field_validator("ALLOWED_CHAT_IDS", mode="before")
     @classmethod

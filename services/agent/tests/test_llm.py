@@ -1,10 +1,11 @@
 import json
 from typing import Any
 
+import litellm
 import pytest
 from pydantic import SecretStr
 
-from agent.bot import Bot
+from agent.bot import MEDIA_UNREADABLE, MODEL_FAILED, Bot, Media
 from agent.llm import build_model
 from agent.settings import Settings
 
@@ -25,7 +26,9 @@ def settings(**overrides: Any) -> Settings:
 
 
 async def run(model, text="peso 82,4"):
-    return await Bot(FakeSheet(diary_upsert=[OK_DIARY]), model, timezone="America/Sao_Paulo").reply(text)
+    return (
+        await Bot(FakeSheet(diary_upsert=[OK_DIARY]), model, timezone="America/Sao_Paulo").reply(text)
+    ).text
 
 
 async def test_model_key_and_base_reach_litellm():
@@ -51,8 +54,15 @@ async def test_tools_are_declared_to_the_provider_in_openai_format():
     client = FakeLiteLLMClient([text_response("ok")])
     await run(build_model(settings(), client=client))
     tools = {t["function"]["name"]: t["function"]["parameters"] for t in client.requests[0]["tools"]}
-    assert list(tools) == ["get_catalog", "save_diary", "save_workout", "get_exercise_history"]
+    assert list(tools) == [
+        "get_catalog",
+        "save_diary",
+        "save_workout",
+        "get_exercise_history",
+        "get_diary_history",
+    ]
     assert "exercises" in tools["save_workout"]["properties"]
+    assert tools["get_diary_history"]["required"] == ["date_from", "date_to"]
 
 
 async def test_a_rejected_payload_goes_back_to_the_model_through_litellm():
@@ -72,7 +82,50 @@ async def test_a_rejected_payload_goes_back_to_the_model_through_litellm():
     reply = await Bot(sheet, build_model(settings(), client=client), timezone="America/Sao_Paulo").reply(
         "dormi 7h30"
     )
-    assert reply == "22/09 · Sono h 7,5"
+    assert reply.text == "<b>22/09</b> · Sono h 7,5"
     tool_message = client.requests[1]["messages"][-1]
     assert tool_message["role"] == "tool"
     assert json.loads(tool_message["content"]) == rejected
+
+
+async def test_a_litellm_timeout_is_reported_after_what_was_written():
+    client = FakeLiteLLMClient(
+        [
+            tool_call_response("save_diary", {"date": "2026-09-21", "fields": {"weightKg": 82.4}}),
+            litellm.Timeout("timed out", model="claude-sonnet-5", llm_provider="anthropic"),
+        ]
+    )
+    assert (
+        await run(build_model(settings(), client=client)) == f"<b>21/09</b> · Peso kg 82,4\n\n{MODEL_FAILED}"
+    )
+
+
+async def media_request(media: Media, caption: str = "") -> list:
+    client = FakeLiteLLMClient([text_response("ok")])
+    bot = Bot(FakeSheet(), build_model(settings(LLM_MODEL="gemini/gemini-3.8-flash"), client=client), "UTC")
+    await bot.reply(caption, media=[media])
+    user = [m for m in client.requests[0]["messages"] if m["role"] == "user"][-1]
+    return user["content"]
+
+
+async def test_a_photo_reaches_litellm_as_an_image_url_data_uri():
+    content = await media_request(Media("image/jpeg", b"\xff\xd8"), "balança")
+    assert content == [
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9g="}},
+        {"type": "text", "text": "[Anexo: foto]\nbalança"},
+    ]
+
+
+async def test_a_voice_message_reaches_litellm_as_input_audio_in_ogg_format():
+    content = await media_request(Media("audio/ogg", b"OggS"))
+    assert content == [
+        {"type": "input_audio", "input_audio": {"data": "T2dnUw==", "format": "ogg"}},
+        {"type": "text", "text": "[Anexo: áudio]"},
+    ]
+
+
+async def test_a_media_type_adk_cannot_convert_asks_for_text():
+    client = FakeLiteLLMClient([text_response("ok")])
+    bot = Bot(FakeSheet(), build_model(settings(), client=client), "UTC")
+    assert (await bot.reply("", media=[Media("application/x-unknown", b"??")])).text == MEDIA_UNREADABLE
+    assert client.requests == []  # refused while converting, before any provider call

@@ -31,8 +31,27 @@ const Schema = {
 
   MAX_SETS: 4,
   MAX_EXERCISES: 20,
+  /** Longest period diary.range and workout.range read, in days (about a quarter). */
+  MAX_RANGE_DAYS: 92,
 
   toCell(field, value) {
     return Schema.DIARY_FIELDS[field].type === 'boolean' ? (value ? Schema.YES : Schema.NO) : value;
+  },
+
+  /**
+   * Inverse of toCell for reads: Sim/Não (or a checkbox) -> boolean, text trimmed. Empty cells and
+   * yes/no cells holding anything else give undefined, so the field is left out. A hand-typed
+   * value that is not a number stays as it is, so the reader still sees it.
+   */
+  fromCell(field, cell) {
+    if (cell === '' || cell === null || cell === undefined) return undefined;
+    const type = Schema.DIARY_FIELDS[field].type;
+    if (type === 'boolean') {
+      if (typeof cell === 'boolean') return cell;
+      const word = String(cell).trim();
+      return word === Schema.YES ? true : word === Schema.NO ? false : undefined;
+    }
+    if (type === 'text' || typeof cell === 'string') return String(cell).trim() || undefined;
+    return cell;
   },
 };

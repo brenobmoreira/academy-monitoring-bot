@@ -2,7 +2,8 @@
 
 Tools return the API body unchanged, so on {"ok": false, "errors": [...]} the model reads each
 error's path, message and suggestions and calls again with a fixed payload. Successful writes are
-recorded in a Journal, from which the confirmation is built (see summary.py).
+recorded in a Journal, from which the confirmation is built (see summary.py); the error codes of
+every rejected call, reads included, are kept there too, so the bot can tell a sheet outage apart.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ class SheetApi(Protocol):
         self, date: str, session: str, exercises: list[dict[str, Any]], phase: str | None = None
     ) -> dict[str, Any]: ...
     async def exercise_history(self, name: str, limit: int | None = None) -> dict[str, Any]: ...
+    async def diary_range(self, date_from: str, date_to: str) -> dict[str, Any]: ...
+    async def workout_range(self, date_from: str, date_to: str) -> dict[str, Any]: ...
 
 
 class DiaryFields(BaseModel):
@@ -50,24 +53,51 @@ class Exercise(BaseModel):
     equipment: str | None = Field(None, description="equipamento ou regulagem, até 200 caracteres")
 
 
+# Codes the sheet client (network, HTTP, bad body) and the API (uncaught exception) use when the
+# sheet itself failed, as opposed to rejecting the payload.
+OUTAGE_CODES = frozenset({"unavailable", "internal"})
+
+
 @dataclass
 class Journal:
-    """Successful writes of one message, in order: (op, result)."""
+    """Successful writes of one message, in order: (op, result), and the error codes of every
+    rejected call."""
 
     writes: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    error_codes: list[str] = field(default_factory=list)
 
     def record(self, op: str, response: dict[str, Any]) -> dict[str, Any]:
+        """For writes: journals the result on success, the error codes otherwise."""
         if response.get("ok"):
             self.writes.append((op, response["result"]))
+        return self.check(response)
+
+    def check(self, response: dict[str, Any]) -> dict[str, Any]:
+        """For any call: keeps the error codes of a rejected response."""
+        if not response.get("ok"):
+            errors = response.get("errors")
+            for error in errors if isinstance(errors, list) else []:
+                self.error_codes.append(str(error.get("code", "")) if isinstance(error, dict) else "")
         return response
+
+    @property
+    def sheet_failed(self) -> bool:
+        return not OUTAGE_CODES.isdisjoint(self.error_codes)
+
+    @property
+    def write_ids(self) -> list[str]:
+        """The sheet's undo ids of these writes, in order (an older sheet deployment sends none)."""
+        return [result["writeId"] for _, result in self.writes if result.get("writeId")]
 
 
 def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
     async def get_catalog() -> dict[str, Any]:
         """Lê o catálogo da planilha: data de hoje, sessões, nomes exatos de exercícios com grupo
-        muscular, a ficha (séries e repetições por sessão) e a fase atual. Chame antes de
-        save_workout ou get_exercise_history."""
-        return await sheet.catalog()
+        muscular, a ficha (séries e repetições por sessão), a fase atual e recent: as gravações dos
+        últimos 30 minutos, a mais recente primeiro, com data, sessão e exercícios ou campos.
+        Chame antes de save_workout ou get_exercise_history, e para continuar ou corrigir uma
+        gravação recente."""
+        return journal.check(await sheet.catalog())
 
     async def save_diary(date: str, fields: DiaryFields) -> dict[str, Any]:
         """Grava os dados do dia no Diário (atualiza a linha da data, sem apagar o resto).
@@ -101,9 +131,20 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
             name: nome exato do exercício no catálogo.
             limit: quantas sessões (1 a 50, padrão 10).
         """
-        return await sheet.exercise_history(name, limit)
+        return journal.check(await sheet.exercise_history(name, limit))
 
-    return [get_catalog, save_diary, save_workout, get_exercise_history]
+    async def get_diary_history(date_from: str, date_to: str) -> dict[str, Any]:
+        """Dados do Diário num período, do dia mais antigo ao mais recente. Só vêm os dias que
+        têm registro, e em cada dia só os campos preenchidos: dia ou campo ausente não foi
+        registrado.
+
+        Args:
+            date_from: primeiro dia, yyyy-MM-dd.
+            date_to: último dia, yyyy-MM-dd; no máximo 92 dias depois de date_from.
+        """
+        return journal.check(await sheet.diary_range(date_from, date_to))
+
+    return [get_catalog, save_diary, save_workout, get_exercise_history, get_diary_history]
 
 
 def _plain(value: Any) -> Any:

@@ -64,7 +64,7 @@ Request: `{ "key": "<SHEET_API_KEY>", "op": "<operation>", "args": { ... } }`.
 |----|------|--------|
 | `catalog` | `{}` | `{ today, timezone, phase, sessions[], exercises[{name, group}], plan[{session, exercise, setsAdaptation, setsRegular, repsMin, repsMax}] }` |
 | `diary.upsert` | `{ date, fields }` | `{ date, row, fields }` — the fields as written |
-| `workout.upsert` | `{ date, session, phase?, exercises[] }` | `{ date, session, phase, sessionId, exercises[{ name, row, sets, setsDone, volume, rir?, pain? }] }` |
+| `workout.upsert` | `{ date, session, phase?, exercises[] }` | `{ date, session, phase, sessionId, exercises[{ name, row, sets, setsDone, volume, rir?, pain?, previous }] }`; `previous` is `{ date, sets, volume, setsDone }` of the latest earlier session of that exercise, or `null` (added by F7, [usability spec](2026-09-24-usability-features-design.md)) |
 | `exercise.history` | `{ name, limit? }` | `{ name, sessions[{ date, session, sets, volume, rir, pain }] }` newest first |
 
 ### Strictness rules

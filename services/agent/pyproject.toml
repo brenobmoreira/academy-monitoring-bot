@@ -20,7 +20,7 @@ agent-poll = "agent.poll:main"
 agent-commands = "agent.commands:main"
 
 [build-system]
-requires = ["uv_build>=0.12.15,<0.13.0"]
+requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]

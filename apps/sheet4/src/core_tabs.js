@@ -831,6 +831,7 @@ const Tabs = {
       col('unit', 'Unidade', 'text'),
       ...macros('calc'),
       col('check', 'Conferência', 'text', 'calc'),
+      col('version', 'Versão', 'text', 'calc'),
     ],
   });
 

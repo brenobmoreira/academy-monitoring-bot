@@ -440,3 +440,48 @@ Files `apps/sheet4/src/diary.js`, `measures.js`, `ui_hoje.js`, `ui_actions.js`. 
   `hoje.loaded` ({date}) lets Food/Workout fill their cards; `day.saved` follows `Diary.save`.
 - The core registry tests (`core_actions.test.js`) now start from a registry with only the core
   action, since feature files register theirs at load time.
+
+## As built (food)
+
+Files `apps/sheet4/src/food_units.js` (`Units`), `food_catalog.js` (`Foods`), `food_log.js`
+(`FoodLog`, `FoodScreen`, actions), `food_favorites.js` (`Favorites`), `food_plan.js` (`BaseDiet`,
+`Equivalences`). Deviations and choices:
+
+- **Units**: g/mg/kg and ml/l convert within their family; mass ↔ volume is refused (no density);
+  any other unit is a household measure and needs Alimentos `Medida caseira` + `Base por medida`
+  (the unit must match), else a Portuguese error ("2 un nunca vira 2 g"). Household conversions are
+  flagged estimated.
+- **Alimentação row**: quantity/unit stored in the food's base unit; the typed amount goes to
+  Observação ("Informado: 2 un (medida caseira, estimada)"). `Cálculo` = Estimado when a household
+  measure was used, Medição = Estimada, the food's Fonte is Estimativa/Pendente, or the favourite
+  ingredient was estimated; `Conferência` says why (or OK). Sem cálculo rows keep macros empty and
+  Fonte = Pendente. `ID lançamento` = `A<yyyyMMdd>-<nnn>` per date. Future dates are refused.
+- **Fonte mapping** (3.0 free text → enum, first match on quality · reference · name): an exact enum
+  value in `Qualidade da referência` wins; "pendente" → Pendente; estimativa/estimado/"a conferir"/
+  "conferir rótulo" → Estimativa; "rótulo confirmado/conferido/verificado" → Rótulo confirmado;
+  TACO/TBCA/USDA/"fonte confiável" → TACO/fonte confiável; otherwise Pendente. Both 3.0 catalogues
+  map to 92 TACO + 18 Estimativa.
+- **Day totals**: after every change `Days.patch(date, {kcal, protein, carbs, fat, fiber,
+  noCalcItems, estimatedItems})` (sums over Calculado + Estimado rows, 0.1 rounding; macros null
+  without calculable rows; all null when the day has no food row) and `Diary.refreshState(date)`.
+- **Favourites**: launching expands to **one Alimentação row per ingredient** (so rows can be
+  corrected/deleted one by one and each keeps its own Fonte/Cálculo), all tagged
+  `Favorita / versão` = "Nome · vN"; quantities × portions, macros recomputed from the current
+  catalogue. Creating from the meal of a date never logs consumption; the same name saved again is
+  the next version (older ones kept); identical ingredients to the latest version are refused.
+  `Ingredientes` gained a `Versão` column (the only change to `Tabs.SPEC`); its `Conferência` keeps
+  the source row's Cálculo.
+- **Copy**: copies stored values (not recomputed) and prefixes Observação with
+  "Cópia de dd/mm/yyyy"; the same meal of the same date copied again to the same day is refused
+  ("Todas" is refused when any of its meals was already copied); copying a date onto itself too.
+- **Correct/Delete selected row**: act on the Alimentação selection; correction asks for the new
+  amount in a dialog ("150" or "2 un"; menu only — prompts do not work on mobile, so these two are
+  not quick actions).
+- **Dieta base / Equivalências / Cadastro válido**: script-written values replace the 3.0 VLOOKUP
+  formulas ("Recalcular dieta base e equivalências"); a food that cannot be computed leaves the
+  cells empty (never 0 or #N/A); the totals row is the one whose Refeição is "Total da proposta".
+  Results match the 3.0 cached values of both exports within rounding. The planned total
+  (`BaseDiet.totals()`) is for display only and never feeds Diário or indicators.
+- **Hoje wiring** (`FoodScreen`): reads `Hoje.read().food` + `Hoje.date()`, clears only the
+  consumed fields with `Hoje.write('food', {…: null})` (meal and unit stay), re-renders Meta ×
+  realizado when Hoje shows the changed date.

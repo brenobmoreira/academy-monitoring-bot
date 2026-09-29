@@ -685,15 +685,14 @@ const Weeks = {
 
 /* Hooks, actions and the daily trigger -------------------------------------------------------- */
 
-// A phase change re-analyses the running week only; closed weeks keep their stored values.
-// It never makes the transition fail: an analysis error is logged and the week is refreshed later.
-Core.on('phase.changed', () => Weeks.refreshSafely_());
 
-// Saving a day of the running week re-analyses it (spec §6.2: "recomputed on every save"). A day
-// of a closed week does not touch its frozen row: Recalcular histórico does.
-Core.on('day.saved', (e) => {
-  const d = e && Dates.parse(e.date);
-  if (d && Dates.sameDay(Dates.weekStart(d), Dates.weekStart(Dates.today()))) Weeks.refreshSafely_();
+// Any action that wrote a source of the weekly analysis re-analyses the running week once, when the
+// action commits (spec §6.2: "recomputed on every save"): Hoje, food, training, measures, undo.
+// Closed weeks keep their frozen rows; Recalcular histórico rewrites them.
+Weeks.SOURCE_TABS = ['diary', 'food', 'workouts', 'measures', 'objectives', 'goals', 'plans'];
+Core.on('action.committed', (e) => {
+  const names = Weeks.SOURCE_TABS.map((id) => Tabs.get(id).name);
+  if (e && (e.tabs || []).some((t) => names.includes(t))) Weeks.refreshSafely_();
 });
 
 /** refreshCurrent when Semanas exists; an error is logged, never thrown to the caller's save. */

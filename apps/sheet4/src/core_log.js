@@ -79,8 +79,11 @@ const ChangeLog = {
     if (ChangeLog.current_) return fn();
     ChangeLog.current_ = { id: ChangeLog.newId_(), label };
     ChangeLog.pending_ = [];
+    let result;
+    let tabs;
     try {
-      return fn();
+      result = fn();
+      tabs = ChangeLog.touched_();
     } catch (err) {
       ChangeLog.rollback_();
       throw err;
@@ -88,6 +91,16 @@ const ChangeLog = {
       ChangeLog.current_ = null;
       ChangeLog.pending_ = [];
     }
+    // After the action closes, so listeners' own writes (derived tabs) are not part of it.
+    if (tabs.length) Core.emit('action.committed', { label, tabs });
+    return result;
+  },
+
+  /** Names of the tabs written by the running action. */
+  touched_() {
+    const names = [];
+    ChangeLog.pending_.forEach((p) => { if (p.change.tab && !names.includes(p.change.tab)) names.push(p.change.tab); });
+    return names;
   },
 
   /** Called by Tabs before each write; logs only while an action runs. */
@@ -227,7 +240,7 @@ const Undo = {
   },
 
   apply_(act) {
-    return Core.withLock(() => {
+    const result = Core.withLock(() => {
       const changes = act.changes.filter((c) => !c.undone);
       const conflicts = [];
       changes.forEach((c, i) => {
@@ -244,8 +257,10 @@ const Undo = {
       changes.forEach((c) => Tabs.update('log', c.logRow, { undone: now }));
       Tabs.invalidate();
       if (typeof Config !== 'undefined') Config.invalidate();
-      return { actionId: act.id, action: act.label, changes: changes.length };
+      return { actionId: act.id, action: act.label, changes: changes.length, tabs: changes.map((c) => c.tab) };
     });
+    Core.emit('action.committed', { label: act.label, tabs: result.tabs.filter((t, i, all) => all.indexOf(t) === i), undo: true });
+    return result;
   },
 
   /**

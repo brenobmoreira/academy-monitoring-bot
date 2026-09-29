@@ -255,11 +255,17 @@ const Undo = {
     const result = Core.withLock(() => {
       const changes = act.changes.filter((c) => !c.undone);
       const conflicts = [];
-      changes.forEach((c, i) => {
+      // Newest first: a cell written again later in the same action is checked against that later
+      // change only (its earlier `after` was overwritten on purpose).
+      const later = new Set();
+      changes.map((c, i) => i).reverse().forEach((i) => {
+        const c = changes[i];
         const row = Undo.currentRow_(c, changes.slice(i + 1));
         if (row === null) return; // the row was deleted later in the same action
-        const msg = Undo.conflict_(Object.assign({}, c, { row }));
-        if (msg) conflicts.push(msg);
+        const located = Object.assign({}, c, { row });
+        const msg = Undo.conflict_(located, later);
+        if (msg) conflicts.unshift(msg);
+        Undo.cellKeys_(located).forEach((k) => later.add(k));
       });
       if (conflicts.length) {
         throw Undo.error_('conflict', `Não foi possível desfazer "${act.label}": ${conflicts.join('; ')}. Nada foi alterado; corrija direto na planilha.`);
@@ -293,13 +299,23 @@ const Undo = {
   },
 
   /** Why a change can no longer be undone, or null. */
-  conflict_(c) {
+  /** "tab|row|col" of the cells a change wrote (none for deletes and structural changes). */
+  cellKeys_(c) {
+    if (c.kind === 'delete' || c.kind === 'structure') return [];
+    const sheet = SpreadsheetApp.getActive().getSheetByName(c.tab);
+    if (!sheet) return [];
+    return Undo.locate_(sheet, c, c.after || {}).filter((x) => x.col && x.range)
+      .map((x) => `${c.tab}|${x.range.getRow()}|${x.range.getColumn()}`);
+  },
+
+  conflict_(c, skip) {
     if (c.kind === 'structure') return Undo.structureConflict_(c.after || {});
     const sheet = SpreadsheetApp.getActive().getSheetByName(c.tab);
     if (!sheet) return `aba "${c.tab}" não existe mais`;
     if (c.kind === 'delete') return null;
     const cells = Undo.locate_(sheet, c, c.after || {});
-    const bad = cells.filter((x) => !x.col || !Undo.same_(Undo.cellValue_(x.range), x.value));
+    const bad = cells.filter((x) => !x.col || (!(skip && x.range && skip.has(`${c.tab}|${x.range.getRow()}|${x.range.getColumn()}`))
+      && !Undo.same_(Undo.cellValue_(x.range), x.value)));
     if (!bad.length) return null;
     return c.kind === 'cells' ? `células ${bad.map((x) => x.name).join(', ')} de "${c.tab}" mudaram`
       : `linha ${c.row} de "${c.tab}" mudou (${bad.map((x) => x.name).join(', ')})`;
@@ -320,7 +336,10 @@ const Undo = {
     const sheet = SpreadsheetApp.getActive().getSheetByName(c.tab);
     if (!sheet) throw new Error(`Aba "${c.tab}" não encontrada`);
     if (c.kind === 'append') {
-      sheet.deleteRow(c.row);
+      // An appended row at the end is cleared rather than deleted, so the grid keeps its size (the
+      // row count, filters and row formats of the tab are as before the action).
+      if (c.row >= sheet.getLastRow()) sheet.getRange(c.row, 1, 1, Math.max(sheet.getLastColumn(), 1)).clearContent();
+      else sheet.deleteRow(c.row);
     } else if (c.kind === 'delete') {
       if (c.row <= sheet.getLastRow()) sheet.insertRowBefore(c.row);
       Undo.locate_(sheet, c, c.before || {}).forEach((x) => { if (x.col) Undo.setCell_(x.range, x.value); });

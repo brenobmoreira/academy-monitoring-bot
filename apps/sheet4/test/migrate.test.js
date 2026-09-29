@@ -68,7 +68,9 @@ const codes = (findings) => findings.map((f) => f.code);
     assert.equal(r.ok, true);
     assert.equal(r.alreadyMigrated, false);
     assert.deepEqual(r.findingsAfter, [], 'the audit after migration is clean');
-    assert.deepEqual(r.postSteps.map((s) => s.status), ['ausente', 'ausente'], 'Weeks/Setup not installed in this branch');
+    assert.deepEqual(r.postSteps.map((s) => s.step), ['Recalcular semanas', 'Aplicar layout']);
+    assert.equal(r.postSteps[0].status, typeof ctx.Weeks !== 'undefined' ? 'ok' : 'ausente');
+    assert.equal(r.postSteps[1].status, typeof ctx.Setup !== 'undefined' && ctx.Setup.apply ? 'ok' : 'ausente');
 
     // Tabs renamed in place, new ones created.
     const names = ctx.__spreadsheet.getSheets().map((s) => s.getName());
@@ -217,16 +219,31 @@ test('a failing step rolls the whole migration back (renames and new tabs too)',
   assert.equal(comparable(ctx), original);
 });
 
-test('post steps call Weeks.recomputeAll and Setup.apply when those modules exist', () => {
+test('post steps run inside the migration action: one undo returns to 3.0, a failing step is reported', () => {
   const ctx = boot('zoio');
+  const original = comparable(ctx);
   const calls = [];
-  ctx.Weeks = { recomputeAll: () => calls.push('weeks') };
-  ctx.Setup = { apply: () => { calls.push('setup'); throw new Error('layout quebrado'); } };
+  const recompute = ctx.Weeks.recomputeAll;
+  ctx.Weeks.recomputeAll = () => { calls.push('weeks'); return recompute(); };
+  ctx.Setup = {
+    apply: () => {
+      calls.push('setup');
+      ctx.Tabs.setCells('dashboard', { A1: 'parcial' }); // written before failing: part of the action
+      throw new Error('layout quebrado');
+    },
+  };
   const r = plain(ctx.Migrate.run(client('zoio')));
   assert.deepEqual(calls, ['weeks', 'setup']);
   assert.deepEqual(r.postSteps.map((s) => s.status), ['ok', 'erro']);
   assert.match(r.postSteps[1].message, /layout quebrado/);
   assert.equal(ctx.Migrate.isMigrated(), true, 'the migration itself stays applied');
+  const weeks = ctx.Tabs.read('weeks');
+  assert.deepEqual(plain(weeks.map((w) => ctx.Dates.key(w.start))), ['2026-09-14', '2026-09-21', '2026-09-28'], 'weeks since F001, no data');
+  assert.ok(weeks.every((w) => w.status === 'Dados insuficientes' && w.objective === (ctx.Dates.key(w.start) === '2026-09-28' ? 'O001' : null)));
+  assert.ok(ctx.Tabs.read('audit').some((a) => a.code === 'post_step' && a.severity === 'Erro' && /layout quebrado/.test(a.finding)));
+  assert.deepEqual(plain(ctx.ChangeLog.actions().map((a) => a.label)), ['Migrar 3.0 → 4.0'], 'a single undoable action');
+  ctx.Undo.last();
+  assert.equal(comparable(ctx), original);
 });
 
 test('initial setup of an empty spreadsheet creates every tab and the first versions', () => {

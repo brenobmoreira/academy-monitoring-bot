@@ -630,16 +630,22 @@ preview tool `tools/migrate_preview.js` → `sheets/preview/<name>_4_0.xlsx`.
   to Auditoria → stale layout status texts replaced → ids by date (`Days.restampAll`; empty id cells
   of Registro/Medidas/Revisões) → any remaining technical date cleared → 3.0 named ranges used by
   validations recreated (`ListaExercicios` → Exercícios column) → Painel formulas removed (typed
-  text kept) → schema marker. `Weeks.recomputeAll` and `Setup.apply` then run as separate actions
-  when defined (reported as `ausente` otherwise).
+  text kept) → schema marker → `Weeks.recomputeAll` and `Setup.apply` when defined, **inside the
+  same action** (a failing one is reported as `erro` in the result and in Auditoria without
+  cancelling the migration; `ausente` when the module is not installed) → audit still open.
+  So one "Desfazer última alteração" after a migration returns the file to 3.0, weeks included.
 - Core changes: Config keys `client.notes` (profile facts) and `system.otherClientNames`; Auditoria
   columns as above and `ENUMS.AUDIT_STATE`; change-log kind `structure` (`Estrutura`: renameSheet,
   insertSheet, insertColumns, namedRange) so Undo reverts tab renames/creations; Undo now checks
-  layout-cell changes for conflicts (it skipped them); `Tabs.ensure` adds columns for tabs wider
-  than a new sheet's 26.
-- Undo of the migration restores the 3.0 file exactly (tested on both exports) except the hidden
-  `Log` tab, cached formula values (recomputed by Sheets) and anything Setup/Weeks did afterwards
-  (their own actions). Formats, validations, filters and conditional formats are never touched by
+  layout-cell changes for conflicts (it skipped them) and checks a cell written twice in one
+  action only against the later write; undo of an append at the end of a tab clears the row
+  instead of deleting it (grid size, filters and row formats stay); `Tabs.ensure` adds columns
+  for tabs wider than a new sheet's 26. `Weeks.refreshSafely_` (the `action.committed` listener)
+  does nothing while Semanas lacks the 4.0 columns, so undoing the migration does not write 4.0
+  weeks into the 3.0 tab.
+- Undo of the migration restores the 3.0 file exactly (tested on both exports, with the real Weeks
+  module recomputing weeks inside the action) except the hidden `Log` tab, cached formula values
+  (recomputed by Sheets) and formatting applied by `Setup.apply` (not in the change log). Formats, validations, filters and conditional formats are never touched by
   the migration; the 3.0 ones on rebuilt headers (Diário, Semanas, Progressão) stay until
   `Setup.apply` rewrites them.
 - Left for later modules: Hoje keeps its 3.0 formulas (they read Diário by column letter and now

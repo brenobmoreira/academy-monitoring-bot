@@ -695,9 +695,14 @@ Core.on('action.committed', (e) => {
   if (e && (e.tabs || []).some((t) => names.includes(t))) Weeks.refreshSafely_();
 });
 
-/** refreshCurrent when Semanas exists; an error is logged, never thrown to the caller's save. */
+/**
+ * refreshCurrent when Semanas exists with the 4.0 columns (not on a 3.0 file, e.g. right after the
+ * migration was undone); an error is logged, never thrown to the caller's save.
+ */
 Weeks.refreshSafely_ = function refreshSafely_() {
   if (!Tabs.findSheet('weeks')) return null;
+  Tabs.invalidate(Tabs.get('weeks').name);
+  if (Tabs.missingColumns('weeks').length) return null;
   try {
     return Weeks.refreshCurrent();
   } catch (err) {

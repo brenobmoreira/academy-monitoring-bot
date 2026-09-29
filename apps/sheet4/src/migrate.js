@@ -15,8 +15,10 @@
  * it is cleared), every change is listed in Auditoria with its previous value, and the whole
  * migration is one undoable action ("Migrar 3.0 → 4.0"): tab renames/creations, inserted columns
  * and named ranges are logged as structural changes, cells as ordinary changes. Recomputing weeks
- * and applying the layout (Weeks.recomputeAll, Setup.apply) run afterwards as separate actions,
- * only when those modules exist.
+ * and applying the layout (Weeks.recomputeAll, Setup.apply, only when those modules exist) run
+ * inside the same action, after the schema marker, so one "Desfazer última alteração" returns the
+ * file to 3.0 (formatting applied by Setup is not in the change log and stays). A failing post step
+ * is reported (status 'erro' in the result and in Auditoria) without cancelling the migration.
  */
 const Migrate = {
   LABEL: 'Migrar 3.0 → 4.0',
@@ -88,9 +90,8 @@ const Migrate = {
     const cc = parsed.client;
     const findingsBefore = Audit.findings({ otherNames: cc.otherClientNames });
 
-    const result = Core.withLock(() => ChangeLog.run(Migrate.LABEL, () => Migrate.steps_(cc)));
+    const result = Core.withLock(() => ChangeLog.run(Migrate.LABEL, () => Migrate.steps_(cc, o)));
     result.findingsBefore = findingsBefore;
-    result.postSteps = o.postSteps === false ? [] : Migrate.postSteps_();
     result.ok = true;
     result.alreadyMigrated = false;
     const open = result.findingsAfter.filter((f) => f.severity === 'Erro').length;
@@ -241,7 +242,7 @@ const Migrate = {
 
   /* Steps --------------------------------------------------------------------------------------- */
 
-  steps_(cc) {
+  steps_(cc, opts) {
     const report = [];
     const rep = (severity, code, tab, cell, finding, action, before, state) => report.push({
       severity, code, tab: tab || '', cell: cell || '', finding, action: action || '', before: before === undefined ? null : before, state: state || 'Corrigido',
@@ -267,6 +268,13 @@ const Migrate = {
     Config.set('system.schemaVersion', Config.SCHEMA_VERSION);
     rep('Info', 'schema_version', Tabs.get('config').name, 'system.schemaVersion', `Versão do esquema gravada: ${Config.SCHEMA_VERSION}.`, 'Rodar a migração de novo não altera nada.', null);
 
+    const postSteps = opts && opts.postSteps === false ? [] : Migrate.postSteps_();
+    postSteps.forEach((p) => {
+      if (p.status === 'ok') rep('Info', 'post_step', '', p.step, `${p.step}: concluído.`, 'Parte da mesma ação da migração (um Desfazer reverte tudo).', null);
+      else if (p.status === 'erro') rep('Erro', 'post_step', '', p.step, `${p.step} falhou: ${p.message}`, 'Rodar de novo pelo menu depois de corrigir.', null, 'Aberto');
+      else rep('Aviso', 'post_step', '', p.step, `${p.step}: módulo ainda não instalado.`, 'Rodar pelo menu quando estiver disponível.', null, 'Aberto');
+    });
+
     Tabs.invalidate();
     Config.invalidate();
     const findingsAfter = Audit.findings({ otherNames: cc.otherClientNames });
@@ -275,22 +283,32 @@ const Migrate = {
       .concat(cc.review.map((r) => Audit.row({ severity: 'Aviso', code: 'review', tab: '', cell: r.area, finding: r.message, action: 'Confirmar com o revisor e ajustar em Config/Metas se preciso.' }, at, 'Revisar')))
       .concat(findingsAfter.map((f) => Audit.row(f, at, 'Aberto')));
     Tabs.appendMany('audit', rows);
-    return { changes: report.length, report, findingsAfter, review: cc.review };
+    return { changes: report.length, report, findingsAfter, review: cc.review, postSteps };
   },
 
-  /** Weeks.recomputeAll and Setup.apply, each as its own action, only when defined. */
+  /**
+   * Weeks.recomputeAll and Setup.apply when defined, inside the running migration action (their
+   * logged writes join it). An error is caught and reported; what the step wrote before failing
+   * stays in the action, so undoing the migration also removes it.
+   */
   postSteps_() {
     const steps = [
-      { step: 'Recalcular semanas', label: 'Migração: recalcular semanas', fn: () => (typeof Weeks !== 'undefined' && Weeks && typeof Weeks.recomputeAll === 'function' ? () => Weeks.recomputeAll() : null) },
-      { step: 'Aplicar layout', label: 'Migração: aplicar layout', fn: () => (typeof Setup !== 'undefined' && Setup && typeof Setup.apply === 'function' ? () => Setup.apply() : null) },
+      { step: 'Recalcular semanas', fn: () => (typeof Weeks !== 'undefined' && Weeks && typeof Weeks.recomputeAll === 'function' ? () => Weeks.recomputeAll() : null) },
+      { step: 'Aplicar layout', fn: () => (typeof Setup !== 'undefined' && Setup && typeof Setup.apply === 'function' ? () => Setup.apply() : null) },
     ];
     return steps.map((s) => {
       const fn = s.fn();
       if (!fn) return { step: s.step, status: 'ausente', message: 'Módulo ainda não instalado; rode depois pelo menu.' };
       try {
-        Core.withLock(() => ChangeLog.run(s.label, fn));
+        Tabs.invalidate();
+        Config.invalidate();
+        fn();
+        Tabs.invalidate();
+        Config.invalidate();
         return { step: s.step, status: 'ok', message: '' };
       } catch (err) {
+        Tabs.invalidate();
+        Config.invalidate();
         return { step: s.step, status: 'erro', message: err.message };
       }
     });

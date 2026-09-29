@@ -86,7 +86,7 @@ const Progression = {
     return Progression.previous(Progression.history(exercise), Dates.require(date, 'Data'));
   },
 
-  /** "22/09 · Upper: 40 kg × 10 (RIR 1) · 40 kg × 9 (RIR 0)" */
+  /** "22/09 · Treino A: 40 kg × 10 (RIR 1) · 40 kg × 9 (RIR 0)" */
   referenceText(e) {
     if (!e) return '';
     return `${Dates.format(e.date).slice(0, 5)} · ${e.session}: ${Progression.setsText(e.sets)}`;

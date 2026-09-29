@@ -81,7 +81,7 @@ test('confirm with the pasted JSON and an edited protein target', () => {
 test('menu Sistema: the three actions; the dialog shows the proposal page', () => {
   const ctx = load({ fixture: 'zoio_3_0', now: NOW });
   const system = plain(ctx.Actions.menu()).find((g) => g.label === 'Sistema');
-  assert.deepEqual(system.items.map((i) => i.label), ['Configuração inicial', 'Migrar 3.0 → 4.0', 'Auditoria']);
+  assert.deepEqual(system.items.map((i) => i.label), ['Configuração inicial', 'Migrar 3.0 → 4.0', 'Auditoria', 'Reaplicar layout']);
   const r = ctx.Actions.run('migrate');
   assert.equal(r.ok, true);
   const d = ctx.__dialogs[0];

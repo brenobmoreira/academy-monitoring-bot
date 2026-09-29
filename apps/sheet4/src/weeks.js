@@ -14,6 +14,9 @@
  *   Weeks.phaseSummary()        one entry per objective (Painel "linha do tempo das fases")
  *   dailyRefresh()              time-driven entry point (Setup installs the trigger)
  *
+ * Event 'weeks.refreshed' ({scope: 'current'|'all'|'none', written}) follows refreshCurrent and
+ * recomputeAll (and a committed action when there is no Semanas tab); the Painel re-renders on it.
+ *
  * Everything is resolved by date: ids are the versions in force on the week's Sunday (plus a
  * `Transição na semana` text when an id changes inside the week), the food adherence of each day
  * uses the goal in force on that day, and the history an analysis sees is recomputed from the
@@ -605,7 +608,9 @@ const Weeks = {
   /** Rewrites the running week (called on every save, phase change and by the daily trigger). */
   refreshCurrent() {
     const s = Weeks.snapshot_();
-    return Weeks.storeMany_([s.today], s, { force: true });
+    const r = Weeks.storeMany_([s.today], s, { force: true });
+    Core.emit('weeks.refreshed', { scope: 'current', written: r.written });
+    return r;
   },
 
   /** Writes every closed week that has no final row yet (the week that just ended, gaps). */
@@ -618,7 +623,9 @@ const Weeks = {
   /** Recalcular histórico: rewrites every week with the same by-date lookups. */
   recomputeAll() {
     const s = Weeks.snapshot_();
-    return Weeks.storeMany_(Weeks.allStarts_(s), s, { force: true });
+    const r = Weeks.storeMany_(Weeks.allStarts_(s), s, { force: true });
+    Core.emit('weeks.refreshed', { scope: 'all', written: r.written });
+    return r;
   },
 
   /** Stored Semanas rows, oldest first ([] when the tab does not exist). */
@@ -700,9 +707,14 @@ Core.on('action.committed', (e) => {
  * migration was undone); an error is logged, never thrown to the caller's save.
  */
 Weeks.refreshSafely_ = function refreshSafely_() {
-  if (!Tabs.findSheet('weeks')) return null;
+  const skip = () => {
+    // Nothing to re-analyse, but views of the phase (Painel) still follow the change.
+    Core.emit('weeks.refreshed', { scope: 'none', written: [] });
+    return null;
+  };
+  if (!Tabs.findSheet('weeks')) return skip();
   Tabs.invalidate(Tabs.get('weeks').name);
-  if (Tabs.missingColumns('weeks').length) return null;
+  if (Tabs.missingColumns('weeks').length) return skip();
   try {
     return Weeks.refreshCurrent();
   } catch (err) {

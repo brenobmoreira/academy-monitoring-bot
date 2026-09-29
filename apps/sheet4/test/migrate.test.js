@@ -16,12 +16,17 @@ const client = (name) => JSON.parse(fs.readFileSync(path.join(CLIENTS, `${name}.
 const boot = (name) => load({ fixture: `${name}_3_0`, now: NOW });
 const OTHER = { breno: 'Zoio', zoio: 'Breno' };
 
-/** Snapshot without the Log tab and without cached formula values (lost when a formula is rewritten). */
+/**
+ * Values of every tab by name (formulas as text; no Log, no cached formula values) and the named
+ * ranges. Formatting, tab order and charts are left out: Setup.apply (run inside the migration)
+ * restyles the file and formatting is not in the change log (spec, As built (setup)).
+ */
 function comparable(ctx) {
   const snap = snapshot(ctx);
-  snap.sheets = snap.sheets.filter((s) => s.name !== 'Log');
-  snap.sheets.forEach((s) => { s.values = s.values.map((r) => r.map((v) => (v && v.$formula ? { $formula: v.$formula } : v))); });
-  return JSON.stringify(snap);
+  const sheets = snap.sheets.filter((s) => s.name !== 'Log')
+    .map((s) => ({ name: s.name, hidden: s.hidden, values: s.values.map((r) => r.map((v) => (v && v.$formula ? { $formula: v.$formula } : v))) }))
+    .sort((a, b) => (a.name < b.name ? -1 : 1));
+  return JSON.stringify({ sheets, namedRanges: snap.namedRanges });
 }
 
 /** Data rows with typed content (formulas ignored) per sheet, from row 6. */
@@ -142,13 +147,19 @@ const codes = (findings) => findings.map((f) => f.code);
     const other = OTHER[name];
     const residues = allCells(ctx, (v, tab) => tab !== 'Auditoria' && tab !== 'Log' && tab !== 'Config' && typeof v === 'string' && v.includes(other));
     assert.deepEqual(residues, []);
+    // Guia: generic product text; the rotation comes from Config (Setup.guide_).
     const guide = ctx.__spreadsheet.getSheetByName('Guia').getRange('B21').getValue();
-    assert.ok(guide.startsWith(name === 'breno' ? 'Breno:' : 'Zoio:'), guide);
+    assert.ok(guide.includes(C.getList('routine.sessionRotation').join(' → ')), guide);
+    assert.ok(!/^(Breno|Zoio):/.test(guide), guide);
 
     // Stale 3.0 texts replaced, Painel formulas gone, named range restored.
-    assert.equal(ctx.__spreadsheet.getSheetByName('Hoje').getRange('E5').getValue(), ctx.Migrate.STATUS_TEXT);
-    assert.deepEqual(ctx.__spreadsheet.getSheetByName('Painel').getDataRange().getFormulas().flat().filter(Boolean), []);
-    assert.equal(ctx.__spreadsheet.getSheetByName('Painel').getRange('B32').getValue(), 'kcal ±5%; gordura ±15%; proteína pela faixa individual.', 'typed text kept');
+    // Hoje and Painel are redrawn by Setup (4.0 layout); the Painel keeps only navigation links as formulas.
+    const hoje = ctx.__spreadsheet.getSheetByName('Hoje');
+    assert.equal(hoje.getRange('A9').getValue(), 'Medidas do dia');
+    assert.equal(hoje.getRange('E5').getValue(), '', '3.0 status line gone with the 3.0 layout');
+    const painel = ctx.__spreadsheet.getSheetByName('Painel');
+    assert.ok(painel.getDataRange().getFormulas().flat().filter(Boolean).every((f) => f.startsWith('=HYPERLINK("#gid=')));
+    assert.match(painel.getRange('A5').getValue(), /^OBJETIVO ATUAL — O001 · Recomposição corporal/);
     assert.ok(ctx.__spreadsheet.getRangeByName('ListaExercicios'));
     assert.deepEqual(ctx.__spreadsheet.getSheetByName('Diário').getDataRange().getFormulas().flat().filter(Boolean), []);
 
@@ -228,7 +239,7 @@ test('post steps run inside the migration action: one undo returns to 3.0, a fai
   ctx.Setup = {
     apply: () => {
       calls.push('setup');
-      ctx.Tabs.setCells('dashboard', { A1: 'parcial' }); // written before failing: part of the action
+      ctx.Tabs.setCells('today', { A1: 'parcial' }); // written before failing: part of the action
       throw new Error('layout quebrado');
     },
   };

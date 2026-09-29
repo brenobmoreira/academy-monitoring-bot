@@ -694,3 +694,80 @@ for the old code) seeded with a synthetic client.
   `ChangeLog.changeCount()` was added for the writeId. The bot's `/semana` and the weekly reminder
   use `week.get` (the sheet's analysis) instead of recomputing from ranges; `/fase [data]` shows the
   objective in force on a date.
+
+## As built (setup/design/dashboard)
+
+Files: `apps/sheet4/src/ui_style.js` (`Style`), `setup.js` (`Setup`), `dashboard.js` (`Dashboard`);
+tests `test/setup.test.js`, `test/dashboard.test.js` (synthetic client in `test/dashboard_helpers.js`);
+preview `tools/preview_setup.js` → `sheets/preview/produto-exemplo.xlsx`.
+
+- **Palette (tokens in `Style.C` / `Style.STATUS` / `Style.LAYER`)**: font Inter (also the theme
+  font when `getSpreadsheetTheme` exists); title 18 · band 14 · section 12 · body 10 · small 9.
+  Canvas `#f8fafc`, card `#ffffff` with border `#e2e8f0`, text `#0f172a` / muted `#64748b`;
+  primary `#4f46e5` (soft `#eef2ff`, text `#312e81`); header band `#1e1b4b` (white / `#c7d2fe`).
+  Input = fill `#fffbeb` + border `#b45309`; calculated = fill `#f1f5f9` + text `#475569` (never
+  italic) + warning-only protection. Chips: ok `#dcfce7/#166534`, attention `#fef3c7/#92400e`, off
+  `#fee2e2/#991b1b`, insufficient `#e2e8f0/#475569`, info `#e0e7ff/#3730a3` (`Style.kindOf` maps
+  week status, recommendation, day/session/version/food states). Layers: tab and table-header
+  colours 1 indigo `#4f46e5`/`#e0e7ff`, 2 teal `#0d9488`/`#ccfbf1`, 3 grey `#94a3b8`/`#e2e8f0`.
+  Chart series per phase `#4f46e5 #0d9488 #d97706 #db2777 #0284c7 #65a30d #7c3aed #dc2626` (weeks
+  with no objective grey), markers `#0f172a`.
+- **Setup.apply()** (action *Reaplicar layout*, group Sistema; called by the migration): ensures
+  every tab (no renames), removes an untouched default "Sheet1/Página1", appends missing spec
+  columns at the right, Config keys (sections, labels/units/descriptions refreshed, values kept),
+  generic **Guia** topics (rotation, plan in force, reviewer and Hoje cells read at render time;
+  rows with other Temas untouched), tab order by layer (unknown tabs last; `Log` hidden, other
+  hidden tabs kept hidden), per data tab title/help, header band, frozen header, widths and number
+  formats by column type (`Style.numberFormat`), input fill on layer 1 + Config, grey calculated
+  columns, validations (Tabs.SPEC enums; Diary.FIELDS ranges; exercise/food lists as live ranges of
+  Exercícios/Alimentos; sessions from `Sessions.names`), conditional formats (status chips;
+  technical dates < 2000 hidden with a formula rule), `[Setup] …` warning-only protections (header
+  row + runs of calculated columns; replaced on each run), named range `ListaExercicios`, Progressão
+  picker/history block and the Ficha de treino save form (B4/D4), Hoje, triggers (onEdit →
+  `onEditInstalled`, daily 03:00 → `dailyRefresh`, duplicates removed), then `Dashboard.render()`.
+  Second run: identical snapshot (tested). A Hoje whose label cells mostly differ (3.0) is cleared
+  first (it is a screen). Layer-1 table tabs get "‹ Hoje · Painel" links on row 1.
+- **Undo inside the migration**: every value Setup/Dashboard write goes through `Style.write`, which
+  logs the changed cells as `cells` changes (60 per Log row) while an action runs; new tabs,
+  columns and the named range are logged as `structure`. One *Desfazer* after *Migrar 3.0 → 4.0*
+  returns every 3.0 value (tested); formats, validations, protections, tab order and charts are not
+  in the log and stay 4.0. `migrate.test.js` now compares values only (and its stub writes Hoje).
+- **Hoje**: drawn from `Hoje.layout()` only: canvas background, one card per section (A:B; training
+  A:M; status A:E), section bars, labels muted, inputs yellow, calculated grey, Ação rápida
+  highlighted (primary border), rows 1–5 frozen, navigation row A1:E1, validations from the layout
+  (`quickActions`, `config:`/sessions, `tab:<id>.<col>` ranges, number/date rules with help text),
+  chips on B7, B40, E60:E65, notes on A44–A55 kept.
+- **Painel cell map** (columns A–E, widths 160/130/190/130/190; phone sees A–B): 1 nav links ·
+  2 "Painel · <client.name>" · 3 help + "Atualizado em" · 5 band `OBJETIVO ATUAL — Oxxx · nome` ·
+  6 since · semana N da fase · revisor · meta · ficha · 8 **Fase atual** (9 Início, 10 Peso médio 7d,
+  11 Cintura, 12 Faixa alvo) · 14 **Metas atuais · Mxxx** (15 kcal, 16 Proteína, 17 Gordura,
+  18 Carboidrato, 19 Fibra, 20 Treinos, 21 Passos, 22 TMB *estimado*, 23 Gasto *estimado*, 24 Dieta
+  base *planejado*) · 26 **Estado atual** (27 heads: esta semana / semana anterior; 28–33 peso,
+  cintura, alimentação, desempenho, recuperação, aderência ao treino; 34 situação geral; B/D chip,
+  C/E text) · 36 **Recomendação** (37 code chip + reason, 38 data used, 39 next review) · 41
+  **Linha do tempo** (42 heads, two rows per objective) · then **Evolução por fase** with the weight
+  chart and, 17 rows below, the waist chart. Empty cards keep their rows (collapsed to 4 px) with
+  the empty-state text in the first one ("Sem dados ainda — registre o primeiro dia em Hoje.").
+  A week of another objective shows "Semana da fase anterior — veja a linha do tempo"; the
+  recommendation is the last closed week of the objective in force (else its running week).
+- **Charts**: hidden block from column H (weight: Semana | one column per objective | Mudança de
+  fase; one empty column; waist, same shape). A phase column holds its weeks plus the week before
+  its first (continuous line, colour changes at the transition); the marker column holds the first
+  week of each new objective (not the start of tracking). Line charts, `SHOW_BOTH` hidden data,
+  `interpolateNulls`, per-series colours/`lineWidth 0` markers; rebuilt only when the block's
+  shape or anchors change (signature in I1).
+- **Refresh**: weeks.js now emits `weeks.refreshed` after `refreshCurrent`/`recomputeAll` (and when
+  a committed action finds no 4.0 Semanas); the Painel re-renders on it — so after every save,
+  phase transition (Objetivos written), `dailyRefresh`, *Atualizar semana*, *Recalcular histórico*
+  — and directly after actions that touched only Config/Dieta base/Alimentos. *Atualizar painel*
+  (quick) renders on demand. A render identical to the previous one in the same execution writes
+  nothing (one timestamp per execution). A 3.0 file (Semanas without the 4.0 columns, e.g. after
+  undoing the migration) is never auto-rendered.
+- Other changes: `appsscript.json` gains the `script.scriptapp` scope (installable triggers);
+  a doc comment in `workout_progression.js` no longer uses a client session name; `wizard.test.js`
+  expects *Reaplicar layout* in the Sistema menu.
+- Not identical in real Sheets: fonts depend on Inter being available (fallback Arial); HYPERLINK
+  `#gid=` links open the tab on desktop, the phone app may open a browser page; chart options set
+  with dotted keys (`legend.position`, `hAxis.format`) and per-series `pointShape` are applied by
+  Sheets but not checked by the fakes; row heights shrink-to-fit is not emulated (wrapped text may
+  need taller rows); protections are warnings for the owner and editors alike.

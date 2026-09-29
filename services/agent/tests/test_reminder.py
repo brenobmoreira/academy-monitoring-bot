@@ -80,7 +80,7 @@ async def test_daily_sends_nothing_when_everything_is_there():
 
 @pytest.mark.parametrize("kind", ["daily", "weekly"])
 async def test_a_sheet_failure_sends_nothing(kind, caplog):
-    counts, sent, _ = await remind(kind, day_get=[DOWN], diary_range=[DOWN], workout_range=[DOWN])
+    counts, sent, _ = await remind(kind, day_get=[DOWN], week_get=[DOWN])
     assert (counts, sent) == ((0, 0), [])
     assert "sheet failed" in caplog.text
 
@@ -96,24 +96,28 @@ async def test_one_failing_chat_does_not_stop_the_others(caplog):
 # ---- weekly --------------------------------------------------------------------------------
 
 
-async def test_weekly_sends_the_summary_of_the_seven_days_ending_today():
-    days = {"ok": True, "result": {"from": "", "to": "", "days": [{"date": "2026-09-22", "weightKg": 82}]}}
-    rows = {"ok": True, "result": {"from": "", "to": "", "rows": []}}
-    counts, sent, calls = await remind("weekly", chats=(42, 7), diary_range=[days], workout_range=[rows])
-    assert calls == [
-        ("diary.range", {"from": "2026-09-18", "to": "2026-09-24"}),
-        ("workout.range", {"from": "2026-09-18", "to": "2026-09-24"}),
-    ]
+async def test_weekly_sends_the_analysis_of_the_week_containing_today():
+    week = {
+        "start": "2026-09-21",
+        "end": "2026-09-27",
+        "closed": False,
+        "objective": "O001",
+        "weightAvg": 82,
+        "status": "Dados insuficientes",
+        "recommendation": "DADOS INSUFICIENTES",
+    }
+    counts, sent, calls = await remind("weekly", chats=(42, 7), week_get=[{"ok": True, "result": week}])
+    assert calls == [("week.get", {"date": "2026-09-24"})]
     assert counts == (2, 2)
     assert [chat for chat, _, _ in sent] == [7, 42]
     assert all(html for _, _, html in sent)
-    assert "18/09" in sent[0][1] and "82" in sent[0][1]
+    assert "21/09–27/09" in sent[0][1] and "82" in sent[0][1] and "DADOS INSUFICIENTES" in sent[0][1]
 
 
 async def test_weekly_splits_a_long_summary(monkeypatch):
     long = "\n".join(f"linha {i} " + "x" * 90 for i in range(100))
 
-    async def fake_week_text(sheet, start, end):
+    async def fake_week_text(sheet, day):
         return reminder.Reply(long, html=True)
 
     monkeypatch.setattr(reminder, "week_text", fake_week_text)

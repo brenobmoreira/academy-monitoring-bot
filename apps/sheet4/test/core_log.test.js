@@ -226,3 +226,21 @@ test('action.committed fires once after the outermost action and after an undo, 
     { label: 'fora', tabs: ['Diário'], undo: true },
   ]);
 });
+
+test('undo of an action that wrote the same cells twice checks only the latest write, and counts changes', () => {
+  const ctx = boot({ tabs: { diary: diaryRows() } });
+  const before = snapshot(ctx, ['Diário']);
+  let counted = null;
+  ctx.ChangeLog.run('Lançar dois alimentos', () => {
+    ctx.Tabs.append('diary', { date: '2026-09-29', kcal: 100 });
+    ctx.Tabs.update('diary', 9, { kcal: 250 });
+    ctx.Tabs.update('diary', 6, { weightKg: 67.5 });
+    ctx.Tabs.update('diary', 6, { weightKg: 67.6 });
+    counted = ctx.ChangeLog.changeCount();
+  });
+  assert.equal(counted, 4);
+  assert.equal(ctx.ChangeLog.changeCount(), 0, 'no action running');
+  ctx.Undo.last();
+  trimRows(ctx, 'Diário');
+  assert.equal(snapshot(ctx, ['Diário']), before);
+});

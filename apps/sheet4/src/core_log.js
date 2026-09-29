@@ -70,6 +70,11 @@ const ChangeLog = {
     return ChangeLog.current_ ? { id: ChangeLog.current_.id, label: ChangeLog.current_.label } : null;
   },
 
+  /** Changes recorded so far by the running action (0 when none runs). */
+  changeCount() {
+    return ChangeLog.current_ ? ChangeLog.pending_.length : 0;
+  },
+
   /**
    * Runs fn as one undoable action. Nested calls join the outer action. When fn throws, the
    * changes it made are reverted (newest first), their Log rows marked undone, and the error
@@ -244,9 +249,10 @@ const Undo = {
       const changes = act.changes.filter((c) => !c.undone);
       const conflicts = [];
       changes.forEach((c, i) => {
-        const row = Undo.currentRow_(c, changes.slice(i + 1));
+        const later = changes.slice(i + 1);
+        const row = Undo.currentRow_(c, later);
         if (row === null) return; // the row was deleted later in the same action
-        const msg = Undo.conflict_(Object.assign({}, c, { row }));
+        const msg = Undo.conflict_(Object.assign({}, c, { row }), Undo.overwritten_(c, later));
         if (msg) conflicts.push(msg);
       });
       if (conflicts.length) {
@@ -280,12 +286,25 @@ const Undo = {
     return row;
   },
 
-  /** Why a change can no longer be undone, or null. */
-  conflict_(c) {
+  /**
+   * Cells of change c that a later change of the same action wrote again (same tab and row):
+   * those hold the later value, so only the latest write of a cell is checked for conflicts.
+   */
+  overwritten_(c, later) {
+    const names = {};
+    later.forEach((l) => {
+      if (l.tab !== c.tab || l.row !== c.row || (l.kind !== 'update' && l.kind !== 'cells')) return;
+      Object.keys(l.after || {}).forEach((n) => { names[n] = true; });
+    });
+    return names;
+  },
+
+  /** Why a change can no longer be undone, or null. `skip`: cell names not to check. */
+  conflict_(c, skip) {
     const sheet = SpreadsheetApp.getActive().getSheetByName(c.tab);
     if (!sheet) return `aba "${c.tab}" não existe mais`;
     if (c.kind === 'delete') return null;
-    const cells = Undo.locate_(sheet, c, c.after || {});
+    const cells = Undo.locate_(sheet, c, c.after || {}).filter((x) => !(skip && skip[x.name]));
     const bad = cells.filter((x) => !x.col || !Undo.same_(Undo.cellValue_(x.range), x.value));
     if (!bad.length) return null;
     return c.kind === 'cells' ? `células ${bad.map((x) => x.name).join(', ')} de "${c.tab}" mudaram`

@@ -58,10 +58,15 @@ async def test_tools_are_declared_to_the_provider_in_openai_format():
         "get_catalog",
         "save_diary",
         "save_workout",
+        "save_food",
         "get_exercise_history",
         "get_diary_history",
+        "get_phase",
+        "get_week",
     ]
     assert "exercises" in tools["save_workout"]["properties"]
+    assert "complete" in tools["save_workout"]["properties"]
+    assert "items" in tools["save_food"]["properties"]
     assert tools["get_diary_history"]["required"] == ["date_from", "date_to"]
 
 

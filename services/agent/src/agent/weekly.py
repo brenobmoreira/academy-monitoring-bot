@@ -1,8 +1,10 @@
-"""Weekly summary (`/semana`, and the weekly reminder): built in Python from `diary.range` and
-`workout.range`, no model and no I/O.
+"""Weekly summary (`/semana`, and the weekly reminder): the sheet's own weekly analysis
+(`week.get`, one `Semanas` row: stored as values for a closed week, computed for the running one)
+formatted in Python, no model.
 
-Missing data is left out, never shown as zero: a line appears only when at least one day or row
-carries the value it is computed from. The text is Telegram HTML; sheet-derived names are escaped.
+The analysis already carries the objective, goal and plan of that week, its status
+(No caminho | Atenção | Fora do esperado | Dados insuficientes) and the recommendation. Missing
+data is left out, never shown as zero. The text is Telegram HTML; sheet-derived text is escaped.
 """
 
 from __future__ import annotations
@@ -11,8 +13,6 @@ from datetime import date, timedelta
 from typing import Any
 
 from agent.format import bold, escape
-
-NO_GROUP = "Sem grupo"
 
 
 def week_bounds(today: date, weeks_back: int = 0) -> tuple[date, date]:
@@ -25,83 +25,91 @@ def period(start: date, end: date) -> str:
     return f"{start:%d/%m}–{end:%d/%m}"
 
 
-def week_summary(start: date, end: date, days: list[dict[str, Any]], rows: list[dict[str, Any]]) -> str:
-    """The summary text for `days` (`diary.range` result) and `rows` (`workout.range` result)."""
-    lines = _diary_lines(days) + _workout_lines(rows)
-    if not lines:
-        return f"Sem registros na semana {period(start, end)}."
-    return "\n".join([bold(f"Semana {period(start, end)}"), *lines])
+def week_summary(week: dict[str, Any]) -> str:
+    """The summary text of a `week.get` result."""
+    start, end = date.fromisoformat(week["start"]), date.fromisoformat(week["end"])
+    ids = " · ".join(escape(week[k]) for k in ("objective", "goal", "plan") if week.get(k))
+    title = f"Semana {period(start, end)}" + ("" if week.get("closed") else " (em andamento)")
+    lines = [bold(title) + (f" · {ids}" if ids else "")]
+    if week.get("status"):
+        lines.append(f"Situação: {bold(escape(week['status']))}")
+    if week.get("recommendation"):
+        rec = f"Recomendação: {bold(escape(week['recommendation']))}"
+        if week.get("recommendationReason"):
+            rec += f" — {escape(week['recommendationReason'])}"
+        if week.get("nextReview"):
+            rec += f" (próxima revisão {_ddmm(week['nextReview'])})"
+        lines.append(rec)
+    if week.get("transition"):
+        lines.append(f"Transição: {escape(week['transition'])}")
+    lines += _weight(week) + _food(week) + _training(week) + _recovery(week)
+    if week.get("sufficiency"):
+        lines.append(f"Dados: {escape(week['sufficiency'])}")
+    return "\n".join(lines)
 
 
-# ---- diary ---------------------------------------------------------------------------------
-
-
-def _diary_lines(days: list[dict[str, Any]]) -> list[str]:
-    lines: list[str] = []
-    weights = _numbers(days, "weightKg")
-    if weights:
-        line = f"Peso médio {_num(_mean(weights), 1)} kg ({_days(len(weights))})"
-        if len(weights) > 1:
-            (first_day, first), (last_day, last) = weights[0], weights[-1]
-            line += (
-                f" · {_ddmm(first_day)} {_num(first, 1)} → {_ddmm(last_day)} {_num(last, 1)}"
-                f" ({_signed(last - first)} kg)"
-            )
+def _weight(w: dict[str, Any]) -> list[str]:
+    lines = []
+    if _is_number(w.get("weightAvg")):
+        line = f"Peso médio 7d {_num(w['weightAvg'], 2)} kg"
+        if _is_number(w.get("weighIns")):
+            line += f" ({_count(w['weighIns'], 'pesagem', 'pesagens')})"
+        if _is_number(w.get("weightDelta")):
+            line += f" · {_signed(w['weightDelta'], 2)} kg"
+        if _is_number(w.get("weightDeltaPct")):
+            line += f" ({_signed(w['weightDeltaPct'], 2)}%/sem)"
+        if w.get("targetRange"):
+            line += f" · alvo {escape(w['targetRange'])}"
         lines.append(line)
-    sleep = _numbers(days, "sleepH")
-    if sleep:
-        lines.append(f"Sono médio {_num(_mean(sleep), 1)} h ({_days(len(sleep))})")
-    steps = _numbers(days, "steps")
-    if steps:
-        lines.append(f"Passos em média {_num(_mean(steps), 0)} ({_days(len(steps))})")
-    for field, label in (("muayThai", "Muay Thai"), ("dietComplete", "Dieta completa")):
-        answers = [d[field] for d in days if isinstance(d.get(field), bool)]
-        if answers:
-            lines.append(f"{label}: {sum(answers)} de {_days(len(answers))}")
-    cardio = _numbers(days, "cardioMin")
-    if cardio:
-        lines.append(f"Cardio: {_num(sum(v for _, v in cardio), 0)} min ({_days(len(cardio))})")
+    if _is_number(w.get("waistCm")):
+        delta = f" ({_signed(w['waistDelta'], 1)})" if _is_number(w.get("waistDelta")) else ""
+        lines.append(f"Cintura {_num(w['waistCm'], 1)} cm{delta}")
     return lines
 
 
-def _numbers(days: list[dict[str, Any]], field: str) -> list[tuple[str, float]]:
-    """(date, value) of the days whose field is a number; a hand-typed text is not data here."""
-    return [(d["date"], d[field]) for d in days if _is_number(d.get(field))]
+def _food(w: dict[str, Any]) -> list[str]:
+    parts = []
+    if w.get("foodCoverage"):
+        parts.append(f"{escape(w['foodCoverage'])} completos")
+    if _is_number(w.get("kcalAvg")):
+        parts.append(f"{_num(w['kcalAvg'], 0)} kcal")
+    if _is_number(w.get("proteinAvg")):
+        parts.append(f"P {_num(w['proteinAvg'], 0)} g")
+    for key, label in (("kcalAdherence", "kcal"), ("proteinAdherence", "proteína")):
+        if _is_number(w.get(key)):
+            parts.append(f"{label} na meta {round(100 * w[key])}%")
+    if w.get("noCalcItems"):
+        parts.append(f"{w['noCalcItems']} sem cálculo")
+    return ["Alimentação: " + " · ".join(parts)] if parts else []
 
 
-def _mean(values: list[tuple[str, float]]) -> float:
-    return sum(v for _, v in values) / len(values)
+def _training(w: dict[str, Any]) -> list[str]:
+    parts = []
+    if _is_number(w.get("sessions")):
+        goal = f" de {_num(w['sessionsGoal'], 0)}" if _is_number(w.get("sessionsGoal")) else ""
+        parts.append(f"{_num(w['sessions'], 0)}{goal} concluídos")
+    if _is_number(w.get("workVolume")):
+        parts.append(f"volume work {_num(w['workVolume'], 0)}")
+    if _is_number(w.get("progressions")):
+        parts.append(f"{_count(w['progressions'], 'exercício progrediu', 'exercícios progrediram')}")
+    if _is_number(w.get("regressions")) and w["regressions"]:
+        parts.append(f"{_count(w['regressions'], 'regrediu', 'regrediram')}")
+    return ["Treinos: " + " · ".join(parts)] if parts else []
 
 
-# ---- workout -------------------------------------------------------------------------------
-
-
-def _workout_lines(rows: list[dict[str, Any]]) -> list[str]:
-    lines: list[str] = []
-    sessions: dict[tuple[str, str], None] = {}
-    for row in rows:
-        sessions[(row["date"], row.get("session") or "")] = None
-    if sessions:
-        done = ", ".join(f"{escape(name)} {_ddmm(day)}" if name else _ddmm(day) for day, name in sessions)
-        lines.append(f"Treinos: {len(sessions)} ({done})")
-    volume: dict[str, float] = {}
-    for row in rows:
-        if _is_number(row.get("volume")):
-            group = row.get("group") or NO_GROUP
-            volume[group] = volume.get(group, 0) + row["volume"]
-    if volume:
-        lines.append("Volume por grupo:")
-        ranked = sorted(volume.items(), key=lambda item: -item[1])  # stable: ties keep sheet order
-        lines += [f"• {escape(group)} {_num(total, 0)}" for group, total in ranked]
-    prescribed = [r for r in rows if _is_number(r.get("prescribedSets")) and r["prescribedSets"] > 0]
-    if prescribed:
-        planned = sum(r["prescribedSets"] for r in prescribed)
-        done_sets = sum(r["setsDone"] for r in prescribed if _is_number(r.get("setsDone")))
-        lines.append(
-            f"Adesão à ficha: {round(100 * done_sets / planned)}%"
-            f" ({_num(done_sets, 0)} de {_num(planned, 0)} séries)"
-        )
-    return lines
+def _recovery(w: dict[str, Any]) -> list[str]:
+    parts = []
+    for key, label, unit, digits in (
+        ("sleepAvg", "sono", " h", 1),
+        ("hungerAvg", "fome", "", 1),
+        ("fatigueAvg", "cansaço", "", 1),
+        ("painMax", "dor máx", "", 0),
+        ("stepsAvg", "passos", "", 0),
+        ("cardioMin", "cardio", " min", 0),
+    ):
+        if _is_number(w.get(key)):
+            parts.append(f"{label} {_num(w[key], digits)}{unit}")
+    return ["Recuperação: " + " · ".join(parts)] if parts else []
 
 
 # ---- numbers -------------------------------------------------------------------------------
@@ -116,18 +124,18 @@ def _num(value: float, digits: int) -> str:
     rounded = round(value, digits)
     if float(rounded).is_integer():
         return str(int(rounded))
-    return f"{rounded:.{digits}f}".replace(".", ",")
+    return f"{rounded:.{digits}f}".rstrip("0").replace(".", ",")
 
 
-def _signed(diff: float) -> str:
-    rounded = round(diff, 1)
+def _signed(diff: float, digits: int) -> str:
+    rounded = round(diff, digits)
     if rounded == 0:
         return "0"
-    return ("+" if rounded > 0 else "-") + _num(abs(rounded), 1)
+    return ("+" if rounded > 0 else "-") + _num(abs(rounded), digits)
 
 
-def _days(n: int) -> str:
-    return f"{n} dia" if n == 1 else f"{n} dias"
+def _count(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
 
 
 def _ddmm(ymd: str) -> str:

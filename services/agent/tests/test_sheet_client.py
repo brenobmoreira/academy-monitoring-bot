@@ -54,14 +54,32 @@ async def test_optional_arguments_are_omitted():
 
     c = client(handler)
     await c.upsert_workout("2026-09-21", "Upper", [{"name": "Leg press"}])
-    await c.upsert_workout("2026-09-21", "Upper", [], phase="Regular")
+    await c.upsert_workout("2026-09-21", "Upper", [], complete=True)
     await c.exercise_history("Leg press")
     await c.exercise_history("Leg press", limit=3)
     assert seen == [
         {"date": "2026-09-21", "session": "Upper", "exercises": [{"name": "Leg press"}]},
-        {"date": "2026-09-21", "session": "Upper", "exercises": [], "phase": "Regular"},
+        {"date": "2026-09-21", "session": "Upper", "exercises": [], "complete": True},
         {"name": "Leg press"},
         {"name": "Leg press", "limit": 3},
+    ]
+
+
+async def test_food_phase_and_week_ops():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    c = client(handler)
+    await c.add_food("2026-09-21", "Almoço", [{"food": "Arroz", "qty": 100}])
+    await c.phase("2026-08-01")
+    await c.week("2026-09-21")
+    assert [(b["op"], b["args"]) for b in seen] == [
+        ("food.add", {"date": "2026-09-21", "meal": "Almoço", "items": [{"food": "Arroz", "qty": 100}]}),
+        ("phase.get", {"date": "2026-08-01"}),
+        ("week.get", {"date": "2026-09-21"}),
     ]
 
 

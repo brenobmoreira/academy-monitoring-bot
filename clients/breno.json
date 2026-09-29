@@ -1,0 +1,70 @@
+{
+  "format": "academy-client/1",
+  "_about": "Client data for Projeto Breno (not code). Pasted into Projeto → Sistema → Configuração inicial / Migrar 3.0 → 4.0. Keys of `config` are the Config keys of spec §3.2; dates are yyyy-mm-dd.",
+  "_decisions": [
+    "client.startDate = 2026-09-21 is the first record (3.0 profile 'Início do acompanhamento'); the objective O001 and goal M001 start on 2026-09-28, the day F002 started.",
+    "routine.rotationMode = continuous: the 3.0 files describe a continuous sequence ('Automação 3.0 … sequência contínua' in Revisões, 'Retomar' in Guia); nothing in the Breno export says the rotation restarts each week.",
+    "energy.activityFactor = 1.55 is an estimate (flagged in `review`).",
+    "Carbohydrate 313.75 g = (2400 − 4·140 − 9·65) / 4, recomputed by the script; TMB Mifflin = 10·67 + 6.25·179 − 5·24 + 5 = 1673.75 kcal.",
+    "3.0 profile facts kept as client.notes: health, smoking, routine, creatine."
+  ],
+  "config": {
+    "client.name": "Breno",
+    "client.sex": "M",
+    "client.age": 24,
+    "client.heightCm": 179,
+    "client.startWeightKg": 67,
+    "client.startDate": "2026-09-21",
+    "client.reviewer": "Luan",
+    "client.notes": "Saúde: não informado (relato, não avaliação clínica). Tabagismo: não informado. Rotina: pouca caminhada. Creatina: uso não confirmado.",
+    "routine.strengthPerWeek": 3,
+    "routine.cardioPerWeek": 0,
+    "routine.activities": "Muay Thai",
+    "routine.activitiesPerWeek": 2,
+    "routine.sessionRotation": "Upper, Lower, Full Body",
+    "routine.rotationMode": "continuous",
+    "energy.bmrMethod": "mifflin",
+    "energy.activityFactor": 1.55,
+    "analysis.kcalTolerance": 0.05,
+    "analysis.fatTolerance": 0.15
+  },
+  "otherClientNames": ["Zoio"],
+  "history": {
+    "objectives": [
+      {
+        "id": "O001",
+        "name": "Recomposição corporal",
+        "analysisType": "recomposicao",
+        "start": "2026-09-28",
+        "startWeightKg": 67,
+        "expectation": "Ganhar músculo e acompanhar cintura, desempenho e recuperação",
+        "reason": "Objetivo inicial (migração 3.0 → 4.0)"
+      }
+    ],
+    "goals": [
+      {
+        "id": "M001",
+        "start": "2026-09-28",
+        "kcal": 2400,
+        "protein": 140,
+        "proteinMin": 135,
+        "proteinMax": 145,
+        "fat": 65,
+        "kcalTolerance": 0.05,
+        "fatTolerance": 0.15,
+        "strengthPerWeek": 3,
+        "cardioPerWeek": 0,
+        "activitiesPerWeek": 2,
+        "reason": "Referência inicial dos chats; início real 28/09/2026 (a 3.0 usava 01/01/1900 como vigência técnica)."
+      }
+    ],
+    "plans": [
+      { "id": "F001", "start": "2026-09-15", "end": "2026-09-27" },
+      { "id": "F002", "start": "2026-09-28" }
+    ]
+  },
+  "review": [
+    { "area": "Energia", "message": "Fator de atividade 1,55 é uma estimativa; revisar com os primeiros registros de peso e ingestão." },
+    { "area": "Perfil", "message": "Início do acompanhamento (21/09/2026, primeiro registro) é anterior ao início do objetivo O001 e da meta M001 (28/09/2026); confirmar." }
+  ]
+}

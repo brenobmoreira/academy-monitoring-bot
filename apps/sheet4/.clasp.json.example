@@ -1,0 +1,12 @@
+{
+  "scriptId": "<your Apps Script project id>",
+  "rootDir": "src",
+  "filePushOrder": [
+    "src/core_dates.js",
+    "src/core_tabs.js",
+    "src/core_config.js",
+    "src/core_log.js",
+    "src/core_actions.js",
+    "src/core_versions.js"
+  ]
+}

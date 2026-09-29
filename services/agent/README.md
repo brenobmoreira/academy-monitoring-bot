@@ -2,16 +2,17 @@
 
 Python 3.12 + [Google ADK](https://google.github.io/adk-docs/) + [LiteLLM](https://docs.litellm.ai/).
 Receives Telegram messages, understands them with any LLM LiteLLM supports, and writes through
-the Apps Script sheet API ([`apps/sheet`](../../apps/sheet)). It never touches the spreadsheet
-directly.
+the Apps Script sheet API of the sheet 4.0 product ([`apps/sheet4/src/api.js`](../../apps/sheet4/src/api.js),
+spec §12 of `docs/specs/2026-09-29-longitudinal-tracking-product-design.md`). It never touches the
+spreadsheet directly.
 
 ```
 Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
                     asgi.app (uvicorn)                            ├─▶ webhook.process ─▶ Handler ─▶ Bot
                                                                   ┘      (secret check)             │
                      ADK LlmAgent ─▶ LiteLlm ─▶ LLM_MODEL (gemini/…, anthropic/…, openai/…, ollama/…)
-                        │ get_catalog / save_diary / save_workout / get_exercise_history /
-                        │ get_diary_history
+                        │ get_catalog / save_diary / save_workout / save_food /
+                        │ get_exercise_history / get_diary_history / get_phase / get_week
                         └──▶ SheetClient ─POST JSON─▶ Apps Script
 ```
 
@@ -20,14 +21,14 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `settings.py` | `Settings`: every external value (env, `.env`, `settings.yaml`) |
 | `llm.py` | `build_model`: the LiteLLM model from `LLM_MODEL`, `LLM_API_KEY`, `LLM_API_BASE` |
 | `sheet_client.py` | Calls the sheet API; network failures become `{ok:false, errors:[{code:"unavailable"}]}` |
-| `tools.py` | ADK tools; return the API body as-is so the model fixes rejected payloads; `Journal` of writes and error codes. `get_diary_history` reads `diary.range` for questions about a period |
+| `tools.py` | ADK tools; return the API body as-is so the model fixes rejected payloads; `Journal` of writes and error codes. `save_workout` sends work sets (1–2, each with its own RIR) apart from warm-up and feeder, and `complete` to conclude the session; `save_food` logs catalogue foods, favourites or items without calculation; `save_diary` takes the 4.0 Diário fields and `clear` (explicit erase; an omitted field never changes). Reads: `get_diary_history` (`diary.range`), `get_exercise_history` (work sets only), `get_phase` (`phase.get`: objective, goal and plan in force on a date) and `get_week` (`week.get`) |
 | `format.py` | Telegram HTML: `escape`, `bold`, `split` (≤ 4096 chars, cut on line boundaries) |
-| `summary.py` | Confirmation text built from what the sheet reports it wrote (HTML; bold date/session and exercise names), each exercise compared with its previous session |
+| `summary.py` | Confirmation text built from what the sheet reports it wrote (HTML; bold date/session and exercise names): work sets with their RIR, warm-up/feeder apart, each exercise compared with its previous session on work sets only; food lines with the computed macros and Cálculo/Fonte when estimated or sem cálculo, then the day totals |
 | `bot.py` | Instruction (with the "Contexto recente" rules and the replied-to message), one ADK run per message, `MAX_LLM_CALLS` budget, failure replies; the model's text is escaped. `reply` returns an `Answer`: the HTML text, whether it wrote, and the undo ids of its writes |
 | `telegram.py` | `sendMessage` (optional `parse_mode=HTML`, `reply_markup`, reply-to; returns the sent Message), `sendChatAction`, `getUpdates` (messages and button taps), `setMyCommands`, `answerCallbackQuery`, `editMessageReplyMarkup`, `getFile` + file download (errors never carry the token-bearing URL) |
-| `commands.py` | `COMMANDS` registry: `/hoje`, `/ficha`, `/exercicios`, `/semana`, `/desfazer`, `/help`, `/start`, answered from the sheet without the model; `uv run agent-commands` publishes the menu |
+| `commands.py` | `COMMANDS` registry: `/hoje`, `/ficha`, `/exercicios`, `/semana`, `/fase`, `/desfazer`, `/help`, `/start`, answered from the sheet without the model; `uv run agent-commands` publishes the menu |
 | `handler.py` | Allowlist, dispatch registered commands, otherwise run the bot (with the text of the bot message being replied to, if any) while showing "typing…" (re-sent every 4 s), reply as HTML in as many messages as needed, with the buttons under a reply that wrote; acts on button taps; downloads voice, audio and photos for the bot (see below); never raises |
-| `weekly.py` | `/semana` text: Mon–Sun bounds and the summary built from `diary.range` + `workout.range` (pure, no model) |
+| `weekly.py` | `/semana` text: Mon–Sun bounds and the sheet's weekly analysis (`week.get`: situação, recomendação, peso, cintura, alimentação, treinos, recuperação) formatted (pure, no model) |
 | `buttons.py` | The inline keyboard under a confirmation and its `callback_data` (`ok`, `undo:<ids>`, `fix`); the ✏️ prompt |
 | `undo.py` | `write.undo`: the latest write (`/desfazer`) or a message's writes (↩️ button); reply built from what the sheet undid |
 | `webhook.py` | What every HTTP entry does: `X-Telegram-Bot-Api-Secret-Token` check, hand the update over |
@@ -99,10 +100,11 @@ any other text, including an unknown `/word`, goes to the agent.
 
 | Command | Reply |
 |---------|-------|
-| `/hoje [data]` | what the sheet has for the day (`day.get`), in the confirmation format; `data` is `ontem`, `dd/mm` (the latest such day, so `30/12` in January is last year's) or `yyyy-mm-dd`; "Nada registrado em dd/mm." when empty |
-| `/ficha [sessão]` | the plan rows of a session with the sets of the current phase and the rep range; without a name, the session after the last logged one (`catalog.lastWorkout`) in plan order, or the first |
+| `/hoje [data]` | what the sheet has for the day (`day.get`: diary fields, meals with totals, sessions with their state), in the confirmation format, plus Estado do dia; `data` is `ontem`, `dd/mm` (the latest such day, so `30/12` in January is last year's) or `yyyy-mm-dd`; "Nada registrado em dd/mm." when empty |
+| `/ficha [sessão]` | the rows of a session of the plan in force (`catalog.plan`) with the sheet's prescription text (work sets × reps · RIR · rest, for the training phase Adaptação/Regular); without a name, the next session of the rotation (`catalog.nextSession`, Config `routine.sessionRotation` / `rotationMode`) |
 | `/exercicios [grupo]` | exact catalogue names by muscle group; the group matches ignoring case and accents |
-| `/semana [n]` | summary of the Mon–Sun week containing today, or `n` (0–12) weeks back, from `diary.range` + `workout.range`: average weight (with first→last change), sleep and steps with the days they cover, Muay Thai and diet-complete days out of the days answered, cardio minutes, sessions, volume per muscle group, adherence (sets done / prescribed sets); a line without data is left out; "Sem registros na semana dd/mm–dd/mm." when empty |
+| `/semana [n]` | the weekly analysis of the Mon–Sun week containing today, or `n` (0–12) weeks back (`week.get`: the stored `Semanas` row of a closed week, computed for the running one): ids of that week, situação, recomendação with reason and next review, transition, weight (7-day average, change, %/week vs the target range), waist, food (complete days, averages, adherence), sessions vs goal, work volume, progressions, recovery and data sufficiency; a line without data is left out |
+| `/fase [data]` | the objective in force (`phase.get`), since when and for how many weeks, its baseline, the goal's targets (kcal, protein range, fat, carbs, fibre, sessions/week), the plan and the last weekly analysis (status, recommendation, next review); with a date, what was in force then |
 | `/desfazer` | undoes the latest sheet write not yet undone, from the bot or the sheet menu (`write.undo`); replies with what was undone |
 | `/help`, `/start` | examples and the command list (`/start` stays out of the menu) |
 
@@ -211,7 +213,7 @@ the agent's URL at `/remind` (same function or service as the webhook, no extra 
 | Body | Sends to every chat in `ALLOWED_CHAT_IDS` |
 |------|-------------------------------------------|
 | `{"kind":"daily"}` | when today (`TIMEZONE`) lacks weight, sleep or steps in `Diário` (`day.get`): "Faltou registrar hoje: peso, sono." with an example of how to send them, only the missing ones; nothing when all three are there |
-| `{"kind":"weekly"}` | the `/semana` summary of the 7 days that end today (Sunday's job covers Mon–Sun) |
+| `{"kind":"weekly"}` | the `/semana` analysis of the week containing today (run it on Sunday evening) |
 
 The request must carry `X-Reminder-Token: <REMINDER_TOKEN>`. Answers: 404 when
 `REMINDER_TOKEN` is unset (the endpoint is off), 403 for a wrong or missing token, 400 for any
@@ -352,7 +354,9 @@ uv export --no-dev --no-emit-project --no-hashes --format requirements-txt -o re
 ## Smoke test
 
 Send `peso 82,4 dormi 7h30` to the bot → `21/09 · Peso kg 82,4 · Sono h 7,5` (date in bold) and today's row in
-`Diário`. Send `upper: supino inclinado 60x8 62x8 rir 2` → a row in `Registro de treino`.
+`Diário`. Send `upper: supino inclinado 60x8 rir 2, 62x8 rir 1` → a row in `Registro de treino`
+(Work 1/Work 2 with their RIR, Estado sessão Parcial). Send `almoço: arroz 150 g` → a row in
+`Alimentação` and the day's kcal in `Diário`. `/fase` shows the objective in force.
 Send `/desfazer` → `↩️ Desfeito: 21/09 · Upper (Supino inclinado)` and the row is empty again.
 Under a confirmation, ↩️ Desfazer does the same for that message's writes, ✅ Ok hides the buttons
 and ✏️ Corrigir asks for the correction as a reply.

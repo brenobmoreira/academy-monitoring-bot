@@ -6,7 +6,7 @@ every hop. No Telegram, no Google account, no network (unless `--real`).
 ```
 fake webhook ─▶ main.telegram_webhook | asgi.app ─▶ Handler ─▶ ADK Bot ─▶ LiteLLM ─▶ provider (scripted | real)
                                                               │
-                                     tools ─POST─▶ sheet_server.js ─▶ apps/sheet/src (real JS)
+                                     tools ─POST─▶ sheet_server.js ─▶ apps/sheet4/src (real JS)
                                                                          └─ in-memory spreadsheet
                           reply ─▶ captured Telegram sendMessage
 ```
@@ -25,9 +25,10 @@ From the repo root: `make e2e`, with flags passed through `E2E_ARGS`
 (`services/agent/settings.yaml`, then `services/agent/.env`, gitignored). Telegram and sheet values in that file are ignored here: the run swaps them
 for local fakes, so it never touches the real bot or spreadsheet.
 
-The scripted provider (it replaces only the HTTP call LiteLLM would make) replays a fixed conversation for the default message and makes two mistakes
-on purpose (`sleepH: "7h30"` and the exercise `"puxada"`), so the trace shows the sheet API
-rejecting them and the agent correcting.
+The scripted provider (it replaces only the HTTP call LiteLLM would make) replays a fixed conversation for the default message (diary,
+an Upper session with a warm-up set and two work sets with RIR, and a lunch with a household
+measure) and makes two mistakes on purpose (`sleepH: "7h30"` and the exercise `"puxada"`), so the
+trace shows the sheet API rejecting them and the agent correcting.
 
 Output: `e2e/out/run-<timestamp>.json` (gitignored):
 
@@ -38,7 +39,11 @@ Output: `e2e/out/run-<timestamp>.json` (gitignored):
 | `timeline` | every hop in order: `llm` (what the model received and returned), `sheet_api` (request and response of the Apps Script API), `telegram_reply` (each Bot API call: `sendChatAction` while the bot works, then `sendMessage`) |
 | `reminder` | then `POST /remind {"kind":"daily"}` on the same entry point: request, answer, and its own timeline (`day.get`, then the `sendMessage` asking for the steps the message did not log) |
 | `reply_sent_to_telegram` | the final message as sent (Telegram HTML, every chunk joined), one line per item |
-| `sheet_after` | rows of `Diário` and `Registro de treino` after the run |
+| `sheet_after` | rows of `Diário`, `Registro de treino` and `Alimentação` after the run |
 
-The spreadsheet starts from `apps/sheet/test/fixtures.js`: sessions Upper/Lower and exercises
-Supino inclinado, Puxada aberta, Leg press.
+The spreadsheet is the sheet 4.0 product (`apps/sheet4/src`, loaded in the same order as
+`apps/sheet4/test/harness.js`): `Setup.apply()` builds the tabs when it exists, otherwise
+`Tabs.ensure` for every table tab, then `e2e/sheet_server.js` seeds a synthetic client (generic
+names): O001/M001/F001 in force since 28 days ago, rotation Upper/Lower, exercises Supino
+inclinado, Puxada aberta, Leg press, Mesa flexora and three foods. `SHEET_SRC=legacy` serves the old
+`apps/sheet` code with its fixtures instead.

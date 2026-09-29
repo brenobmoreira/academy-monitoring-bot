@@ -33,6 +33,15 @@ def test_workout_lines_name_the_session_and_exercises():
     assert undone_line(undone) == "↩️ Desfeito: 21/09 · Upper (Supino, Remada)"
 
 
+def test_food_lines_name_the_meal_and_items():
+    undone = {"op": "food.add", "date": "2026-09-21", "meal": "Almoço", "items": ["Arroz", "Pastel"]}
+    assert undone_line(undone) == "↩️ Desfeito: 21/09 · Almoço (Arroz, Pastel)"
+
+
+def test_an_action_made_in_the_sheet_is_named_by_its_label():
+    assert undone_line({"action": "Salvar dia", "changes": 2}) == "↩️ Desfeito: Salvar dia"
+
+
 @pytest.mark.parametrize(
     ("response", "reply"),
     [

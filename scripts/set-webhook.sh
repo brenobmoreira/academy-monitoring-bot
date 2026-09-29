@@ -25,9 +25,10 @@ allowed_updates='["message","callback_query"]'
 # services/agent/tests/test_commands.py fails when the two differ.
 commands='[
   {"command": "hoje", "description": "O que está registrado no dia: /hoje, /hoje ontem, /hoje 21/09"},
-  {"command": "ficha", "description": "Exercícios de uma sessão da ficha; sem nome, a próxima a fazer"},
+  {"command": "ficha", "description": "Exercícios de uma sessão da ficha vigente; sem nome, a próxima da rotação"},
   {"command": "exercicios", "description": "Nomes exatos dos exercícios por grupo; /exercicios peito filtra"},
-  {"command": "semana", "description": "Resumo da semana (seg–dom); /semana 1 é a semana passada"},
+  {"command": "semana", "description": "Análise da semana (seg–dom): situação e recomendação; /semana 1 é a passada"},
+  {"command": "fase", "description": "Objetivo em vigor, desde quando, metas e última recomendação; /fase 01/08 numa data"},
   {"command": "desfazer", "description": "Desfaz a última gravação na planilha (do bot ou do menu)"},
   {"command": "help", "description": "Exemplos de mensagem e esta lista de comandos"}
 ]'

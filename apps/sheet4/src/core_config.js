@@ -35,6 +35,8 @@ const Config = {
     'routine.activitiesPerWeek': { section: 'Rotina', label: 'Atividades por semana', type: 'integer', default: null, unit: 'sessões/semana', description: 'Sessões das outras atividades por semana.' },
     'routine.sessionRotation': { section: 'Rotina', label: 'Rotação de sessões', type: 'list', default: [], unit: 'lista', description: 'Sessões da ficha em ordem, separadas por vírgula.' },
     'routine.rotationMode': { section: 'Rotina', label: 'Modo da rotação', type: 'enum', options: ['continuous', 'weekly'], default: 'continuous', unit: '', description: 'continuous = próxima sessão após a última concluída; weekly = recomeça toda semana.' },
+    'routine.adaptationWeeks': { section: 'Rotina', label: 'Semanas de adaptação', type: 'integer', default: 0, unit: 'semanas', description: 'Semanas, a partir do início de cada ficha, em que valem as colunas de adaptação (séries e RIR). 0 = sempre regular.' },
+    'routine.loadIncrementKg': { section: 'Rotina', label: 'Incremento de carga sugerido', type: 'number', default: 2.5, unit: 'kg', description: 'Aumento proposto pelas sugestões de progressão. Nunca aplicado automaticamente.' },
 
     'energy.bmrMethod': { section: 'Energia', label: 'Método da TMB', type: 'enum', options: ['mifflin'], default: 'mifflin', unit: '', description: 'Equação usada para a taxa metabólica basal.' },
     'energy.activityFactor': { section: 'Energia', label: 'Fator de atividade', type: 'number', default: 1.55, unit: '×', description: 'Multiplica a TMB para o gasto estimado. Estimativa: revisar.' },
@@ -52,6 +54,7 @@ const Config = {
     'analysis.painHigh': { section: 'Análise', label: 'Dor alta', type: 'number', default: 4, unit: '0–10', description: 'Máximo a partir disso gera sinal de dor alta.' },
     'analysis.reviewEveryDays': { section: 'Análise', label: 'Intervalo de revisão', type: 'integer', default: 7, unit: 'dias', description: 'Próxima revisão sugerida após uma decisão.' },
     'analysis.minWeeksForPhaseReview': { section: 'Análise', label: 'Semanas mínimas por fase', type: 'integer', default: 8, unit: 'semanas', description: 'Antes disso não se sugere revisar objetivo/fase por sucesso.' },
+    'analysis.progressionSessions': { section: 'Análise', label: 'Sessões para sugerir progressão', type: 'integer', default: 2, unit: 'sessões', description: 'Sessões seguidas no topo da faixa de reps (ou em queda) antes de gerar uma sugestão.' },
 
     'system.schemaVersion': { section: 'Sistema', label: 'Versão do esquema', type: 'text', default: null, unit: '', description: 'Gravada pela migração/configuração inicial. Não editar.' },
     'system.timezone': { section: 'Sistema', label: 'Fuso horário', type: 'text', default: null, unit: '', description: 'Vazio = fuso do projeto do Apps Script.' },

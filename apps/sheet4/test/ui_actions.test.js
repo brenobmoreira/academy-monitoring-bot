@@ -8,7 +8,7 @@ const KEYS = ['weightKg', 'sleepH', 'steps', 'hunger', 'foodLog', 'notes', 'obje
 test('Hoje actions are registered in the Hoje menu and in Ação rápida; onOpen stays the core one', () => {
   const ctx = bootDaily();
   const hoje = ctx.Actions.menu().find((e) => e.label === 'Hoje');
-  assert.deepEqual(plain(hoje.items.map((i) => i.label)), ['Carregar dia', 'Salvar dia', 'Ir para hoje', 'Ir para data', 'Limpar tela']);
+  assert.deepEqual(plain(hoje.items.map((i) => i.label)), ['Carregar dia', 'Salvar dia', 'Salvar parcial do treino', 'Concluir treino', 'Carregar treino', 'Ir para hoje', 'Ir para data', 'Limpar tela']);
   const quick = plain(ctx.Actions.quickList());
   ['Carregar dia', 'Salvar dia', 'Ir para hoje', 'Limpar tela'].forEach((l) => assert.ok(quick.includes(l), l));
   assert.ok(!quick.includes('Ir para data'), 'prompts do not work on mobile');

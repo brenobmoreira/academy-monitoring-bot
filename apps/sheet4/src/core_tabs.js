@@ -110,6 +110,8 @@ const Tabs = {
     sheet = SpreadsheetApp.getActive().insertSheet(spec.name);
     sheet.getRange(Tabs.TITLE_ROW, 1).setValue(spec.title || spec.name);
     if (spec.help) sheet.getRange(Tabs.HELP_ROW, 1).setValue(spec.help);
+    // A new sheet has 26 columns; wider tabs (Registro de treino, Semanas) need more.
+    if (spec.columns.length > sheet.getMaxColumns()) sheet.insertColumnsAfter(sheet.getMaxColumns(), spec.columns.length - sheet.getMaxColumns());
     if (spec.columns.length) sheet.getRange(spec.headerRow, 1, 1, spec.columns.length).setValues([Tabs.headers(id)]);
     Tabs.invalidate(spec.name);
     return sheet;

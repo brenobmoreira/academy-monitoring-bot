@@ -440,3 +440,64 @@ Files `apps/sheet4/src/diary.js`, `measures.js`, `ui_hoje.js`, `ui_actions.js`. 
   `hoje.loaded` ({date}) lets Food/Workout fill their cards; `day.saved` follows `Diary.save`.
 - The core registry tests (`core_actions.test.js`) now start from a registry with only the core
   action, since feature files register theirs at load time.
+
+## As built (workout)
+
+Files: `apps/sheet4/src/workout.js` (`Exercises`, `Workouts`, `TrainingScreen`/`HojeTrainingScreen`,
+`Sessions`, `PlanDraft`, `WorkoutActions`) and `workout_progression.js` (`Progression`).
+
+- **Rotation** — `Sessions.nextSession(date)` reads `routine.sessionRotation` (empty → session
+  order of the plan in force) and `routine.rotationMode`: `continuous` = after the last *concluded*
+  session on or before the date, whatever the week; `weekly` = first session on Monday, then after
+  the last concluded one of that week. Partial sessions never advance; a concluded session whose
+  name is not in the rotation (older plan) is skipped when looking back.
+- **Load/resume** — `Sessions.load(date, session?)`: without a session, the date's partial session
+  (resume), else on a past date its concluded session, else `nextSession`. Rows = the plan in force
+  on that date for the session + saved rows of that date/session; each row carries the previous
+  work sets of the exercise (`reference`, `referenceText`) — never copied into the work cells.
+- **Save** — `Sessions.savePartial/complete(date, session, rows, {phase?})` upsert one Registro row
+  per exercise (date + session + exercise), stamp `Ficha`/`Objetivo` in force on that date, `Fase`,
+  prescription (`Work sets prescritas`, reps mín/máx, `Modelo de séries` = the plan row's
+  "Tipos de série"), `Work sets realizadas`, `Volume work` = Σ work kg×reps (empty when no work
+  set was done). Concluding marks every row of the session `Concluído`; a concluded session is
+  never downgraded to `Parcial`. `Diário.Treinos` = concluded sessions of the day (via
+  `Days.patch`). Validation: kg ≥ 0 (0 = body weight), reps integers, kg and reps together, RIR
+  0–10 only with its set (0 valid), Dor 0–10, exercise from the catalogue or the plan in force
+  (unknown → closest names), session from the plan in force or the rotation; no future dates.
+- **Phase** — Adaptação while the date is within `routine.adaptationWeeks` (new Config key,
+  default 0) weeks of the plan's Início, else Regular; picks the adaptation/regular sets and RIR.
+  The 3.0 plans only state adaptation in free text, so it cannot be derived from them. A phase
+  chosen on Hoje (B39) overrides the derived one for that save.
+- **Progression** — work sets only, compared set by set (W1↔W1, W2↔W2) and only with the same
+  `Equipamento / carga`; a set progresses when load goes up at ≥ reps or reps go up at the same
+  load, with RIR not lower. `Progression.weekSummary(start, end)` feeds §6.1 (sessions,
+  partialSessions, workSets, workVolume, workVolumeByGroup, progressed/held/regressedExercises:
+  last entry in the week vs the last entry before it). `Progression.suggestions(date)` is pure:
+  "top of the rep range in every prescribed work set at the same load for
+  `analysis.progressionSessions` (2) sessions → +`routine.loadIncrementKg` (2,5 kg)", and
+  "regressed N times in a row → review". The action *Sugestões de progressão* renders `Progressão`
+  and records each new suggestion once in `Revisões` (Área Treino, Status A revisar); it never
+  touches plans, the draft, the log or Hoje.
+- **Progressão tab** — the §3 summary table (one row per exercise of the plan in force: last work
+  sets, RIR, trend, suggestion) plus, from column K (right of the table), the picker
+  (`Progression.pickerCell()` = L4) and the last 20 sessions of the chosen exercise. Written as
+  values, not logged (a view).
+- **Ficha de treino** — `PlanDraft.render()` writes the plan in force (or the planned next one) as
+  the draft and a title derived from the entity ("Ficha vigente F002 · Vigente desde 28/09/2026"),
+  replacing typed statuses (finding #4). *Salvar nova ficha* reads `B4` (início) and `D4`
+  (motivo) or args, validates (catalogue names with suggestions, integers, reps mín ≤ máx,
+  duplicates, unchanged draft; warns on sessions vs Config rotation and unknown alternatives) and
+  calls `Transition.newPlan`. *Mostrar ficha vigente* re-renders.
+- **Hoje** — through `TrainingScreen` (`HojeTrainingScreen` over `Hoje.read().training`,
+  `Hoje.write('training')`, `Hoje.clear('training')`). Prescription and previous work sets go to
+  the note of each Exercício cell (the Hoje table has no reference column). On `hoje.loaded`, an
+  empty training table shows the session saved on that date.
+- Lists for validations: `Exercises.names()` (3.0 named range `ListaExercicios`, undefined in both
+  exports) and `Sessions.names(date)` (plan in force + rotation; Zoio's 3.0 Registro list
+  `Push, Pull, Legs` was stale).
+- 3.0 data notes: Breno F002 "Remada com apoio" has a note in `Alternativa` ("Máquina disponível;
+  confirmar execução com Luan"); F001 names differ from F002/catalogue ("Tríceps corda" vs
+  "Tríceps na corda", "Hack / agachamento orientado"), so F001 history does not chain into F002
+  progression by name; the catalogues hold near-duplicates ("Crucifixo inverso"/"Crucifixo
+  invertido", "Panturrilha sentada"/"Panturrilha sentado", "Peck deck inverso"/"reverso"); the
+  generic load convention "Carga total ou por halter: escolher…" does not state which was chosen.

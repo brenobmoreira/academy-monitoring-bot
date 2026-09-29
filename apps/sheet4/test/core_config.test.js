@@ -6,11 +6,12 @@ const { boot, NOW, plain } = require('./core_helpers');
 
 const SPEC_KEYS = ['client.name', 'client.sex', 'client.birthDate', 'client.age', 'client.heightCm', 'client.startWeightKg',
   'client.startDate', 'client.reviewer', 'routine.strengthPerWeek', 'routine.cardioPerWeek', 'routine.activities',
-  'routine.activitiesPerWeek', 'routine.sessionRotation', 'routine.rotationMode', 'energy.bmrMethod', 'energy.activityFactor',
+  'routine.activitiesPerWeek', 'routine.sessionRotation', 'routine.rotationMode', 'routine.adaptationWeeks',
+  'routine.loadIncrementKg', 'energy.bmrMethod', 'energy.activityFactor',
   'analysis.weightTrendDays', 'analysis.minWeighInsPerWeek', 'analysis.minCompleteFoodDays', 'analysis.kcalTolerance',
   'analysis.fatTolerance', 'analysis.waistNoiseCm', 'analysis.weightNoisePctPerWeek', 'analysis.sleepMinH',
   'analysis.fatigueHigh', 'analysis.hungerHigh', 'analysis.painHigh', 'analysis.reviewEveryDays',
-  'analysis.minWeeksForPhaseReview', 'system.schemaVersion', 'system.timezone'];
+  'analysis.minWeeksForPhaseReview', 'analysis.progressionSessions', 'system.schemaVersion', 'system.timezone'];
 
 test('DEFAULTS covers every key of spec §3.2 with Portuguese label, unit and description', () => {
   const C = load({ now: NOW }).Config;

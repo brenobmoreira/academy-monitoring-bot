@@ -1,4 +1,4 @@
-"""Client for the Apps Script sheet API (apps/sheet/src/api.js).
+"""Client for the Apps Script sheet API (sheet 4.0: apps/sheet4/src/api.js).
 
 Every call returns the API body as-is: {"ok": true, "result": ...} or {"ok": false, "errors": [...]}.
 Failures to reach the API are folded into the same shape with code "unavailable", so callers
@@ -52,12 +52,22 @@ class SheetClient:
         return await self.call("diary.upsert", {"date": date, "fields": fields})
 
     async def upsert_workout(
-        self, date: str, session: str, exercises: list[dict[str, Any]], phase: str | None = None
+        self,
+        date: str,
+        session: str,
+        exercises: list[dict[str, Any]],
+        complete: bool | None = None,
     ) -> Response:
+        """Exercises as {name, warmup?, feeder?, work: [{kg, reps, rir?}] (1-2), pain?, note?,
+        equipment?}; `complete` concludes the session (Estado sessão Concluído)."""
         args: dict[str, Any] = {"date": date, "session": session, "exercises": exercises}
-        if phase is not None:
-            args["phase"] = phase
+        if complete is not None:
+            args["complete"] = complete
         return await self.call("workout.upsert", args)
+
+    async def add_food(self, date: str, meal: str, items: list[dict[str, Any]]) -> Response:
+        """Items as {food, qty, unit?} | {favorite, portions?} | {description} (sem cálculo)."""
+        return await self.call("food.add", {"date": date, "meal": meal, "items": items})
 
     async def exercise_history(self, name: str, limit: int | None = None) -> Response:
         args: dict[str, Any] = {"name": name}
@@ -76,6 +86,14 @@ class SheetClient:
 
     async def day(self, date: str) -> Response:
         return await self.call("day.get", {"date": date})
+
+    async def phase(self, date: str) -> Response:
+        """Objective, goal and plan in force on `date`, with their targets."""
+        return await self.call("phase.get", {"date": date})
+
+    async def week(self, date: str) -> Response:
+        """Weekly analysis (Semanas) of the week containing `date`."""
+        return await self.call("week.get", {"date": date})
 
 
 def _unavailable(message: str) -> Response:

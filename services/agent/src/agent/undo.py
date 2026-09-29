@@ -60,11 +60,17 @@ async def undo_writes(sheet: UndoApi, write_ids: list[str]) -> tuple[str, bool]:
 
 
 def undone_line(undone: dict[str, Any]) -> str:
-    """E.g. "↩️ Desfeito: 24/09 · Diário (Peso kg, Sono h)" or "↩️ Desfeito: 24/09 · Upper (Supino)"."""
-    if undone.get("op") == "diary.upsert":
+    """E.g. "↩️ Desfeito: 24/09 · Diário (Peso kg, Sono h)", "↩️ Desfeito: 24/09 · Upper (Supino)",
+    "↩️ Desfeito: 24/09 · Almoço (Arroz)"; an action made in the sheet (menu, Hoje) by its label."""
+    op = undone.get("op")
+    if op == "diary.upsert":
         what, items = "Diário", [LABELS.get(f, f) for f in undone.get("fields") or []]
-    else:
+    elif op == "workout.upsert":
         what, items = str(undone.get("session") or "Treino"), list(undone.get("exercises") or [])
+    elif op == "food.add":
+        what, items = str(undone.get("meal") or "Alimentação"), list(undone.get("items") or [])
+    else:
+        return f"↩️ Desfeito: {undone.get('action') or 'última alteração'}"
     detail = f" ({', '.join(items)})" if items else ""
     date = str(undone["date"])
     return f"↩️ Desfeito: {date[8:10]}/{date[5:7]} · {what}{detail}"

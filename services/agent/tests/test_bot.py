@@ -81,9 +81,8 @@ async def test_the_replied_text_reaches_the_model_and_the_correction_rewrites_th
     written = {
         "date": "2026-09-21",
         "session": "Upper",
-        "phase": "Adaptação",
-        "sessionId": "2026-09-21/Upper",
-        "exercises": [{"name": "Supino inclinado", "row": 6, "sets": sets}],
+        "state": "Parcial",
+        "exercises": [{"name": "Supino inclinado", "work": sets}],
     }
     sheet = FakeSheet(catalog=[catalog], workout_upsert=[{"ok": True, "result": written}])
     b, llm = bot(
@@ -94,18 +93,18 @@ async def test_the_replied_text_reaches_the_model_and_the_correction_rewrites_th
                 "save_workout",
                 date="2026-09-21",
                 session="Upper",
-                exercises=[{"name": "Supino inclinado", "sets": sets}],
+                exercises=[{"name": "Supino inclinado", "work": sets}],
             ),
             say("ok"),
         ],
     )
     reply = await b.reply("na verdade foi 62", context=confirmation)
-    assert "Supino inclinado</b> 62×8 62×8" in reply.text
+    assert "Supino inclinado</b> 62×8 · 62×8" in reply.text
     assert confirmation in llm.requests[0].config.system_instruction
     assert llm.requests[1].contents[-1].parts[0].function_response.response == catalog
     assert sheet.calls[1] == (
         "workout.upsert",
-        {"date": "2026-09-21", "session": "Upper", "exercises": [{"name": "Supino inclinado", "sets": sets}]},
+        {"date": "2026-09-21", "session": "Upper", "exercises": [{"name": "Supino inclinado", "work": sets}]},
     )
 
 
@@ -157,7 +156,7 @@ async def test_the_answer_carries_the_undo_ids_of_every_write_oldest_first():
         "result": {
             "date": "2026-09-21",
             "session": "Upper",
-            "phase": "Base",
+            "state": "Parcial",
             "exercises": [],
             "writeId": "w2",
         },
@@ -356,3 +355,48 @@ async def test_a_transient_failure_with_media_is_still_a_model_failure(sheet):
 async def test_a_bad_request_without_media_is_a_model_failure(sheet):
     b, _ = bot(sheet, [litellm.BadRequestError("bad", model="m", llm_provider="p")])
     assert (await b.reply("peso 82,4")).text == MODEL_FAILED_NOTHING_WRITTEN
+
+
+def test_instruction_separates_work_sets_asks_rir_per_set_and_resolves_phases_by_date():
+    text = instruction(NOW)
+    assert "work sets" in text and "warmup" in text and "feeder" in text
+    assert "RIR é por work set" in text
+    assert "nunca chute" in text
+    assert "get_phase" in text and "nunca os de hoje" in text
+    assert "save_food" in text and "description" in text
+
+
+async def test_a_meal_is_saved_and_confirmed_with_calculo_and_fonte():
+    written = {
+        "ok": True,
+        "result": {
+            "date": "2026-09-21",
+            "meal": "Almoço",
+            "items": [
+                {
+                    "food": "Arroz branco cozido",
+                    "qty": 150,
+                    "unit": "g",
+                    "kcal": 192,
+                    "protein": 3.75,
+                    "calc": "Calculado",
+                    "source": "TACO/fonte confiável",
+                },
+                {"food": "Pastel", "qty": None, "kcal": None, "calc": "Sem cálculo", "source": "Pendente"},
+            ],
+            "totals": {"kcal": 192, "protein": 3.8, "noCalcItems": 1, "estimatedItems": 0},
+            "writeId": "f1",
+        },
+    }
+    sheet = FakeSheet(food_add=[written])
+    items = [{"food": "Arroz branco cozido", "qty": 150, "unit": "g"}, {"description": "Pastel"}]
+    b, _ = bot(sheet, [call("save_food", date="2026-09-21", meal="Almoço", items=items), say("ok")])
+    answer = await b.reply("almoço: arroz 150 g e um pastel")
+    assert sheet.calls == [("food.add", {"date": "2026-09-21", "meal": "Almoço", "items": items})]
+    assert answer.text.splitlines() == [
+        "<b>21/09 · Almoço:</b>",
+        "• Arroz branco cozido 150 g · 192 kcal, P 3,8 g",
+        "• Pastel · sem cálculo (Fonte: Pendente)",
+        "Dia: 192 kcal · P 4 g · 1 sem cálculo",
+    ]
+    assert answer.write_ids == ("f1",)

@@ -5,7 +5,7 @@ A Cloud Scheduler job per kind calls the agent's URL at /remind with the header
 
   - daily:  today's diary lacks weight, sleep or steps → "Faltou registrar hoje: …" to each
             allowed chat; nothing missing → no message.
-  - weekly: the /semana summary of the 7 days that end today.
+  - weekly: the /semana analysis (week.get) of the week containing today.
 
 Without REMINDER_TOKEN the endpoint does not exist (404). The sheet being down never turns into
 a message: the job runs unattended, so a failure is logged and nothing is sent.
@@ -16,7 +16,7 @@ from __future__ import annotations
 import hmac
 import logging
 from collections.abc import Callable, Iterable
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -84,7 +84,7 @@ async def daily(sheet: CommandSheet, today: date) -> Reply | None:
 
 
 async def weekly(sheet: CommandSheet, today: date) -> Reply:
-    reply = await week_text(sheet, today - timedelta(days=6), today)
+    reply = await week_text(sheet, today)
     if reply.failed:
         raise SheetDown(reply.text)
     return reply

@@ -29,11 +29,14 @@ class FakeSheet:
     async def upsert_diary(self, date, fields):
         return self._next("diary.upsert", {"date": date, "fields": fields})
 
-    async def upsert_workout(self, date, session, exercises, phase=None):
+    async def upsert_workout(self, date, session, exercises, complete=None):
         args = {"date": date, "session": session, "exercises": exercises}
-        if phase is not None:
-            args["phase"] = phase
+        if complete is not None:
+            args["complete"] = complete
         return self._next("workout.upsert", args)
+
+    async def add_food(self, date, meal, items):
+        return self._next("food.add", {"date": date, "meal": meal, "items": items})
 
     async def exercise_history(self, name, limit=None):
         args = {"name": name} if limit is None else {"name": name, "limit": limit}
@@ -50,6 +53,12 @@ class FakeSheet:
 
     async def day(self, date):
         return self._next("day.get", {"date": date})
+
+    async def phase(self, date):
+        return self._next("phase.get", {"date": date})
+
+    async def week(self, date):
+        return self._next("week.get", {"date": date})
 
 
 class ScriptedLlm(BaseLlm):

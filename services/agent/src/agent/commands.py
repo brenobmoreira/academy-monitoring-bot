@@ -20,6 +20,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from agent.format import bold, escape
 from agent.settings import Settings
 from agent.summary import confirmation
 from agent.telegram import TelegramClient
@@ -30,14 +31,14 @@ log = logging.getLogger(__name__)
 
 EXAMPLES = (
     "Me conte o dia em texto livre, por exemplo:\n"
-    "• peso 82,4, dormi 7h30, 8k passos, muay sim\n"
-    "• upper: supino inclinado 60x8 62x8 rir 2, puxada aberta 50x10 50x9\n"
-    "• ontem fome 3 cansaço 4\n"
+    "• peso 82,4, cintura 84, dormi 7h30, 8k passos, 60 min de luta\n"
+    "• upper: supino inclinado aquecimento 20x12, 60x8 rir 2, 62,5x8 rir 1\n"
+    "• almoço: arroz 150 g, frango 120 g, salada\n"
+    "• ontem fome 3 cansaço 4, dieta completa\n"
     "• como foi meu supino inclinado nas últimas semanas?\n"
     "Eu gravo na planilha e confirmo o que foi gravado."
 )
 SHEET_DOWN = "⚠ A planilha não respondeu. Tente de novo em alguns minutos."
-ADAPTATION = "Adaptação"
 MAX_WEEKS_BACK = 12
 
 
@@ -45,8 +46,8 @@ class CommandSheet(Protocol):
     async def catalog(self) -> dict[str, Any]: ...
     async def day(self, date: str) -> dict[str, Any]: ...
     async def undo(self, write_id: str | None = None) -> dict[str, Any]: ...
-    async def diary_range(self, date_from: str, date_to: str) -> dict[str, Any]: ...
-    async def workout_range(self, date_from: str, date_to: str) -> dict[str, Any]: ...
+    async def phase(self, date: str) -> dict[str, Any]: ...
+    async def week(self, date: str) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -120,23 +121,41 @@ async def hoje(ctx: Context, args: str) -> Reply:
     if not response.get("ok"):
         return sheet_failure(response)
     result = response["result"]
-    writes: list[tuple[str, dict[str, Any]]] = []
-    if result["diary"]:
-        writes.append(("diary.upsert", {"date": result["date"], "fields": result["diary"]}))
-    writes += [("workout.upsert", {"date": result["date"], **session}) for session in result["workout"]]
-    lines = confirmation(writes)
+    lines = confirmation(day_writes(result))
     if not lines:
         return Reply(f"Nada registrado em {day:%d/%m}.")
+    if result.get("dayState"):
+        lines.append(f"Estado do dia: {escape(result['dayState'])}")
     return Reply("\n".join(lines), html=True)  # confirmation() is already Telegram HTML
 
 
-@command("ficha", "Exercícios de uma sessão da ficha; sem nome, a próxima a fazer")
+def day_writes(result: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """A `day.get` result as the writes confirmation() formats: diary, meals, sessions."""
+    date = result["date"]
+    writes: list[tuple[str, dict[str, Any]]] = []
+    if result.get("diary"):
+        writes.append(("diary.upsert", {"date": date, "fields": result["diary"]}))
+    meals: dict[str, list[dict[str, Any]]] = {}
+    for item in result.get("food") or []:
+        meals.setdefault(item.get("meal") or "Sem refeição", []).append(item)
+    for meal, items in meals.items():
+        writes.append(
+            ("food.add", {"date": date, "meal": meal, "items": items, "totals": result.get("totals")})
+        )
+    writes += [("workout.upsert", {"date": date, **session}) for session in result.get("workout") or []]
+    return writes
+
+
+@command("ficha", "Exercícios de uma sessão da ficha vigente; sem nome, a próxima da rotação")
 async def ficha(ctx: Context, args: str) -> Reply:
     response = await ctx.api().catalog()
     if not response.get("ok"):
         return sheet_failure(response)
     catalog = response["result"]
-    sessions: list[str] = catalog["sessions"]
+    sessions: list[str] = catalog.get("sessions") or []
+    plan = (catalog.get("phase") or {}).get("plan") or {}
+    if not plan:
+        return Reply("Nenhuma ficha em vigor hoje.")
     last = catalog.get("lastWorkout")
     note = ""
     if args:
@@ -144,17 +163,17 @@ async def ficha(ctx: Context, args: str) -> Reply:
         if session is None:
             return Reply(f'Sessão "{args}" não existe. Sessões: {", ".join(sessions)}.')
     else:
-        session = next_session(sessions, last)
-        if last:
-            note = f", depois de {last['session']} em {_ddmm(last['date'])}"
-    phase = catalog.get("phase") or ""
-    adaptation = normalize(phase) == normalize(ADAPTATION)
-    rows = [r for r in catalog["plan"] if r["session"] == session]
+        session = catalog.get("nextSession") or (sessions[0] if sessions else "")
+        if last and last.get("state") == "Concluído":
+            note = f", próxima depois de {last['session']} em {_ddmm(last['date'])}"
+        elif last:
+            note = f"; {last['session']} de {_ddmm(last['date'])} ainda está parcial"
+    rows = [r for r in catalog.get("plan") or [] if normalize(r["session"]) == normalize(session)]
     if not rows:
-        return Reply(f"A ficha não tem exercícios em {session}.")
-    header = f"{session} ({phase}){note}:" if phase else f"{session}{note}:"
-    sets = "setsAdaptation" if adaptation else "setsRegular"
-    lines = [f"• {r['exercise']} {prescription(r[sets], r)}".rstrip() for r in rows]
+        return Reply(f"A ficha {plan.get('id')} não tem exercícios em {session}.")
+    detail = ", ".join(filter(None, [f"ficha {plan.get('id')}", catalog.get("trainingPhase")]))
+    header = f"{session} ({detail}){note}:"
+    lines = [f"• {r['exercise']} {r.get('prescription') or ''}".rstrip() for r in rows]
     return Reply("\n".join([header, *lines]))
 
 
@@ -177,27 +196,103 @@ async def exercicios(ctx: Context, args: str) -> Reply:
     return Reply("\n\n".join(blocks))
 
 
-@command("semana", "Resumo da semana (seg–dom); /semana 1 é a semana passada")
+@command("semana", "Análise da semana (seg–dom): situação e recomendação; /semana 1 é a passada")
 async def semana(ctx: Context, args: str) -> Reply:
     word = args.strip()
     if word and not (re.fullmatch(r"[0-9]{1,2}", word) and int(word) <= MAX_WEEKS_BACK):
         return Reply(
             f"Use /semana para esta semana ou /semana n (0 a {MAX_WEEKS_BACK}) para n semanas atrás."
         )
-    start, end = week_bounds(ctx.today, int(word or 0))
-    return await week_text(ctx.api(), start, end)
+    start, _ = week_bounds(ctx.today, int(word or 0))
+    return await week_text(ctx.api(), start)
 
 
-async def week_text(sheet: CommandSheet, start: date, end: date) -> Reply:
-    """The weekly summary for `start`..`end` (inclusive); also sent by the weekly reminder."""
-    days, rows = await asyncio.gather(
-        sheet.diary_range(start.isoformat(), end.isoformat()),
-        sheet.workout_range(start.isoformat(), end.isoformat()),
-    )
-    for response in (days, rows):
-        if not response.get("ok"):
-            return sheet_failure(response)
-    return Reply(week_summary(start, end, days["result"]["days"], rows["result"]["rows"]), html=True)
+async def week_text(sheet: CommandSheet, day: date) -> Reply:
+    """The weekly analysis of the week containing `day`; also sent by the weekly reminder."""
+    response = await sheet.week(day.isoformat())
+    if not response.get("ok"):
+        return sheet_failure(response)
+    return Reply(week_summary(response["result"]), html=True)
+
+
+@command("fase", "Objetivo em vigor, desde quando, metas e última recomendação; /fase 01/08 numa data")
+async def fase(ctx: Context, args: str) -> Reply:
+    try:
+        day = parse_day(args, ctx.today)
+    except ValueError as err:
+        return Reply(str(err))
+    response = await ctx.api().phase(day.isoformat())
+    if not response.get("ok"):
+        return sheet_failure(response)
+    return Reply(phase_text(response["result"], day != ctx.today), html=True)
+
+
+def phase_text(phase: dict[str, Any], past: bool = False) -> str:
+    """Objective, goal targets, plan and the last weekly analysis of a `phase.get` result."""
+    when = f" em {_dmy(phase['date'])}" if past else ""
+    objective = phase.get("objective")
+    if not objective:
+        return f"Nenhum objetivo em vigor{when}."
+    lines = [bold(f"Objetivo {escape(objective['id'])} · {escape(objective.get('name') or '')}{when}")]
+    since = f"Desde {_dmy(objective['start'])}"
+    if objective.get("end"):
+        since += f" até {_dmy(objective['end'])}"
+    if objective.get("weeks"):
+        since += f" · semana {objective['weeks']}"
+    kind = objective.get("label") or objective.get("analysisType")
+    if kind:
+        since += f" · análise: {escape(kind)}"
+    lines.append(since)
+    baseline = []
+    if _is_number(objective.get("startWeightKg")):
+        baseline.append(f"peso inicial {_fmt(objective['startWeightKg'])} kg")
+    if _is_number(objective.get("startWaistCm")):
+        baseline.append(f"cintura inicial {_fmt(objective['startWaistCm'])} cm")
+    if objective.get("expectation"):
+        baseline.append(f"expectativa: {escape(objective['expectation'])}")
+    if baseline:
+        lines.append(" · ".join(baseline))
+    goal = phase.get("goal")
+    if goal:
+        lines.append(f"Meta {escape(goal['id'])} (desde {_dmy(goal['start'])}): {goal_text(goal)}")
+    plan = phase.get("plan")
+    if plan:
+        sessions = ", ".join(escape(s) for s in plan.get("sessions") or [])
+        detail = " · ".join(filter(None, [sessions, escape(plan.get("trainingPhase") or "")]))
+        lines.append(
+            f"Ficha {escape(plan['id'])} (desde {_dmy(plan['start'])})" + (f": {detail}" if detail else "")
+        )
+    rec = phase.get("recommendation")
+    if rec:
+        text = f"Última análise (semana de {_ddmm(rec['week'])}): {escape(rec.get('status') or '—')}"
+        if rec.get("code"):
+            text += f" · {bold(escape(rec['code']))}"
+        if rec.get("reason"):
+            text += f" — {escape(rec['reason'])}"
+        if rec.get("nextReview"):
+            text += f" (próxima revisão {_ddmm(rec['nextReview'])})"
+        lines.append(text)
+    else:
+        lines.append("Ainda sem análise semanal gravada nesta fase.")
+    return "\n".join(lines)
+
+
+def goal_text(goal: dict[str, Any]) -> str:
+    parts = []
+    if _is_number(goal.get("kcal")):
+        parts.append(f"{_fmt(goal['kcal'])} kcal")
+    if _is_number(goal.get("protein")):
+        low, high = goal.get("proteinMin"), goal.get("proteinMax")
+        band = f" ({_fmt(low)}–{_fmt(high)})" if _is_number(low) and _is_number(high) else ""
+        parts.append(f"P {_fmt(goal['protein'])} g{band}")
+    for key, label in (("fat", "G"), ("carbs", "C"), ("fiber", "fibra")):
+        if _is_number(goal.get(key)):
+            parts.append(f"{label} {_fmt(goal[key])} g")
+    if _is_number(goal.get("strengthPerWeek")):
+        parts.append(f"{_fmt(goal['strengthPerWeek'])} treinos/sem")
+    if _is_number(goal.get("stepsPerDay")):
+        parts.append(f"{_fmt(goal['stepsPerDay'])} passos/dia")
+    return " · ".join(parts) or "sem alvos numéricos"
 
 
 @command("desfazer", "Desfaz a última gravação na planilha (do bot ou do menu)")
@@ -244,22 +339,6 @@ def parse_day(text: str, today: date) -> date:
     return day
 
 
-def next_session(sessions: list[str], last: dict[str, Any] | None) -> str:
-    """The session after the last logged one in plan order (wrapping), or the first one."""
-    names = [normalize(s) for s in sessions]
-    if last and normalize(last["session"]) in names:
-        return sessions[(names.index(normalize(last["session"])) + 1) % len(sessions)]
-    return sessions[0]
-
-
-def prescription(sets: int, row: dict[str, Any]) -> str:
-    low, high = row.get("repsMin") or 0, row.get("repsMax") or 0
-    reps = f"{low}–{high}" if low and high and low != high else str(low or high or "")
-    if sets and reps:
-        return f"{sets}×{reps}"
-    return f"{sets} séries" if sets else reps
-
-
 def sheet_failure(response: dict[str, Any]) -> Reply:
     error = (response.get("errors") or [{}])[0]
     if error.get("code") in ("unavailable", "internal"):
@@ -268,13 +347,28 @@ def sheet_failure(response: dict[str, Any]) -> Reply:
 
 
 def normalize(text: str) -> str:
-    """Lowercase, accent-free, single-spaced; same rule as WorkoutPlan.normalize in Apps Script."""
+    """Lowercase, accent-free, single-spaced; same rule as Exercises.normalize in Apps Script."""
     plain = "".join(c for c in unicodedata.normalize("NFD", text) if not unicodedata.combining(c))
     return " ".join(plain.lower().split())
 
 
 def _ddmm(ymd: str) -> str:
     return f"{ymd[8:10]}/{ymd[5:7]}"
+
+
+def _dmy(ymd: str) -> str:
+    return f"{ymd[8:10]}/{ymd[5:7]}/{ymd[:4]}"
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _fmt(value: Any) -> str:
+    """82.0 → "82", 313.75 → "313,75"."""
+    if float(value).is_integer():
+        return str(int(value))
+    return str(round(value, 2)).replace(".", ",")
 
 
 # ---- CLI -----------------------------------------------------------------------------------

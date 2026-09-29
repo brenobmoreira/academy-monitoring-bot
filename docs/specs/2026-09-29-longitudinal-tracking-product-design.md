@@ -651,3 +651,46 @@ preview tool `tools/migrate_preview.js` → `sheets/preview/<name>_4_0.xlsx`.
 - Left for later modules: Hoje keeps its 3.0 formulas (they read Diário by column letter and now
   show nothing useful) until the Hoje module renders it; Painel keeps its typed 3.0 texts and charts
   until Dashboard renders it; Guia texts are only cleaned of other-client sentences.
+
+## As built (bot API)
+
+Files `apps/sheet4/src/api.js` (`doPost`, `SheetApi`), `api_validator.js` (`ApiValidator`); tests
+`test/api.test.js`. Agent: `services/agent` (tools, instruction, summary, `/hoje`, `/ficha`,
+`/semana`, new `/fase`); e2e: `e2e/sheet_server.js` serves `apps/sheet4/src` (`SHEET_SRC=legacy`
+for the old code) seeded with a synthetic client.
+
+- **Contract** unchanged: `{key, op, args}` → `{ok, result} | {ok:false, errors:[{path, code,
+  message, suggestions?}]}`, key = Script Property `SHEET_API_KEY`, strict types, every error at
+  once, Portuguese messages, nothing written unless valid. Names (session, exercise, food,
+  favourite) match ignoring case/accents and come back canonical; unknown ones get suggestions.
+- **Writes** call only domain modules (`Diary.save`, `FoodLog.add/addFavorite/addNoCalc`,
+  `Sessions.savePartial/complete`) inside `Core.withLock` and one `ChangeLog` action; `writeId` =
+  the action id (only when something changed). Its commit refreshes the running week. A domain
+  refusal (plain `Error`) rolls the whole action back and answers `rejected`; lock timeout →
+  `unavailable`; other exceptions → `internal`. The action label is `Bot: <texto> {json}` where the
+  JSON is the op summary (`op`, `date`, `session`/`meal`, `fields`/`exercises`/`items`), which
+  `catalog.recent` (Log actions of the last 30 min, not undone, newest first) and `write.undo`
+  read back; actions made in the sheet come back with their label only.
+- **Ops**: `catalog` (today, timezone, client name, `phase` = phase.get(today), `trainingPhase`,
+  sessions, rotation, `nextSession`, `lastWorkout`, exercises with group, plan rows with
+  prescription, foods, favourites, meals, units, recent) · `diary.upsert {date, fields}` (the 12
+  Diário inputs; absent = untouched, `null` = clear) → stored values, changed keys, day state, ids ·
+  `workout.upsert {date, session, exercises:[{name, warmup?, feeder?, work:[{kg, reps, rir?}] 1–2,
+  pain?, note?, equipment?}], complete?}` → per exercise warm-up/feeder apart, work sets, work
+  volume, prescription, `previous` (work sets only) and `comparison` (Progression.compare), state,
+  next session · `food.add {date, meal, items:[{food, qty, unit?, measure?, note?} | {favorite,
+  portions?} | {description, qty?, unit?, note?}]}` → rows written (macros, Cálculo, Fonte,
+  Conferência) and day totals · `day.get`, `diary.range`, `workout.range`, `exercise.history`
+  (work sets only) · `phase.get {date}` → objective/goal/plan in force on that date with targets and
+  the latest stored recommendation of that objective up to that week · `week.get {date}` → the
+  stored Semanas row of a closed week, else `Weeks.analyze` of the week (not written) · `write.undo
+  {writeId?}` → `Undo.last()` / `Undo.action(id)` (codes nothing_to_undo, not_found,
+  already_undone, not_latest, conflict; path `args.writeId` when an id was given).
+- **Deviations**: `workout.upsert` resending an exercise replaces its work sets but keeps the saved
+  warm-up, feeder, pain and note when they are omitted (empty never erases); `rir` is optional
+  (never guessed); `complete: true` with no exercises concludes what was saved. Undo now checks
+  only the latest write of a cell within one action (`Undo.overwritten_`), so an action that
+  patches the same Diário totals several times (several food items) can be undone;
+  `ChangeLog.changeCount()` was added for the writeId. The bot's `/semana` and the weekly reminder
+  use `week.get` (the sheet's analysis) instead of recomputing from ranges; `/fase [data]` shows the
+  objective in force on a date.

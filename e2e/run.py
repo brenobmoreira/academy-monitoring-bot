@@ -7,11 +7,13 @@
         --message "peso 82,4 dormi 7h30"                # real model: LLM_MODEL + LLM_API_KEY
 
 What is real: the chosen HTTP entry point (Functions Framework or ASGI) with its secret check,
-Handler, Bot/ADK runner, tools, the LiteLLM adapter, SheetClient over HTTP, and the Apps Script
-code (apps/sheet/src) running in Node.
-What is mocked: the Telegram Bot API (replies are captured), the spreadsheet (in-memory fake with
-the test fixtures' tabs), and — without --real — the provider behind LiteLLM, which replays a
-fixed script with two rejected payloads so the correction loop shows up in the trace.
+Handler, Bot/ADK runner, tools, the LiteLLM adapter, SheetClient over HTTP, and the sheet 4.0
+Apps Script code (apps/sheet4/src) running in Node.
+What is mocked: the Telegram Bot API (replies are captured), the spreadsheet (in-memory fake built
+by e2e/sheet_server.js with a synthetic client), and — without --real — the provider behind
+LiteLLM, which replays a fixed script with two rejected payloads so the correction loop shows up
+in the trace. SHEET_SRC=legacy serves the old apps/sheet code instead (its scripted turns no
+longer match that API).
 After the message, the same entry point gets `POST /remind {"kind":"daily"}` (F12): the message
 logged weight and sleep, so the reminder asks for the steps.
 
@@ -83,8 +85,16 @@ def say(text: str) -> ModelResponse:
 
 def scripted_turns(today: str) -> list[ModelResponse]:
     """What a model would do with DEFAULT_MESSAGE, including two mistakes the sheet rejects."""
-    supino = {"name": "Supino inclinado", "sets": [{"kg": 60, "reps": 8}, {"kg": 62.5, "reps": 8}], "rir": 2}
-    puxada = {"sets": [{"kg": 50, "reps": 10}, {"kg": 50, "reps": 9}]}
+    supino = {
+        "name": "Supino inclinado",
+        "warmup": {"kg": 20, "reps": 12},
+        "work": [{"kg": 60, "reps": 8, "rir": 2}, {"kg": 62.5, "reps": 8, "rir": 1}],
+    }
+    puxada = {"work": [{"kg": 50, "reps": 10}, {"kg": 50, "reps": 9}]}
+    lunch = [
+        {"food": "Arroz branco cozido", "qty": 150, "unit": "g"},
+        {"food": "Ovo inteiro cozido", "qty": 2, "unit": "un"},
+    ]
     return [
         call("get_catalog"),
         call("save_diary", date=today, fields={"weightKg": 82.4, "sleepH": "7h30"}),
@@ -96,6 +106,7 @@ def scripted_turns(today: str) -> list[ModelResponse]:
             session="Upper",
             exercises=[supino, {"name": "Puxada aberta", **puxada}],
         ),
+        call("save_food", date=today, meal="Almoço", items=lunch),
         say("ok"),
     ]
 
@@ -285,7 +296,7 @@ def main_run() -> None:
             "server": "uvicorn (ASGI)" if args.server == "uvicorn" else "Functions Framework",
             "message": message,
             "today": today,
-            "spreadsheet": "in-memory fake seeded with apps/sheet/test/fixtures.js",
+            "spreadsheet": "in-memory fake: apps/sheet4/src + synthetic client (e2e/sheet_server.js)",
             "elapsed_s": elapsed,
         },
         "webhook": {

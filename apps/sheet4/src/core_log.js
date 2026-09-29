@@ -72,6 +72,11 @@ const ChangeLog = {
     return ChangeLog.current_ ? { id: ChangeLog.current_.id, label: ChangeLog.current_.label } : null;
   },
 
+  /** Changes recorded so far by the running action (0 when none runs). */
+  changeCount() {
+    return ChangeLog.current_ ? ChangeLog.pending_.length : 0;
+  },
+
   /**
    * Runs fn as one undoable action. Nested calls join the outer action. When fn throws, the
    * changes it made are reverted (newest first), their Log rows marked undone, and the error
@@ -298,7 +303,6 @@ const Undo = {
     return row;
   },
 
-  /** Why a change can no longer be undone, or null. */
   /** "tab|row|col" of the cells a change wrote (none for deletes and structural changes). */
   cellKeys_(c) {
     if (c.kind === 'delete' || c.kind === 'structure') return [];

@@ -52,6 +52,9 @@ const Config = {
     'analysis.painHigh': { section: 'Análise', label: 'Dor alta', type: 'number', default: 4, unit: '0–10', description: 'Máximo a partir disso gera sinal de dor alta.' },
     'analysis.reviewEveryDays': { section: 'Análise', label: 'Intervalo de revisão', type: 'integer', default: 7, unit: 'dias', description: 'Próxima revisão sugerida após uma decisão.' },
     'analysis.minWeeksForPhaseReview': { section: 'Análise', label: 'Semanas mínimas por fase', type: 'integer', default: 8, unit: 'semanas', description: 'Antes disso não se sugere revisar objetivo/fase por sucesso.' },
+    'analysis.weightFastPctPerWeek': { section: 'Análise', label: 'Peso rápido', type: 'number', default: 0.5, unit: '%/semana', description: 'Variação acima disso é descrita como rápida (sinais peso_*_rapido); até ela, lenta.' },
+    'analysis.adherenceMin': { section: 'Análise', label: 'Aderência mínima', type: 'number', default: 0.7, unit: 'fração', description: 'Fração dos dias completos dentro da meta (kcal, proteína) abaixo da qual há sinal de aderência baixa.' },
+    'analysis.phaseReviewStreak': { section: 'Análise', label: 'Semanas seguidas p/ revisar fase', type: 'integer', default: 3, unit: 'semanas', description: 'Semanas seguidas no caminho (com a expectativa atendida) ou fora do esperado para sugerir revisar objetivo/fase.' },
 
     'system.schemaVersion': { section: 'Sistema', label: 'Versão do esquema', type: 'text', default: null, unit: '', description: 'Gravada pela migração/configuração inicial. Não editar.' },
     'system.timezone': { section: 'Sistema', label: 'Fuso horário', type: 'text', default: null, unit: '', description: 'Vazio = fuso do projeto do Apps Script.' },

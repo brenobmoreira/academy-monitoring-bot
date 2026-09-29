@@ -10,7 +10,7 @@ const SPEC_KEYS = ['client.name', 'client.sex', 'client.birthDate', 'client.age'
   'analysis.weightTrendDays', 'analysis.minWeighInsPerWeek', 'analysis.minCompleteFoodDays', 'analysis.kcalTolerance',
   'analysis.fatTolerance', 'analysis.waistNoiseCm', 'analysis.weightNoisePctPerWeek', 'analysis.sleepMinH',
   'analysis.fatigueHigh', 'analysis.hungerHigh', 'analysis.painHigh', 'analysis.reviewEveryDays',
-  'analysis.minWeeksForPhaseReview', 'system.schemaVersion', 'system.timezone'];
+  'analysis.minWeeksForPhaseReview', 'analysis.weightFastPctPerWeek', 'analysis.adherenceMin', 'analysis.phaseReviewStreak', 'system.schemaVersion', 'system.timezone'];
 
 test('DEFAULTS covers every key of spec §3.2 with Portuguese label, unit and description', () => {
   const C = load({ now: NOW }).Config;

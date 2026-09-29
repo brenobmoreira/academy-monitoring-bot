@@ -412,3 +412,52 @@ formatting) as a preview under `sheets/preview/`.
 2. Authorize the installable triggers (Setup creates them).
 3. New Web App deployment version for the bot; redeploy the agent.
 4. Review the values flagged as estimates: activity factor, Zoio's protein range.
+
+## As built (weekly engine)
+
+`apps/sheet4/src/weeks.js` (`Weeks`, `dailyRefresh`), `analysis.js` (`Analysis`, `Rules`),
+`recommend.js` (`Recommend`); tests `test/weeks.test.js`, `test/analysis.test.js`.
+
+- **By date, never by storage.** `Weeks.compute(start)` reads Diário, Medidas e fotos, Registro de
+  treino, Exercícios, Objetivos, Metas and Fichas once (a snapshot) and resolves versions by date.
+  Ids are those in force on the Sunday; `Transição na semana` lists every id change from Tuesday to
+  Sunday ("Objetivo O002 → O003 em 19/11/2026"). The history an analysis sees (previous 4 weeks)
+  is recomputed the same way, so `store` and `recomputeAll` give identical rows and a later phase
+  change alters nothing before it.
+- **Weight**: weigh-ins Mon..as-of; 7-day (`analysis.weightTrendDays`) average at the Sunday (or
+  today for the running week) vs the previous Sunday; %/week scaled to 7 days for the running week.
+  **Waist**: last value of the week, Medidas wins over Diário on the same day; delta vs the latest
+  earlier measurement. **Food**: only days with `Registro alimentar = Completo`, kcal present and
+  no item without calculation; adherence of each day against the goal in force *on that day*
+  (kcal ± tolerance, protein in [mín, máx] with mín defaulting to the target, fat ± tolerance);
+  coverage "N de D dias" with D = days elapsed. **Training**: `Progression.weekSummary(start, asOf)`
+  when defined; otherwise sessions = distinct sessions with a `Concluído` row, volume = Σ kg×reps of
+  Work 1/Work 2 only (partial sessions included), progression = top work set vs the previous
+  session of the exercise (more kg, or same kg and more reps, at the same RIR or more).
+- **Status**: rules return issues (`warn`/`off`) and a positive pattern; any `off` or 2 `warn` →
+  Fora do esperado, 1 `warn` → Atenção, none + positive → No caminho (none, no positive → Atenção).
+  Recovery signals (sono/cansaço/dor) downgrade No caminho to Atenção. Missing weight data (or
+  training data for `performance`) → Dados insuficientes; a week with no objective too.
+- **Default ranges (%/sem)**: adaptacao −0.5..0.5, recomposicao −0.5..0.25, manutencao −0.3..0.3,
+  manutencao_pos_cut −0.2..0.4, deficit −1.0..−0.5, ganho_controlado 0.1..0.3, ganho_agressivo
+  0.3..0.6, performance −0.25..0.5, personalizado none; the objective row overrides them.
+- **New Config keys** (Análise): `analysis.weightFastPctPerWeek` (0.5, lento/rápido boundary),
+  `analysis.adherenceMin` (0.7, fraction of complete days on target), `analysis.phaseReviewStreak`
+  (3, weeks for REVISAR OBJETIVO/FASE).
+- **Recommendation**: spec §8 precedence. REVISAR ENERGIA needs the weight out of range with the
+  week Fora do esperado (or Atenção two weeks running in the same objective) *and* the diet
+  followed (otherwise REVISAR MACROS). REVISAR OBJETIVO/FASE: phase ≥ `minWeeksForPhaseReview`
+  weeks and the last 3 weeks of that objective No caminho with the rule's expectation met
+  (recomposição: waist down since the start by ≥ noise; déficit: weight down; ganho: weight up;
+  manutenção/personalizado: on track; adaptação: coverage reached; performance: progression), or 3
+  Fora do esperado when no energy/macros/training cause applies. `nextReview` = Sunday +
+  `analysis.reviewEveryDays`.
+- **Storage**: `Semanas` gains `Exercícios com regressão` and `Faixa alvo %/sem`. A closed week's
+  row is final once `Calculado em` is after its Sunday; `closeFinished` writes only non-final closed
+  weeks, `refreshCurrent` the running week, `recomputeAll` everything (rows updated in place).
+  `Evolução` is written with the same rows. Derived writes are not undoable actions (the analysis
+  actions are `logged: false`), except when they happen inside a transition.
+- **Hooks**: `phase.changed` → `refreshCurrent` (skipped without a Semanas tab; errors logged, never
+  failing the transition). Actions `Atualizar semana` (quick) and `Recalcular histórico` (group
+  Análise). `dailyRefresh()` closes finished weeks and refreshes the current one. Not yet wired:
+  a "day saved" event from Hoje/Food/Workout to refresh the current week on every save.

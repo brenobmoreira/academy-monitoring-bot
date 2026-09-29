@@ -9,7 +9,8 @@
  *   1. every tab exists (Tabs.ensure / Hoje.ensure). Tabs are NOT renamed here (the migration
  *      renames 3.0 tabs in place); an untouched default "Sheet1/Página1" is removed from a new file;
  *   2. missing spec columns are appended after the last used column (header text only);
- *   3. Config gets every key of Config.DEFAULTS (sections, labels, units, descriptions);
+ *   3. Config gets every key of Config.DEFAULTS (sections, labels, units, descriptions) and Guia
+ *      its generic product topics (names, rotation and plan read from Config and the entities);
  *      existing values are kept;
  *   4. tab order by layer (1 person, 2 history, 3 technical; unknown tabs last), tab colours,
  *      Log hidden (other hidden tabs stay as they are), gridlines hidden on layer 1;
@@ -75,6 +76,7 @@ const Setup = {
     Setup.theme_(ss, report);
     Tabs.ids().forEach((id) => {
       if (Tabs.findSheet(id)) return;
+      if (ChangeLog.active()) ChangeLog.structure(Tabs.get(id).name, { op: 'insertSheet', name: Tabs.get(id).name });
       if (id === Hoje.TAB) Hoje.ensure(); else Tabs.ensure(id);
       report.created.push(Tabs.get(id).name);
     });
@@ -82,6 +84,7 @@ const Setup = {
     Tabs.ids().forEach((id) => { if (Tabs.get(id).kind === 'table') Setup.addMissingColumns_(id, report); });
     Tabs.invalidate();
     Setup.config_(report);
+    Setup.guide_();
     Setup.order_(ss);
     Setup.namedRanges_(ss);
     Tabs.ids().forEach((id) => {
@@ -133,11 +136,18 @@ const Setup = {
     if (!missing.length) return;
     const sheet = Tabs.sheet(id);
     const start = sheet.getLastColumn() + 1;
-    const need = start + missing.length - 1;
-    if (need > sheet.getMaxColumns()) sheet.insertColumnsAfter(sheet.getMaxColumns(), need - sheet.getMaxColumns());
-    sheet.getRange(spec.headerRow, start, 1, missing.length).setValues([missing]);
+    Setup.growColumns_(sheet, start + missing.length - 1);
+    Style.write(sheet, spec.headerRow, start, [missing]);
     Tabs.invalidate(spec.name);
     report.columnsAdded[spec.name] = missing;
+  },
+
+  /** Makes the sheet at least `cols` wide (a structural change the action's undo reverts). */
+  growColumns_(sheet, cols) {
+    const after = sheet.getMaxColumns();
+    if (cols <= after) return;
+    if (ChangeLog.active()) ChangeLog.structure(sheet.getName(), { op: 'insertColumns', sheet: sheet.getName(), after, count: cols - after });
+    sheet.insertColumnsAfter(after, cols - after);
   },
 
   /* Config ----------------------------------------------------------------------------------- */
@@ -171,6 +181,59 @@ const Setup = {
     });
     if (out.length) Tabs.appendMany('config', out);
     Config.invalidate();
+  },
+
+  /* Guia ------------------------------------------------------------------------------------- */
+
+  /**
+   * Generic guide rows [{topic, guidance, source}] (spec §1 #3): product texts only; names,
+   * rotation, plan and reviewer are read from Config and the entities at render time.
+   */
+  guideRows() {
+    const cfg = (k) => { try { return Config.get(k); } catch (err) { return null; } };
+    const rotation = Config.getList('routine.sessionRotation');
+    const mode = cfg('routine.rotationMode');
+    const plan = Tabs.findSheet('plans') ? Plans.current() : null;
+    const cell = (section, key) => { const f = Hoje.section(section).fields.find((x) => x.key === key); return f ? `Hoje!${f.cell}` : 'Hoje'; };
+    const reviewer = cfg('client.reviewer');
+    return [
+      { topic: 'Uso diário', guidance: `Abra Hoje, confira a data (${cell('header', 'date')}) e use a Ação rápida (${cell('header', 'quick')}) ou o menu Projeto. Campos não informados podem ficar vazios.`, source: 'Vazio = não informado; 0 só quando digitado. Salvar dia nunca apaga por omissão: para apagar, digite "-" ou "limpar".' },
+      { topic: 'Favoritas pessoais', guidance: 'Registre uma refeição e use Projeto → Alimentação → Criar favorita da refeição. Lançar favorita cria uma linha por ingrediente.', source: 'Criar a favorita não lança consumo. O mesmo nome salvo de novo vira a próxima versão.' },
+      { topic: 'Copiar alimentação', guidance: `Informe a data de origem (${cell('food', 'copyFrom')}) e a refeição a copiar; copie só o que realmente se repetiu.`, source: 'Repetir a mesma cópia no mesmo dia é bloqueado; a cópia fica marcada na Observação.' },
+      { topic: 'Treino', guidance: 'Carregar treino traz a sessão da rotação e, na nota de cada exercício, a prescrição e as cargas anteriores. Registre só o que fez e use Salvar parcial do treino ou Concluir treino.', source: 'Cargas anteriores são referência, nunca preenchimento automático.' },
+      { topic: 'Dia completo', guidance: 'Registro alimentar Completo significa que tudo o que foi comido está registrado, mesmo fora do plano.', source: 'Dias parciais e itens sem cálculo não entram nas médias de dias completos.' },
+      { topic: 'Metas', guidance: 'Objetivo, meta e ficha têm versões com início e fim. Mudar objetivo/fase, Nova meta e Salvar nova ficha encerram a versão vigente e criam a próxima.', source: 'Nada é sobrescrito; semanas fechadas continuam avaliadas pelo objetivo da época.' },
+      { topic: 'Ficha vigente', guidance: plan ? `Ficha em vigor: ${plan.id}, desde ${Dates.format(plan.start)}. As versões anteriores ficam em Fichas.` : 'Nenhuma ficha em vigor. As versões ficam em Fichas.', source: 'Edite a aba Ficha de treino como rascunho e use Salvar nova ficha.' },
+      { topic: 'Unidades', guidance: 'g, mg e kg convertem entre si; ml e l entre si. Medidas caseiras (un, fatia…) exigem Medida caseira e Base por medida em Alimentos.', source: '2 un de ovo nunca viram 2 g. Medida caseira é estimativa.' },
+      { topic: 'Fotos', guidance: 'Anexe os links das fotos na aba Medidas e fotos, com a mesma luz, distância e postura.', source: 'Cintura semanal; outras medidas e fotos a cada 4 semanas.' },
+      { topic: 'Fora da rotina', guidance: `Descreva a refeição em ${cell('food', 'noCalcText')} e use Lançar sem cálculo.`, source: 'Sem quantidade conhecida: macros vazios, nunca zero.' },
+      { topic: 'Aderência', guidance: 'A semana é avaliada só com dias completos com cálculo; a cobertura ("N de D dias") aparece junto das médias.', source: 'Durante o dia o estado é Parcial.' },
+      { topic: 'Retomar', guidance: 'Carregar treino numa data com sessão parcial recupera o que foi salvo. Dias sem uso não bloqueiam o dia atual.', source: 'A rotação só avança quando uma sessão é concluída.' },
+      { topic: 'Fontes alimentares', guidance: 'Cada alimento tem Fonte (Rótulo confirmado, TACO/fonte confiável, Estimativa, Pendente).', source: 'Cadastro válido não significa fonte nutricional auditada.' },
+      { topic: 'Séries de trabalho', guidance: 'Volume e progressão usam apenas Work 1 e Work 2. Aquecimento e feeder ficam registrados à parte.', source: 'RIR por work set; 0 é um registro válido.' },
+      { topic: 'Correções', guidance: 'Selecione uma linha em Alimentação e use Corrigir linha selecionada ou Excluir linha selecionada.', source: 'Desfazer última alteração restaura a última ação (menu Projeto ou Ação rápida).' },
+      { topic: 'Rotação', guidance: rotation.length ? `Sessões em ordem (Config → Rotação de sessões): ${rotation.join(' → ')}.` : 'Rotação não definida na Config: vale a ordem das sessões da ficha em vigor.', source: mode === 'weekly' ? 'Modo semanal: recomeça toda segunda-feira.' : 'Modo contínuo: a próxima sessão vem depois da última concluída, sem reiniciar na semana.' },
+      { topic: 'Painel', guidance: 'Mostra só o objetivo em vigor: metas, estado da semana, recomendação. Fases anteriores aparecem na linha do tempo e nos gráficos.', source: 'A planilha sugere; uma pessoa aprova.' + (reviewer ? ` Revisor: ${reviewer}.` : '') },
+      { topic: 'Automação', guidance: 'O menu Projeto funciona no Google Sheets pelo Apps Script vinculado.', source: `No celular, use a Ação rápida em ${cell('header', 'quick')}.` },
+      { topic: 'Créditos', guidance: 'Os cálculos e comandos desta planilha usam Apps Script, sem chamadas a modelos de IA.', source: 'O bot reutiliza as mesmas regras.' },
+    ];
+  },
+
+  /** Rewrites the guide rows whose Tema is a product topic; appends missing topics; other rows stay. */
+  guide_() {
+    const rows = Tabs.read('guide');
+    const byTopic = {};
+    rows.forEach((r) => { const k = Tabs.normalize_(r.topic); if (k && !byTopic[k]) byTopic[k] = r; });
+    const append = [];
+    Setup.guideRows().forEach((g) => {
+      const r = byTopic[Tabs.normalize_(g.topic)];
+      if (!r) { append.push(g); return; }
+      const patch = {};
+      if (r.guidance !== g.guidance) patch.guidance = g.guidance;
+      if (r.source !== g.source) patch.source = g.source;
+      if (Object.keys(patch).length) Tabs.update('guide', r._row, patch);
+    });
+    if (append.length) Tabs.appendMany('guide', append);
   },
 
   /* Order, visibility, colours --------------------------------------------------------------- */
@@ -208,7 +271,7 @@ const Setup = {
         const s = Tabs.findSheet(target);
         return s ? `=HYPERLINK("#gid=${s.getSheetId()}","${target === 'today' ? '‹ ' : ''}${Tabs.get(target).name}")` : Tabs.get(target).name;
       });
-      sheet.getRange(1, 1, 1, 2).setValues([links]);
+      Style.write(sheet, 1, 1, [links]);
       Style.link(sheet.getRange(1, 1, 1, 2));
       sheet.setRowHeight(1, Style.ROW.nav);
     }
@@ -224,6 +287,7 @@ const Setup = {
     const existing = ss.getRangeByName(Setup.NAMED_EXERCISES);
     if (existing && existing.getA1Notation() === range.getA1Notation() && existing.getSheet().getSheetId() === sheet.getSheetId()) return;
     if (existing) ss.removeNamedRange(Setup.NAMED_EXERCISES);
+    else if (ChangeLog.active()) ChangeLog.structure(sheet.getName(), { op: 'namedRange', name: Setup.NAMED_EXERCISES });
     ss.setNamedRange(Setup.NAMED_EXERCISES, range);
   },
 
@@ -241,8 +305,7 @@ const Setup = {
   styleTable_(id) {
     const spec = Tabs.get(id);
     const sheet = Tabs.sheet(id);
-    sheet.getRange(Tabs.TITLE_ROW, 1).setValue(Setup.titleOf_(id));
-    sheet.getRange(Tabs.HELP_ROW, 1).setValue(Setup.helpOf_(spec));
+    Style.write(sheet, Tabs.TITLE_ROW, 1, [[Setup.titleOf_(id)], [Setup.helpOf_(spec)]]);
     const extraRules = [];
     if (id === 'progression') Setup.progressionBlock_(sheet, extraRules);
     Style.table(sheet, spec, { inputFill: spec.layer === Tabs.LAYERS.PERSON || id === 'config', extraRules });
@@ -393,7 +456,7 @@ const Setup = {
     const c = PlanDraft.CELLS;
     [[c.startLabel, PlanDraft.LABELS.start], [c.reasonLabel, PlanDraft.LABELS.reason]].forEach(([a1, text]) => {
       const r = sheet.getRange(a1);
-      if (r.getValue() === '') r.setValue(text);
+      if (r.getValue() === '') Style.write(sheet, r.getRow(), r.getColumn(), [[text]]);
       Style.label(r).setFontWeight('bold').setHorizontalAlignment('right');
     });
     Style.input(sheet.getRange(c.start)).setNumberFormat('dd/mm/yyyy').setDataValidation(Setup.rule_({ type: 'date', allowInvalid: false }, 'Início da nova ficha (dd/mm/aaaa).'));
@@ -406,9 +469,12 @@ const Setup = {
     if (typeof Progression === 'undefined' || typeof Progression.pickerCell !== 'function') return;
     const H = Progression.HISTORY;
     const col = Progression.historyCol_();
-    const need = col + H.HEADERS.length - 1;
-    if (need > sheet.getMaxColumns()) sheet.insertColumnsAfter(sheet.getMaxColumns(), need - sheet.getMaxColumns());
-    sheet.getRange(H.PICKER_ROW, col).setValue(H.PICKER_LABEL);
+    Setup.growColumns_(sheet, col + H.HEADERS.length - 1);
+    // The gap between the summary table and the history block (script-rendered tab: 3.0 leftovers go).
+    const map = Tabs.headerMap('progression');
+    const width = Math.max(0, ...Object.keys(map).map((k) => map[k]));
+    if (col - width > 1) sheet.getRange(1, width + 1, sheet.getMaxRows(), col - width - 1).clearFormat();
+    Style.write(sheet, H.PICKER_ROW, col, [[H.PICKER_LABEL]]);
     Style.label(sheet.getRange(H.PICKER_ROW, col)).setFontWeight('bold').setHorizontalAlignment('right');
     const picker = sheet.getRange(Progression.pickerCell());
     Style.input(picker);
@@ -416,7 +482,7 @@ const Setup = {
     if (dv) picker.setDataValidation(dv);
     sheet.setRowHeight(H.PICKER_ROW, Style.ROW.field);
     const header = Tabs.get('progression').headerRow;
-    sheet.getRange(header, col, 1, H.HEADERS.length).setValues([H.HEADERS]);
+    Style.write(sheet, header, col, [H.HEADERS]);
     const first = Tabs.get('progression').firstDataRow;
     const body = sheet.getRange(first, col, H.ROWS, H.HEADERS.length);
     Style.calc(body);
@@ -442,11 +508,17 @@ const Setup = {
     return wrong.length * 4 > cells.length;
   },
 
-  /** Resets a sheet completely (screen tabs only). */
+  blank_(rows, cols) {
+    const out = [];
+    for (let i = 0; i < rows; i++) { const line = []; for (let j = 0; j < cols; j++) line.push(''); out.push(line); }
+    return out;
+  },
+
+  /** Resets a screen's formats, merges, validations, notes, rules, charts and protections (values: see hoje_). */
   resetSheet_(sheet) {
     const all = sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns());
     all.breakApart();
-    all.clear();
+    all.clearFormat();
     all.clearDataValidations();
     all.clearNote();
     sheet.clearConditionalFormatRules();
@@ -465,13 +537,20 @@ const Setup = {
       Setup.resetSheet_(sheet);
       reset = true;
     }
-    const texts = Hoje.texts();
-    Object.keys(texts).forEach((a1) => sheet.getRange(a1).setValue(texts[a1]));
-    const quick = sheet.getRange(layout.quickCell);
-    if (quick.getValue() === '') quick.setValue(Actions.QUICK_EMPTY);
     const lastRow = layout.lastRow + 1;
     const lastCol = layout.lastCol;
-    if (sheet.getMaxColumns() < lastCol) sheet.insertColumnsAfter(sheet.getMaxColumns(), lastCol - sheet.getMaxColumns());
+    Setup.growColumns_(sheet, lastCol);
+    // Values: one tracked write of the whole screen — inputs as they are (a foreign layout is
+    // emptied), texts, navigation links and the Ação rápida default.
+    const rowsN = Math.max(lastRow, sheet.getLastRow());
+    const colsN = Math.max(lastCol, sheet.getLastColumn());
+    const grid = reset ? Setup.blank_(rowsN, colsN) : Style.read(sheet, 1, 1, rowsN, colsN);
+    const put = (a1, v) => { const [r, c] = Hoje.rc_(a1); grid[r - 1][c - 1] = v; };
+    const texts = Hoje.texts();
+    Object.keys(texts).forEach((a1) => put(a1, texts[a1]));
+    Dashboard.navLinks(Hoje.TAB).forEach((link, i) => { grid[0][i] = link; });
+    if (grid[Hoje.rc_(layout.quickCell)[0] - 1][Hoje.rc_(layout.quickCell)[1] - 1] === '') put(layout.quickCell, Actions.QUICK_EMPTY);
+    Style.write(sheet, 1, 1, grid);
     const R = (a1) => sheet.getRange(a1);
     const colA = (c) => Style.col(c);
 
@@ -486,7 +565,6 @@ const Setup = {
 
     // Navigation, title, help
     const links = Dashboard.navLinks(Hoje.TAB);
-    sheet.getRange(1, 1, 1, links.length).setValues([links]);
     Style.link(sheet.getRange(1, 1, 1, links.length));
     sheet.setRowHeight(1, Style.ROW.nav);
     Style.title(R(`A${Tabs.TITLE_ROW}`));
@@ -520,6 +598,7 @@ const Setup = {
       Object.keys(s.hints || {}).forEach((a1) => rows.push(Hoje.rc_(a1)[0]));
       const top = s.titleCell ? Hoje.rc_(s.titleCell)[0] : Math.min.apply(null, rows);
       const bottom = Math.max.apply(null, rows);
+      Style.card(sheet.getRange(top, 1, bottom - top + 1, width));
       if (s.titleCell) {
         Style.section(sheet.getRange(top, 1, 1, width));
         sheet.setRowHeight(top, Style.ROW.section);
@@ -564,7 +643,6 @@ const Setup = {
         Style.calc(R(`B${r}:${colA(s.table.columns.length)}${r}`)).setWrap(true);
         sheet.setRowHeight(r, Style.ROW.hint);
       }
-      Style.card(sheet.getRange(top, 1, bottom - top + 1, width));
     });
 
     // Header card accents: Ação rápida stands out; the day state and session state are chips.

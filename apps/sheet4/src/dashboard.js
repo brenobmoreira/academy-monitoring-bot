@@ -211,8 +211,8 @@ const Dashboard = {
     else if (has('peso_acima_faixa')) w = ['Acima da faixa', 'attention'];
     else w = ['Sem faixa', 'info'];
     const wt = Dashboard.isNum_(row.weightAvg)
-      ? `${n(row.weightAvg, 1)} kg · ${n(row.weightDeltaPct, 2, true)}%/sem · ${row.weighIns || 0} pesagens`
-      : `${row.weighIns || 0} pesagens`;
+      ? `${n(row.weightAvg, 1)} kg · ${n(row.weightDeltaPct, 2, true)}%/sem · ${row.weighIns || 0} ${row.weighIns === 1 ? 'pesagem' : 'pesagens'}`
+      : `${row.weighIns || 0} ${row.weighIns === 1 ? 'pesagem' : 'pesagens'}`;
     out.push({ key: 'weight', label: 'Tendência de peso', chip: w[0], kind: w[1], text: wt });
     // Waist
     let c;
@@ -251,7 +251,7 @@ const Dashboard = {
     if (['sono_baixo', 'fadiga_alta', 'dor_alta', 'fome_alta'].some(has)) r = ['Atenção', 'attention'];
     else if (!recVals.some(Dashboard.isNum_)) r = ['Sem dados', 'insufficient'];
     else r = ['Boa', 'ok'];
-    const rt = `Sono ${n(row.sleepAvg, 1)} h · Fome ${n(row.hungerAvg, 1)} · Cansaço ${n(row.fatigueAvg, 1)} · Dor máx ${n(row.painMax, 0)}`;
+    const rt = recVals.some(Dashboard.isNum_) ? `Sono ${n(row.sleepAvg, 1)} h · Fome ${n(row.hungerAvg, 1)} · Cansaço ${n(row.fatigueAvg, 1)} · Dor máx ${n(row.painMax, 0)}` : 'Sono, fome, cansaço e dor não informados';
     out.push({ key: 'recovery', label: 'Recuperação', chip: r[0], kind: r[1], text: rt });
     // Training adherence
     let t;
@@ -283,7 +283,7 @@ const Dashboard = {
     const cur = mine(current) ? Dashboard.indicators_(current, type, true) : null;
     const prev = mine(previous) ? Dashboard.indicators_(previous, type, false) : null;
     const note = (row) => (!row ? { chip: '—', kind: 'insufficient', text: 'Sem registro nesta semana' }
-      : { chip: '—', kind: 'insufficient', text: Dashboard.TEXT.previousPhase });
+      : { chip: '—', kind: 'insufficient', text: row.objective ? Dashboard.TEXT.previousPhase : 'Semana sem objetivo em vigor.' });
     const ws = Dates.weekStart(today);
     return {
       currentLabel: `Esta semana · ${Dashboard.dm_(ws)}–${Dashboard.dm_(today)}`,
@@ -350,10 +350,16 @@ const Dashboard = {
         line.push(own || bridge ? v : '');
       });
       const prev = series.rows[i - 1];
-      line.push(prev && prev.objective !== r.objective ? v : '');
+      line.push(prev && prev.objective && prev.objective !== r.objective ? v : '');
       return line;
     });
-    return { head, lines, width: P + 2 };
+    return { head, lines, width: P + 2, colors: Dashboard.colors_(series.phases) };
+  },
+
+  /** One colour per objective (weeks with no objective in grey), then the marker colour. */
+  colors_(phases) {
+    let k = 0;
+    return phases.map((p) => (p.id ? Style.SERIES[(k++) % Style.SERIES.length] : Style.C.textSubtle)).concat([Style.MARKER]);
   },
 
   /* Render ---------------------------------------------------------------------------------- */
@@ -413,7 +419,9 @@ const Dashboard = {
     cv.put(r, 1, m.clientName ? `Painel · ${m.clientName}` : 'Painel', { bold: true, size: Style.SIZE.title });
     cv.merge(r, 1, last);
     r = cv.row(Style.ROW.help + 6);
-    const stamp = Utilities.formatDate(m.updatedAt, Dates.tz(), 'dd/MM/yyyy HH:mm');
+    // One stamp per execution: a second render in the same run (after the weekly refresh) is identical.
+    if (!Dashboard.stamp_) Dashboard.stamp_ = Utilities.formatDate(m.updatedAt, Dates.tz(), 'dd/MM/yyyy HH:mm');
+    const stamp = Dashboard.stamp_;
     cv.put(r, 1, `Só o objetivo em vigor; o histórico fica na linha do tempo e nos gráficos. Valores gravados pelo script (Projeto → Análise → Atualizar painel). Atualizado em ${stamp}.`, { fg: C.textMuted, wrap: true, size: Style.SIZE.small });
     cv.merge(r, 1, last);
     spacer();
@@ -490,7 +498,7 @@ const Dashboard = {
       cv.put(r, 4, st.previousLabel, { bold: true, fg: C.headerText, bg: C.headerBg });
       cv.merge(r, 4, 5);
       st.rows.forEach((row) => {
-        const rr = cv.row(row.label === 'Situação geral' ? Style.ROW.field + 14 : Style.ROW.field, C.surface);
+        const rr = cv.row(row.label === 'Situação geral' ? Style.ROW.field + 14 : Style.ROW.field + 6, C.surface);
         cv.put(rr, 1, row.label, { fg: row.label === 'Situação geral' ? C.text : C.textMuted, bold: row.label === 'Situação geral' });
         [[row.current, 2], [row.previous, 4]].forEach(([cell, col]) => {
           if (!cell) return;
@@ -570,44 +578,112 @@ const Dashboard = {
     }
     card(s6, cv.rows.length);
 
-    // Write
+    // Write: one value grid (canvas A:E + hidden chart data), then formats and charts.
+    const helper = chartRows ? Dashboard.helper_(m.series) : null;
+    Dashboard.grow_(sheet, cv.rows.length + 10, helper ? helper.needCols : Dashboard.COLS);
     const oldSignature = sheet.getMaxColumns() > Dashboard.HELPER_COL ? String(sheet.getRange(1, Dashboard.HELPER_COL + 1).getValue()) : '';
-    Dashboard.clear_(sheet, cv.rows.length);
-    cv.flush(sheet);
-    Dashboard.frame_(sheet);
-    const charts = Dashboard.charts_(sheet, m.series, chartRows, oldSignature);
-    return { rows: cv.rows.length, charts, phases: m.series.phases.length, model: m };
-  },
-
-  /** Clears the whole Painel (it is fully script-rendered): values, formats, merges, validations, rules. */
-  clear_(sheet, rows) {
-    if (sheet.getMaxRows() < rows + 10) sheet.insertRowsAfter(sheet.getMaxRows(), rows + 10 - sheet.getMaxRows());
+    const rowsN = Math.max(cv.rows.length, helper ? helper.lastRow : 1, sheet.getLastRow());
+    const colsN = sheet.getMaxColumns();
+    const grid = [];
+    for (let i = 0; i < rowsN; i++) {
+      const line = [];
+      for (let j = 0; j < colsN; j++) line.push(i < cv.rows.length && j < Dashboard.COLS ? cv.value(i + 1, j + 1) : '');
+      grid.push(line);
+    }
+    if (helper) {
+      helper.blocks.forEach((blk) => blk.cells.forEach((line, i) => line.forEach((v, j) => { grid[blk.row - 1 + i][blk.col - 1 + j] = v; })));
+      helper.signature = JSON.stringify({ ranges: helper.ranges, at: [chartRows.weight, chartRows.waist], v: 1 });
+      grid[0][Dashboard.HELPER_COL] = helper.signature;
+    }
+    const memo = JSON.stringify({ id: sheet.getSheetId(), grid });
+    if (Dashboard.memo_ === memo && Dashboard.same_(Style.read(sheet, 1, 1, rowsN, colsN), grid)) {
+      return { rows: cv.rows.length, charts: sheet.getCharts().length, phases: m.series.phases.length, model: m, skipped: true };
+    }
     const all = sheet.getRange(1, 1, sheet.getMaxRows(), sheet.getMaxColumns());
     all.breakApart();
-    all.clear();
+    Style.write(sheet, 1, 1, grid);
+    all.clearFormat();
     all.clearDataValidations();
     sheet.clearConditionalFormatRules();
     all.setBackground(Style.C.canvas);
+    cv.flushFormats(sheet);
+    Dashboard.frame_(sheet, helper);
+    const charts = Dashboard.charts_(sheet, helper, chartRows, oldSignature);
+    Dashboard.memo_ = memo;
+    return { rows: cv.rows.length, charts, phases: m.series.phases.length, model: m };
   },
 
-  /** Widths, gridlines, frozen rows and the warning-only protection of the Painel. */
-  frame_(sheet) {
+  /** Last grid written in this execution (a second identical render writes nothing). */
+  memo_: null,
+  stamp_: null,
+
+  same_(a, b) {
+    return a.length === b.length && a.every((line, i) => line.length === b[i].length && line.every((v, j) => Tabs.sameCell(v, b[i][j])));
+  },
+
+  /** Grows the Painel grid when needed (logged as a structural change inside an action). */
+  grow_(sheet, rows, cols) {
+    if (sheet.getMaxRows() < rows) sheet.insertRowsAfter(sheet.getMaxRows(), rows - sheet.getMaxRows());
+    if (sheet.getMaxColumns() < cols) {
+      const after = sheet.getMaxColumns();
+      if (ChangeLog.active()) ChangeLog.structure(sheet.getName(), { op: 'insertColumns', sheet: sheet.getName(), after, count: cols - after });
+      sheet.insertColumnsAfter(after, cols - after);
+    }
+  },
+
+  /**
+   * The hidden chart data: {blocks: [{row, col, cells}], ranges: {weight, waist} (row/col/rows/cols),
+   * heads, lastRow, needCols}. See the file header for the layout.
+   */
+  helper_(series) {
+    const H = Dashboard.HELPER_COL;
+    const w = Dashboard.block_(series, 'weight');
+    const c = Dashboard.block_(series, 'waist');
+    const waistCol = H + w.head.length + 1;
+    const n = series.rows.length;
+    const block = (col, b) => ({ row: 2, col, cells: [b.head].concat(b.lines) });
+    return {
+      blocks: [{ row: 1, col: H, cells: [[Dashboard.TEXT.helperCaption]] }, block(H, w), block(waistCol, c)],
+      ranges: {
+        weight: { row: 2, col: H, rows: n + 1, cols: w.head.length },
+        waist: { row: 2, col: waistCol, rows: n + 1, cols: c.head.length },
+      },
+      heads: { weight: w.head, waist: c.head },
+      colors: { weight: w.colors, waist: c.colors },
+      lastRow: n + 2,
+      needCols: waistCol + c.head.length - 1,
+    };
+  },
+
+  /** Widths, gridlines, frozen rows, the hidden chart block and the warning-only protection. */
+  frame_(sheet, helper) {
     Dashboard.WIDTHS.forEach((w, i) => sheet.setColumnWidth(i + 1, w));
     sheet.setColumnWidth(Dashboard.COLS + 1, 16);
     sheet.setHiddenGridlines(true);
     sheet.setFrozenRows(0);
     sheet.setTabColor(Style.LAYER[1].tab);
+    const H = Dashboard.HELPER_COL;
+    if (sheet.getMaxColumns() >= H) sheet.hideColumns(H, sheet.getMaxColumns() - H + 1);
+    if (helper) {
+      Object.keys(helper.ranges).forEach((k) => {
+        const r = helper.ranges[k];
+        if (r.rows > 1) {
+          sheet.getRange(r.row + 1, r.col, r.rows - 1, 1).setNumberFormat('dd/mm/yyyy');
+          sheet.getRange(r.row + 1, r.col + 1, r.rows - 1, r.cols - 1).setNumberFormat('0.0');
+        }
+      });
+    }
     const p = sheet.protect();
     p.setDescription('Painel gerado pelo script (Atualizar painel). Edições serão sobrescritas.');
     p.setWarningOnly(true);
   },
 
   /**
-   * Writes the hidden chart data and creates/updates the two charts (removes foreign charts and,
-   * without data, its own). @returns {number} charts on the Painel
+   * Creates/updates the two charts over the hidden block (removes foreign charts and, without
+   * data, its own). Charts are rebuilt only when the block's shape or their anchors change.
+   * @returns {number} charts on the Painel
    */
-  charts_(sheet, series, chartRows, oldSignature) {
-    const H = Dashboard.HELPER_COL;
+  charts_(sheet, helper, chartRows, oldSignature) {
     const mine = {};
     const titles = Dashboard.CHART_TITLES;
     sheet.getCharts().forEach((c) => {
@@ -616,65 +692,44 @@ const Dashboard = {
       if (key && !mine[key]) mine[key] = c;
       else sheet.removeChart(c);
     });
-    if (!chartRows) {
+    if (!helper || !chartRows) {
       Object.keys(mine).forEach((k) => sheet.removeChart(mine[k]));
-      return 0;
+      return sheet.getCharts().length;
     }
-    const w = Dashboard.block_(series, 'weight');
-    const c = Dashboard.block_(series, 'waist');
-    const waistCol = H + w.width + 2;
-    const needCols = waistCol + c.width;
-    if (sheet.getMaxColumns() < needCols) sheet.insertColumnsAfter(sheet.getMaxColumns(), needCols - sheet.getMaxColumns());
-    const rows = series.rows.length;
-    sheet.getRange(1, H).setValue(Dashboard.TEXT.helperCaption);
-    const put = (col, block) => {
-      sheet.getRange(2, col, 1, block.head.length).setValues([block.head]);
-      sheet.getRange(3, col, rows, block.head.length).setValues(block.lines);
-      sheet.getRange(3, col, rows, 1).setNumberFormat('dd/mm/yyyy');
-      sheet.getRange(3, col + 1, rows, block.head.length - 1).setNumberFormat('0.0');
-    };
-    put(H, w);
-    put(waistCol, c);
-    sheet.hideColumns(H, sheet.getMaxColumns() - H + 1);
-
-    const weightRange = sheet.getRange(2, H, rows + 1, w.head.length);
-    const waistRange = sheet.getRange(2, waistCol, rows + 1, c.head.length);
-    const signature = JSON.stringify({
-      weight: weightRange.getA1Notation(), waist: waistRange.getA1Notation(), heads: [w.head, c.head],
-      at: [chartRows.weight, chartRows.waist], v: 1,
-    });
-    sheet.getRange(1, H + 1).setValue(signature);
     // Same ranges, headers and anchors: the charts already read the new values.
-    if (signature === oldSignature && mine.weight && mine.waist) return sheet.getCharts().length;
-    const build = (key, range, row, block, unit) => {
-      const P = block.head.length - 2;
-      const opts = {};
-      for (let i = 0; i < P; i++) opts[i] = { color: Style.SERIES[i % Style.SERIES.length], lineWidth: 3, pointSize: 4 };
-      opts[P] = { color: Style.MARKER, lineWidth: 0, pointSize: 9, pointShape: 'diamond', visibleInLegend: true };
+    if (helper.signature === oldSignature && mine.weight && mine.waist) return sheet.getCharts().length;
+    const build = (key, unit) => {
+      const r = helper.ranges[key];
+      const head = helper.heads[key];
+      const P = head.length - 2;
+      const series = {};
+      const colors = helper.colors[key];
+      for (let i = 0; i < P; i++) series[i] = { color: colors[i], lineWidth: 3, pointSize: 4 };
+      series[P] = { color: Style.MARKER, lineWidth: 0, pointSize: 9, pointShape: 'diamond' };
       const existing = mine[key];
       const b = (existing ? existing.modify() : sheet.newChart()).asLineChart()
         .clearRanges()
-        .addRange(range)
+        .addRange(sheet.getRange(r.row, r.col, r.rows, r.cols))
         .setNumHeaders(1)
         .setMergeStrategy(Charts.ChartMergeStrategy.MERGE_COLUMNS)
         .setHiddenDimensionStrategy(Charts.ChartHiddenDimensionStrategy.SHOW_BOTH)
-        .setPosition(row, 1, 0, 0)
-        .setOption('title', Dashboard.CHART_TITLES[key])
+        .setPosition(chartRows[key], 1, 0, 0)
+        .setOption('title', titles[key])
         .setOption('width', Dashboard.CHART.width)
         .setOption('height', Dashboard.CHART.height)
-        .setOption('series', opts)
+        .setOption('colors', colors)
+        .setOption('series', series)
         .setOption('interpolateNulls', true)
         .setOption('legend.position', 'bottom')
         .setOption('hAxis.format', 'dd/MM/yy')
         .setOption('vAxis.title', unit)
         .setOption('fontName', Style.FONT)
-        .setOption('backgroundColor', Style.C.surface)
-        .setOption('colors', block.head.slice(1).map((h, i) => (i < P ? Style.SERIES[i % Style.SERIES.length] : Style.MARKER)));
+        .setOption('backgroundColor', Style.C.surface);
       if (existing) sheet.updateChart(b.build());
       else sheet.insertChart(b.build());
     };
-    build('weight', weightRange, chartRows.weight, w, 'kg');
-    build('waist', waistRange, chartRows.waist, c, 'cm');
+    build('weight', 'kg');
+    build('waist', 'cm');
     return sheet.getCharts().length;
   },
 
@@ -682,6 +737,11 @@ const Dashboard = {
   renderSafely_() {
     if (!Tabs.findSheet(Dashboard.TAB)) return null;
     try {
+      // A 3.0 file (not migrated, or the migration was undone) keeps its own Painel.
+      if (Tabs.findSheet('weeks')) {
+        Tabs.invalidate(Tabs.get('weeks').name);
+        if (Tabs.missingColumns('weeks').length) return null;
+      }
       return Dashboard.render();
     } catch (err) {
       console.error(err);

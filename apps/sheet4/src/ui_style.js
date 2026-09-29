@@ -26,6 +26,8 @@
  *                               frozen header and conditional formats of a data tab
  *   Style.canvas(cols)          an in-memory grid of values + formats written in one batch
  *                               (used by the Painel, which is rewritten as values on each render)
+ *   Style.write(sheet, r, c, grid)  writes values; logged as 'cells' changes while an action runs
+ *                               (so an undo restores them); Style.read is the matching reader
  *
  * Only presentation lives here: no data reads, no client values.
  */
@@ -74,7 +76,7 @@ const Style = {
   SERIES: ['#4f46e5', '#0d9488', '#d97706', '#db2777', '#0284c7', '#65a30d', '#7c3aed', '#dc2626'],
   MARKER: '#0f172a',
 
-  ROW: { nav: 24, title: 36, help: 22, header: 38, field: 28, section: 30, spacer: 10, hint: 34, collapsed: 4 },
+  ROW: { nav: 24, title: 36, help: 22, header: 38, field: 28, section: 30, spacer: 10, hint: 40, collapsed: 4 },
 
   WIDTH: { date: 96, datetime: 132, number: 90, integer: 80, id: 76, enum: 150, bool: 70, text: 170, long: 300 },
 
@@ -307,6 +309,59 @@ const Style = {
     return { rules: rules.length };
   },
 
+  /* Values ---------------------------------------------------------------------------------- */
+
+  /** Cells per Log row when a layout write is logged (keeps each JSON well under the cell limit). */
+  LOG_CHUNK: 60,
+
+  /**
+   * Writes a block of values (strings starting with "=" become formulas). When an action is
+   * running (ChangeLog), the cells that change are logged first as 'cells' changes, so the action's
+   * Desfazer restores them — e.g. Setup and the Painel inside "Migrar 3.0 → 4.0". Formats are
+   * never logged.
+   * @param {Sheet} sheet
+   * @param {number} row
+   * @param {number} col
+   * @param {Array<Array<*>>} grid
+   * @returns {number} cells that changed
+   */
+  write(sheet, row, col, grid) {
+    if (!grid.length || !grid[0].length) return 0;
+    const range = sheet.getRange(row, col, grid.length, grid[0].length);
+    const values = range.getValues();
+    const formulas = range.getFormulas();
+    const before = {};
+    const after = {};
+    grid.forEach((line, i) => line.forEach((v, j) => {
+      const old = formulas[i][j] || values[i][j];
+      const next = v === null || v === undefined ? '' : v;
+      if (Tabs.sameCell(old, next)) return;
+      const a1 = `${Style.col(col + j)}${row + i}`;
+      before[a1] = old;
+      after[a1] = next;
+    }));
+    const keys = Object.keys(after);
+    if (!keys.length) return 0;
+    if (typeof ChangeLog !== 'undefined' && ChangeLog.active()) {
+      for (let k = 0; k < keys.length; k += Style.LOG_CHUNK) {
+        const b = {};
+        const a = {};
+        keys.slice(k, k + Style.LOG_CHUNK).forEach((x) => { b[x] = before[x]; a[x] = after[x]; });
+        ChangeLog.track({ kind: 'cells', tab: sheet.getName(), row: null, before: b, after: a });
+      }
+    }
+    range.setValues(grid.map((line) => line.map((v) => (v === null || v === undefined ? '' : v))));
+    return keys.length;
+  },
+
+  /** Current content of a block: formula text where there is one, else the value. */
+  read(sheet, row, col, rows, cols) {
+    const range = sheet.getRange(row, col, rows, cols);
+    const values = range.getValues();
+    const formulas = range.getFormulas();
+    return values.map((line, i) => line.map((v, j) => formulas[i][j] || v));
+  },
+
   /* Canvas ---------------------------------------------------------------------------------- */
 
   /**
@@ -358,11 +413,21 @@ const Style = {
       value(r, c) {
         return rows[r - 1] ? rows[r - 1].cells[c - 1].v : '';
       },
+      /** Values of the grid (rows × cols). */
+      grid() {
+        return rows.map((row) => row.cells.map((c) => c.v));
+      },
+      /** Values (tracked by Style.write) and formats. */
       flush(sheet) {
+        if (!rows.length) return;
+        Style.write(sheet, 1, 1, cv.grid());
+        cv.flushFormats(sheet);
+      },
+      /** Formats, merges, borders and row heights (values are written separately). */
+      flushFormats(sheet) {
         if (!rows.length) return;
         const range = sheet.getRange(1, 1, rows.length, cols);
         const grid = (fn) => rows.map((row) => row.cells.map(fn));
-        range.setValues(grid((c) => c.v));
         range.setBackgrounds(grid((c) => c.f.bg || null));
         range.setFontColors(grid((c) => c.f.fg || Style.C.text));
         range.setFontWeights(grid((c) => (c.f.bold ? 'bold' : 'normal')));

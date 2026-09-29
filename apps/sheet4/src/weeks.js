@@ -687,14 +687,25 @@ const Weeks = {
 
 // A phase change re-analyses the running week only; closed weeks keep their stored values.
 // It never makes the transition fail: an analysis error is logged and the week is refreshed later.
-Core.on('phase.changed', () => {
-  if (!Tabs.findSheet('weeks')) return;
+Core.on('phase.changed', () => Weeks.refreshSafely_());
+
+// Saving a day of the running week re-analyses it (spec §6.2: "recomputed on every save"). A day
+// of a closed week does not touch its frozen row: Recalcular histórico does.
+Core.on('day.saved', (e) => {
+  const d = e && Dates.parse(e.date);
+  if (d && Dates.sameDay(Dates.weekStart(d), Dates.weekStart(Dates.today()))) Weeks.refreshSafely_();
+});
+
+/** refreshCurrent when Semanas exists; an error is logged, never thrown to the caller's save. */
+Weeks.refreshSafely_ = function refreshSafely_() {
+  if (!Tabs.findSheet('weeks')) return null;
   try {
-    Weeks.refreshCurrent();
+    return Weeks.refreshCurrent();
   } catch (err) {
     console.error(err);
+    return null;
   }
-});
+};
 
 // Semanas/Evolução are derived values: their writes are not undoable actions (logged: false), so
 // "Desfazer" keeps undoing the person's last edit.

@@ -457,7 +457,36 @@ formatting) as a preview under `sheets/preview/`.
   weeks, `refreshCurrent` the running week, `recomputeAll` everything (rows updated in place).
   `Evolução` is written with the same rows. Derived writes are not undoable actions (the analysis
   actions are `logged: false`), except when they happen inside a transition.
-- **Hooks**: `phase.changed` → `refreshCurrent` (skipped without a Semanas tab; errors logged, never
-  failing the transition). Actions `Atualizar semana` (quick) and `Recalcular histórico` (group
-  Análise). `dailyRefresh()` closes finished weeks and refreshes the current one. Not yet wired:
-  a "day saved" event from Hoje/Food/Workout to refresh the current week on every save.
+- **Hooks**: `phase.changed`, and `day.saved` for a day of the running week → `refreshCurrent`
+  (skipped without a Semanas tab; errors logged, never failing the transition or the save).
+  Actions `Atualizar semana` (quick) and `Recalcular histórico` (group Análise). `dailyRefresh()`
+  closes finished weeks and refreshes the current one. Food/Workout saves should emit `day.saved`
+  (or call `Weeks.refreshCurrent`) to refresh on every save.
+
+## As built (daily engine)
+
+Files `apps/sheet4/src/diary.js`, `measures.js`, `ui_hoje.js`, `ui_actions.js`. Deviations and choices:
+
+- **Saving from Hoje never erases by omission.** An empty Hoje cell leaves the stored Diário value
+  as it is; typing `-` or `limpar` and saving clears it (não informado); `0` is stored as zero.
+  The help line on Hoje says so. (`Diary.save`: absent key = untouched, `null` = clear.)
+- **Estado do dia** is food-oriented: `Registro alimentar` Completo → Completo (or "Completo —
+  cálculo parcial" with items without calculation); Parcial → Parcial; not declared → Parcial when
+  food was logged (kcal or no-calc items), else Sem registro. A day with only measures is "Sem
+  registro". Food calls `Diary.refreshState(date)` after patching totals.
+- **Baselines on transition** (`transition.prepare`): Peso inicial = average of the weigh-ins of the
+  `analysis.weightTrendDays` days ending the day before the start, else the latest weigh-in on or
+  before the start; Cintura inicial = latest waist on or before the start (Diário wins over Medidas
+  on the same day). Values given by the caller are kept; no data leaves them empty.
+- **phase.changed** re-stamps Diário ids and Medidas `Objetivo` of rows dated on or after the change
+  (inside the transition action, so undo reverts it).
+- **Hoje layout** is a fixed cell map in `Hoje.layout()` (label A, value B; training table A–M rows
+  44–55; Meta × realizado rows 60–65). Hoje writes are not logged: the screen is a view; undo
+  restores the data tabs. "Meta × realizado" compares only complete days; partial days show
+  "Parcial" and unknown values stay blank (never 0).
+- **Actions**: Carregar dia, Salvar dia, Ir para hoje, Limpar tela (quick) and Ir para data (menu
+  only, it prompts; prompts do not work on mobile). Loading and clearing are not undoable actions.
+  `onEditInstalled` also stamps the Objetivo of a row typed directly on Medidas e fotos. Event
+  `hoje.loaded` ({date}) lets Food/Workout fill their cards; `day.saved` follows `Diary.save`.
+- The core registry tests (`core_actions.test.js`) now start from a registry with only the core
+  action, since feature files register theirs at load time.

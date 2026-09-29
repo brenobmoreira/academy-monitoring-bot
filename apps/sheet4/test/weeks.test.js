@@ -270,3 +270,13 @@ test('phaseSummary: one entry per objective with dates, changes inside the phase
   assert.match(p[2].outcome, /^Em andamento/);
   assert.equal(p[2].end, null);
 });
+
+test('day.saved refreshes the running week only', () => {
+  const ctx = setup();
+  ctx.Weeks.closeFinished();
+  const closed = cells(ctx, { keepComputedAt: true });
+  ctx.Core.emit('day.saved', { date: ctx.Dates.fromKey('2026-12-01') });
+  eq(cells(ctx, { keepComputedAt: true }), closed, 'a day of a closed week leaves Semanas alone');
+  ctx.Core.emit('day.saved', { date: ctx.Dates.fromKey('2026-12-15') });
+  assert.equal(ctx.Weeks.stored('2026-12-15').foodCoverage, '2 de 2 dias');
+});

@@ -6,6 +6,18 @@ const { boot, plain } = require('./core_helpers');
 const eq = (a, b, m) => assert.deepEqual(plain(a), b, m);
 const noop = () => null;
 
+/**
+ * A context whose registry holds only the core action (undoLast): feature files (ui_actions.js,
+ * food.js…) register their own actions at load time, which these registry tests must not see.
+ */
+function coreOnly(ctx) {
+  Object.keys(ctx.Actions.registry_).filter((id) => id !== 'undoLast').forEach((id) => {
+    delete ctx.Actions.registry_[id];
+    delete ctx[ctx.Actions.functionName(id)];
+  });
+  return ctx;
+}
+
 /** Registers a representative set of actions in a scrambled order. */
 function registerSample(A) {
   // Modules register their own actions at load; keep only the core one so the sample is exact.
@@ -19,7 +31,7 @@ function registerSample(A) {
 }
 
 test('the menu is grouped as spec §5.3 whatever the registration order', () => {
-  const ctx = boot();
+  const ctx = coreOnly(boot());
   registerSample(ctx.Actions);
   eq(ctx.Actions.menu().map((e) => (e.items ? [e.label, e.items.map((i) => i.label)] : e.label)), [
     ['Hoje', ['Carregar dia', 'Salvar dia']],
@@ -38,14 +50,14 @@ test('the menu is grouped as spec §5.3 whatever the registration order', () => 
 });
 
 test('quickList lists quick actions in menu order after the empty marker', () => {
-  const ctx = boot();
+  const ctx = coreOnly(boot());
   registerSample(ctx.Actions);
   eq(ctx.Actions.quickList(), ['—', 'Carregar dia', 'Salvar dia', 'Lançar alimento', 'Desfazer última alteração']);
   assert.equal(ctx.Actions.byLabel('Salvar dia').id, 'saveDay');
 });
 
 test('register validates its input and defines a global function per action', () => {
-  const ctx = boot();
+  const ctx = coreOnly(boot());
   const A = ctx.Actions;
   assert.throws(() => A.register({ id: 'bad id', label: 'x', group: 'today', run: noop }), /Invalid action id/);
   assert.throws(() => A.register({ id: 'x', group: 'today', run: noop }), /needs a label/);
@@ -58,7 +70,7 @@ test('register validates its input and defines a global function per action', ()
 });
 
 test('run takes the lock, records one undoable action and undo reverts it', () => {
-  const ctx = boot({ tabs: { diary: [{ date: '2026-09-28', weightKg: 67 }] } });
+  const ctx = coreOnly(boot({ tabs: { diary: [{ date: '2026-09-28', weightKg: 67 }] } }));
   ctx.Actions.register({
     id: 'saveDay', label: 'Salvar dia', group: 'today', quick: true,
     run: () => { ctx.Tabs.update('diary', 6, { weightKg: 66 }); ctx.Tabs.append('diary', { date: '2026-09-29', weightKg: 65.8 }); return { message: 'Dia salvo.' }; },
@@ -77,7 +89,7 @@ test('run takes the lock, records one undoable action and undo reverts it', () =
 });
 
 test('errors become a toast and {ok: false}; the partial writes are rolled back', () => {
-  const ctx = boot({ tabs: { diary: [{ date: '2026-09-28', weightKg: 67 }] } });
+  const ctx = coreOnly(boot({ tabs: { diary: [{ date: '2026-09-28', weightKg: 67 }] } }));
   ctx.Actions.register({
     id: 'broken', label: 'Quebrada', group: 'analysis',
     run: () => { ctx.Tabs.update('diary', 6, { weightKg: 1 }); throw new Error('Peso fora do intervalo.'); },

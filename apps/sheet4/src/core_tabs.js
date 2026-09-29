@@ -40,7 +40,8 @@ const Tabs = {
     RECOMMENDATIONS: ['MANTER', 'REVISAR ENERGIA', 'REVISAR MACROS', 'REVISAR TREINO', 'REVISAR RECUPERAÇÃO',
       'REVISAR OBJETIVO/FASE', 'DADOS INSUFICIENTES'],
     AUDIT_SEVERITY: ['Erro', 'Aviso', 'Info'],
-    LOG_KIND: ['Alteração', 'Inclusão', 'Exclusão', 'Células'],
+    AUDIT_STATE: ['Aberto', 'Corrigido', 'Revisar'],
+    LOG_KIND: ['Alteração', 'Inclusão', 'Exclusão', 'Células', 'Estrutura'],
     SEX: ['M', 'F'],
     YES_NO: ['Sim', 'Não'],
   },
@@ -108,6 +109,8 @@ const Tabs = {
     let sheet = Tabs.findSheet(id);
     if (sheet) return sheet;
     sheet = SpreadsheetApp.getActive().insertSheet(spec.name);
+    // A new sheet has 26 columns; wide tabs (Semanas) need more before the header is written.
+    if (spec.columns.length > sheet.getMaxColumns()) sheet.insertColumnsAfter(sheet.getMaxColumns(), spec.columns.length - sheet.getMaxColumns());
     sheet.getRange(Tabs.TITLE_ROW, 1).setValue(spec.title || spec.name);
     if (spec.help) sheet.getRange(Tabs.HELP_ROW, 1).setValue(spec.help);
     if (spec.columns.length) sheet.getRange(spec.headerRow, 1, 1, spec.columns.length).setValues([Tabs.headers(id)]);
@@ -876,16 +879,17 @@ const Tabs = {
 
   table('audit', {
     name: 'Auditoria', layer: 3, title: 'Auditoria',
-    help: 'Relatório da última auditoria e da migração. Não altera dados.',
+    help: 'Problemas encontrados pela auditoria e tudo o que a migração alterou (com o valor anterior). A auditoria não altera dados.',
     columns: [
-      col('at', 'Quando', 'datetime', 'calc'),
-      col('area', 'Área', 'text', 'calc'),
+      col('at', 'Data', 'datetime', 'calc'),
+      col('severity', 'Severidade', 'enum', 'calc', { enum: E.AUDIT_SEVERITY }),
       col('tab', 'Aba', 'text', 'calc'),
-      col('cell', 'Célula', 'text', 'calc'),
-      col('severity', 'Gravidade', 'enum', 'calc', { enum: E.AUDIT_SEVERITY }),
-      col('finding', 'Achado', 'text', 'calc'),
+      col('cell', 'Célula/linha', 'text', 'calc'),
+      col('finding', 'Problema', 'text', 'calc'),
+      col('action', 'Correção', 'text', 'calc'),
+      col('state', 'Estado', 'enum', 'calc', { enum: E.AUDIT_STATE }),
+      col('code', 'Código', 'text', 'calc'),
       col('before', 'Valor anterior', 'text', 'calc'),
-      col('action', 'Ação tomada', 'text', 'calc'),
     ],
   });
 

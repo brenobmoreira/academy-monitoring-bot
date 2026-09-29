@@ -8,6 +8,8 @@ const noop = () => null;
 
 /** Registers a representative set of actions in a scrambled order. */
 function registerSample(A) {
+  // Only the core's own action stays; feature modules (wizard.js…) register theirs at load time.
+  Object.keys(A.registry_).forEach((id) => { if (id !== 'undoLast') delete A.registry_[id]; });
   A.register({ id: 'setup', label: 'Configuração inicial', group: 'system', order: 10, run: noop });
   A.register({ id: 'newGoal', label: 'Nova meta', group: 'phase', order: 10, run: noop });
   A.register({ id: 'saveDay', label: 'Salvar dia', group: 'today', order: 20, quick: true, run: noop });

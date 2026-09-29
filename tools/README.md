@@ -9,6 +9,7 @@ and the JSON fixtures used by the sheet 4.0 fakes (`apps/sheet4/test/fakes.js`).
 | `python3 tools/xlsx_to_fixture.py IN.xlsx OUT.json` | Converts any export |
 | `python3 tools/fixture_to_xlsx.py IN.json OUT.xlsx` | Writes a fixture or a fake `snapshot()` back to `.xlsx`, e.g. `sheets/preview/breno_4_0.xlsx` |
 | `python3 tools/check_roundtrip.py` | Checks that xlsx → json → xlsx → json is stable for `sheets/*.xlsx` |
+| `node tools/migrate_preview.js [breno\|zoio\|all] [--now 2026-09-29]` | Runs the 3.0 → 4.0 migration on the fixture with `clients/<name>.json` and writes `sheets/preview/<name>_4_0.xlsx` |
 
 To preview a migrated fake spreadsheet, dump `snapshot(ctx)` to a JSON file in a test or script
 and run `fixture_to_xlsx.py` on it.

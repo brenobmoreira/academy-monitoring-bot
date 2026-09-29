@@ -412,3 +412,51 @@ formatting) as a preview under `sheets/preview/`.
 2. Authorize the installable triggers (Setup creates them).
 3. New Web App deployment version for the bot; redeploy the agent.
 4. Review the values flagged as estimates: activity factor, Zoio's protein range.
+
+## As built (migration/audit)
+
+Files: `apps/sheet4/src/migrate.js` (`Migrate`), `audit.js` (`Audit`), `wizard.js` + `wizard.html`
+(`Wizard`, menu Sistema → Configuração inicial · Migrar 3.0 → 4.0 · Auditoria), client data in
+`clients/breno.json` and `clients/zoio.json` (format `academy-client/1`: `config` keyed by Config
+keys, `otherClientNames`, `history.{objectives,goals,plans}` with ids and real dates, `review` flags),
+preview tool `tools/migrate_preview.js` → `sheets/preview/<name>_4_0.xlsx`.
+
+- **Auditoria** columns: `Data | Severidade | Aba | Célula/linha | Problema | Correção | Estado |
+  Código | Valor anterior` (Estado: `Aberto` / `Corrigido` / `Revisar`). `Audit.findings()` writes
+  nothing; `Audit.run()` appends its findings. Checks: tabs missing or under a 3.0 name, spec columns
+  missing, 3.0 header texts, technical dates (< 2000; time-of-day values on 30/12/1899 excluded),
+  formula errors, fixed-range formulas (≥ 100 rows) in data tabs, validations whose named range
+  does not exist, text dates / dates with a time in date columns, other clients' names (Config
+  `system.otherClientNames`, whole words, accents ignored), stale 3.0 status texts (title/help rows,
+  layout tabs, profile) and a typed "Status da ficha" contradicting Fichas, `Versions.validate()` of
+  the three entities plus "none in force today", required Config values.
+- **Migrate.run(client)** is one undoable action ("Migrar 3.0 → 4.0"), idempotent through
+  `system.schemaVersion`, and writes every change (with the previous value) to Auditoria, then the
+  audit that is still open and the client's `review` flags. Order: rename tabs in place → create
+  missing tabs → Config (3.0 profile rewritten as key/value; every 3.0 row quoted in Auditoria;
+  height m → cm; client JSON wins over the 3.0 value, differences flagged `Revisar`) → per data tab:
+  title/help from `Tabs.SPEC`, per-row formulas removed in script-written tabs (Diário, Semanas,
+  Progressão, Evolução), header rebuilt in spec order when the tab has no data (or is
+  script-rendered and incompatible, its 3.0 labels quoted), otherwise 3.0 header texts renamed and
+  missing columns appended at the right; text dates / times → pure dates → versions (starts from
+  `history`, else the valid date, else the plan's 3.0 Vigência, else `client.startDate` for the first
+  version flagged `Revisar`; ends = next start − 1; status derived; goal carbs/tolerances/TMB/gasto;
+  O001 created with the targets of the goal in force; links filled) → other-client sentences moved
+  to Auditoria → stale layout status texts replaced → ids by date (`Days.restampAll`; empty id cells
+  of Registro/Medidas/Revisões) → any remaining technical date cleared → 3.0 named ranges used by
+  validations recreated (`ListaExercicios` → Exercícios column) → Painel formulas removed (typed
+  text kept) → schema marker. `Weeks.recomputeAll` and `Setup.apply` then run as separate actions
+  when defined (reported as `ausente` otherwise).
+- Core changes: Config keys `client.notes` (profile facts) and `system.otherClientNames`; Auditoria
+  columns as above and `ENUMS.AUDIT_STATE`; change-log kind `structure` (`Estrutura`: renameSheet,
+  insertSheet, insertColumns, namedRange) so Undo reverts tab renames/creations; Undo now checks
+  layout-cell changes for conflicts (it skipped them); `Tabs.ensure` adds columns for tabs wider
+  than a new sheet's 26.
+- Undo of the migration restores the 3.0 file exactly (tested on both exports) except the hidden
+  `Log` tab, cached formula values (recomputed by Sheets) and anything Setup/Weeks did afterwards
+  (their own actions). Formats, validations, filters and conditional formats are never touched by
+  the migration; the 3.0 ones on rebuilt headers (Diário, Semanas, Progressão) stay until
+  `Setup.apply` rewrites them.
+- Left for later modules: Hoje keeps its 3.0 formulas (they read Diário by column letter and now
+  show nothing useful) until the Hoje module renders it; Painel keeps its typed 3.0 texts and charts
+  until Dashboard renders it; Guia texts are only cleaned of other-client sentences.

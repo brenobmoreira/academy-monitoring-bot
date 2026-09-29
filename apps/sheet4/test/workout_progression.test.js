@@ -40,7 +40,7 @@ test('weekSummary: concluded sessions, volume by group (work sets only), progres
   });
   eq(w.sessionList, [{ date: '2026-10-13', session: 'Upper', state: 'Concluído' }, { date: '2026-10-15', session: 'Lower', state: 'Parcial' }]);
   const empty = ctx.Progression.weekSummary('2026-09-28');
-  eq([empty.sessions, empty.workVolume, empty.progressedExercises], [0, 0, []]);
+  eq([empty.sessions, empty.workVolume, empty.progressedExercises, empty.comparedExercises], [0, null, null, 0], 'nothing measured → null, not 0');
   assert.equal(empty.end, '2026-10-04');
 });
 

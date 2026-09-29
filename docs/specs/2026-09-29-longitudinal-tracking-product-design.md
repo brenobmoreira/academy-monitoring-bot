@@ -413,6 +413,56 @@ formatting) as a preview under `sheets/preview/`.
 3. New Web App deployment version for the bot; redeploy the agent.
 4. Review the values flagged as estimates: activity factor, Zoio's protein range.
 
+## As built (weekly engine)
+
+`apps/sheet4/src/weeks.js` (`Weeks`, `dailyRefresh`), `analysis.js` (`Analysis`, `Rules`),
+`recommend.js` (`Recommend`); tests `test/weeks.test.js`, `test/analysis.test.js`.
+
+- **By date, never by storage.** `Weeks.compute(start)` reads Diário, Medidas e fotos, Registro de
+  treino, Exercícios, Objetivos, Metas and Fichas once (a snapshot) and resolves versions by date.
+  Ids are those in force on the Sunday; `Transição na semana` lists every id change from Tuesday to
+  Sunday ("Objetivo O002 → O003 em 19/11/2026"). The history an analysis sees (previous 4 weeks)
+  is recomputed the same way, so `store` and `recomputeAll` give identical rows and a later phase
+  change alters nothing before it.
+- **Weight**: weigh-ins Mon..as-of; 7-day (`analysis.weightTrendDays`) average at the Sunday (or
+  today for the running week) vs the previous Sunday; %/week scaled to 7 days for the running week.
+  **Waist**: last value of the week, Medidas wins over Diário on the same day; delta vs the latest
+  earlier measurement. **Food**: only days with `Registro alimentar = Completo`, kcal present and
+  no item without calculation; adherence of each day against the goal in force *on that day*
+  (kcal ± tolerance, protein in [mín, máx] with mín defaulting to the target, fat ± tolerance);
+  coverage "N de D dias" with D = days elapsed. **Training**: `Progression.weekSummary(start, asOf)`
+  when defined; otherwise sessions = distinct sessions with a `Concluído` row, volume = Σ kg×reps of
+  Work 1/Work 2 only (partial sessions included), progression = top work set vs the previous
+  session of the exercise (more kg, or same kg and more reps, at the same RIR or more).
+- **Status**: rules return issues (`warn`/`off`) and a positive pattern; any `off` or 2 `warn` →
+  Fora do esperado, 1 `warn` → Atenção, none + positive → No caminho (none, no positive → Atenção).
+  Recovery signals (sono/cansaço/dor) downgrade No caminho to Atenção. Missing weight data (or
+  training data for `performance`) → Dados insuficientes; a week with no objective too.
+- **Default ranges (%/sem)**: adaptacao −0.5..0.5, recomposicao −0.5..0.25, manutencao −0.3..0.3,
+  manutencao_pos_cut −0.2..0.4, deficit −1.0..−0.5, ganho_controlado 0.1..0.3, ganho_agressivo
+  0.3..0.6, performance −0.25..0.5, personalizado none; the objective row overrides them.
+- **New Config keys** (Análise): `analysis.weightFastPctPerWeek` (0.5, lento/rápido boundary),
+  `analysis.adherenceMin` (0.7, fraction of complete days on target), `analysis.phaseReviewStreak`
+  (3, weeks for REVISAR OBJETIVO/FASE).
+- **Recommendation**: spec §8 precedence. REVISAR ENERGIA needs the weight out of range with the
+  week Fora do esperado (or Atenção two weeks running in the same objective) *and* the diet
+  followed (otherwise REVISAR MACROS). REVISAR OBJETIVO/FASE: phase ≥ `minWeeksForPhaseReview`
+  weeks and the last 3 weeks of that objective No caminho with the rule's expectation met
+  (recomposição: waist down since the start by ≥ noise; déficit: weight down; ganho: weight up;
+  manutenção/personalizado: on track; adaptação: coverage reached; performance: progression), or 3
+  Fora do esperado when no energy/macros/training cause applies. `nextReview` = Sunday +
+  `analysis.reviewEveryDays`.
+- **Storage**: `Semanas` gains `Exercícios com regressão` and `Faixa alvo %/sem`. A closed week's
+  row is final once `Calculado em` is after its Sunday; `closeFinished` writes only non-final closed
+  weeks, `refreshCurrent` the running week, `recomputeAll` everything (rows updated in place).
+  `Evolução` is written with the same rows. Derived writes are not undoable actions (the analysis
+  actions are `logged: false`), except when they happen inside a transition.
+- **Hooks**: `phase.changed`, and `day.saved` for a day of the running week → `refreshCurrent`
+  (skipped without a Semanas tab; errors logged, never failing the transition or the save).
+  Actions `Atualizar semana` (quick) and `Recalcular histórico` (group Análise). `dailyRefresh()`
+  closes finished weeks and refreshes the current one. Food/Workout saves should emit `day.saved`
+  (or call `Weeks.refreshCurrent`) to refresh on every save.
+
 ## As built (daily engine)
 
 Files `apps/sheet4/src/diary.js`, `measures.js`, `ui_hoje.js`, `ui_actions.js`. Deviations and choices:
@@ -440,6 +490,51 @@ Files `apps/sheet4/src/diary.js`, `measures.js`, `ui_hoje.js`, `ui_actions.js`. 
   `hoje.loaded` ({date}) lets Food/Workout fill their cards; `day.saved` follows `Diary.save`.
 - The core registry tests (`core_actions.test.js`) now start from a registry with only the core
   action, since feature files register theirs at load time.
+
+## As built (food)
+
+Files `apps/sheet4/src/food_units.js` (`Units`), `food_catalog.js` (`Foods`), `food_log.js`
+(`FoodLog`, `FoodScreen`, actions), `food_favorites.js` (`Favorites`), `food_plan.js` (`BaseDiet`,
+`Equivalences`). Deviations and choices:
+
+- **Units**: g/mg/kg and ml/l convert within their family; mass ↔ volume is refused (no density);
+  any other unit is a household measure and needs Alimentos `Medida caseira` + `Base por medida`
+  (the unit must match), else a Portuguese error ("2 un nunca vira 2 g"). Household conversions are
+  flagged estimated.
+- **Alimentação row**: quantity/unit stored in the food's base unit; the typed amount goes to
+  Observação ("Informado: 2 un (medida caseira, estimada)"). `Cálculo` = Estimado when a household
+  measure was used, Medição = Estimada, the food's Fonte is Estimativa/Pendente, or the favourite
+  ingredient was estimated; `Conferência` says why (or OK). Sem cálculo rows keep macros empty and
+  Fonte = Pendente. `ID lançamento` = `A<yyyyMMdd>-<nnn>` per date. Future dates are refused.
+- **Fonte mapping** (3.0 free text → enum, first match on quality · reference · name): an exact enum
+  value in `Qualidade da referência` wins; "pendente" → Pendente; estimativa/estimado/"a conferir"/
+  "conferir rótulo" → Estimativa; "rótulo confirmado/conferido/verificado" → Rótulo confirmado;
+  TACO/TBCA/USDA/"fonte confiável" → TACO/fonte confiável; otherwise Pendente. Both 3.0 catalogues
+  map to 92 TACO + 18 Estimativa.
+- **Day totals**: after every change `Days.patch(date, {kcal, protein, carbs, fat, fiber,
+  noCalcItems, estimatedItems})` (sums over Calculado + Estimado rows, 0.1 rounding; macros null
+  without calculable rows; all null when the day has no food row) and `Diary.refreshState(date)`.
+- **Favourites**: launching expands to **one Alimentação row per ingredient** (so rows can be
+  corrected/deleted one by one and each keeps its own Fonte/Cálculo), all tagged
+  `Favorita / versão` = "Nome · vN"; quantities × portions, macros recomputed from the current
+  catalogue. Creating from the meal of a date never logs consumption; the same name saved again is
+  the next version (older ones kept); identical ingredients to the latest version are refused.
+  `Ingredientes` gained a `Versão` column (the only change to `Tabs.SPEC`); its `Conferência` keeps
+  the source row's Cálculo.
+- **Copy**: copies stored values (not recomputed) and prefixes Observação with
+  "Cópia de dd/mm/yyyy"; the same meal of the same date copied again to the same day is refused
+  ("Todas" is refused when any of its meals was already copied); copying a date onto itself too.
+- **Correct/Delete selected row**: act on the Alimentação selection; correction asks for the new
+  amount in a dialog ("150" or "2 un"; menu only — prompts do not work on mobile, so these two are
+  not quick actions).
+- **Dieta base / Equivalências / Cadastro válido**: script-written values replace the 3.0 VLOOKUP
+  formulas ("Recalcular dieta base e equivalências"); a food that cannot be computed leaves the
+  cells empty (never 0 or #N/A); the totals row is the one whose Refeição is "Total da proposta".
+  Results match the 3.0 cached values of both exports within rounding. The planned total
+  (`BaseDiet.totals()`) is for display only and never feeds Diário or indicators.
+- **Hoje wiring** (`FoodScreen`): reads `Hoje.read().food` + `Hoje.date()`, clears only the
+  consumed fields with `Hoje.write('food', {…: null})` (meal and unit stay), re-renders Meta ×
+  realizado when Hoje shows the changed date.
 
 ## As built (workout)
 
@@ -472,7 +567,8 @@ Files: `apps/sheet4/src/workout.js` (`Exercises`, `Workouts`, `TrainingScreen`/`
   `Equipamento / carga`; a set progresses when load goes up at ≥ reps or reps go up at the same
   load, with RIR not lower. `Progression.weekSummary(start, end)` feeds §6.1 (sessions,
   partialSessions, workSets, workVolume, workVolumeByGroup, progressed/held/regressedExercises:
-  last entry in the week vs the last entry before it). `Progression.suggestions(date)` is pure:
+  last entry in the week vs the last entry before it; volume and the lists are null when nothing was
+  measured; `volumeByGroup` alias for `Weeks`). `Progression.suggestions(date)` is pure:
   "top of the rep range in every prescribed work set at the same load for
   `analysis.progressionSessions` (2) sessions → +`routine.loadIncrementKg` (2,5 kg)", and
   "regressed N times in a row → review". The action *Sugestões de progressão* renders `Progressão`

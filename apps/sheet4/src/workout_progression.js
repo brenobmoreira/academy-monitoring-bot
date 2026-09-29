@@ -134,8 +134,10 @@ const Progression = {
   /**
    * Training aggregate of [start, end] for the weekly engine (spec §6.1):
    * {start, end, sessions (concluded), partialSessions, sessionList: [{date, session, state}],
-   *  workSets, workVolume (Σ work kg×reps), workVolumeByGroup: {group: volume}, comparedExercises,
-   *  progressedExercises: [names], heldExercises, regressedExercises}
+   *  workSets, workVolume (Σ work kg×reps; null when no work set), workVolumeByGroup (alias
+   *  volumeByGroup): {group: volume}, comparedExercises, progressedExercises: [names],
+   *  heldExercises, regressedExercises (the three lists are null when nothing could be compared:
+   *  unknown is not zero)}
    * Volume counts every saved work set in the range (a partial session's sets were done too);
    * `sessions` counts only concluded ones. Each exercise trained in the range is compared once:
    * its last entry in the range against the last entry before the range (or, when there is none,
@@ -192,12 +194,17 @@ const Progression = {
       else if (r === Progression.RESULT.DOWN) regressed.push(cur.exercise);
       else held.push(cur.exercise);
     });
+    const measured = compared > 0;
     return {
       start: Dates.key(s), end: Dates.key(e),
       sessions: sessionList.filter((x) => x.state === Sessions.STATE.DONE).length,
       partialSessions: sessionList.filter((x) => x.state !== Sessions.STATE.DONE).length,
-      sessionList, workSets, workVolume: Math.round(volume * 100) / 100, workVolumeByGroup: byGroup,
-      comparedExercises: compared, progressedExercises: progressed, heldExercises: held, regressedExercises: regressed,
+      sessionList, workSets, workVolume: workSets ? Math.round(volume * 100) / 100 : null,
+      workVolumeByGroup: byGroup, volumeByGroup: byGroup,
+      comparedExercises: compared,
+      progressedExercises: measured ? progressed : null,
+      heldExercises: measured ? held : null,
+      regressedExercises: measured ? regressed : null,
     };
   },
 

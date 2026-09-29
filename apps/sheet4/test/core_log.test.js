@@ -209,3 +209,20 @@ test('Core.on/emit call listeners in order with the payload', () => {
   ctx.Core.emit('other', {});
   assert.deepEqual(calls, [['a', 1], ['b', 1]]);
 });
+
+test('action.committed fires once after the outermost action and after an undo, with the tabs written', () => {
+  const ctx = boot({ tabs: { diary: diaryRows() } });
+  const events = [];
+  ctx.Core.on('action.committed', (e) => events.push(plain(e)));
+  ctx.ChangeLog.run('fora', () => {
+    ctx.ChangeLog.run('dentro', () => ctx.Tabs.update('diary', 6, { weightKg: 60 }));
+    assert.equal(events.length, 0, 'nested runs do not commit');
+  });
+  assert.throws(() => ctx.ChangeLog.run('falha', () => { ctx.Tabs.update('diary', 7, { weightKg: 1 }); throw new Error('x'); }));
+  ctx.ChangeLog.run('nada', () => null);
+  ctx.Undo.last();
+  eq(events, [
+    { label: 'fora', tabs: ['Diário'] },
+    { label: 'fora', tabs: ['Diário'], undo: true },
+  ]);
+});

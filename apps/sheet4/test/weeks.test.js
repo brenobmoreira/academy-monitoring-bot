@@ -235,12 +235,12 @@ test('a closed week stored while it was running is rewritten once when it closes
   eq(ctx.Weeks.closeFinished().written, []);
 });
 
-test('phase.changed refreshes the current week only; the action and dailyRefresh are wired', () => {
+test('a committed phase change refreshes the current week only; the action and dailyRefresh are wired', () => {
   const ctx = setup();
   ctx.Weeks.closeFinished();
   const closedCount = ctx.Tabs.read('weeks').length;
   assert.equal(ctx.Weeks.stored('2026-12-15'), null);
-  ctx.Core.emit('phase.changed', { date: ctx.Dates.today() });
+  ctx.Core.emit('action.committed', { label: 'Mudar objetivo/fase', tabs: ['Objetivos', 'Revisões'] });
   assert.equal(ctx.Tabs.read('weeks').length, closedCount + 1);
   assert.equal(ctx.Actions.get('weeksRefresh').group, 'analysis');
   assert.equal(ctx.Actions.get('weeksRefresh').label, 'Atualizar semana');
@@ -253,7 +253,7 @@ test('phase.changed refreshes the current week only; the action and dailyRefresh
   assert.equal(typeof ctx.dailyRefresh, 'function');
 });
 
-test('phase.changed without a Semanas tab does nothing (transitions never fail because of it)', () => {
+test('a transition without a Semanas tab does nothing (transitions never fail because of it)', () => {
   const ctx = boot({ tabs: { objectives: history().objectives, goals: [], plans: [], reviews: [] }, now: NOW });
   const r = ctx.Transition.apply({ date: '2026-12-15', objective: { name: 'X', analysisType: 'manutencao' }, reason: 'y' });
   assert.equal(r.ok, true);
@@ -277,12 +277,18 @@ test('phaseSummary: one entry per objective with dates, changes inside the phase
   assert.equal(p[2].end, null);
 });
 
-test('day.saved refreshes the running week only', () => {
+test('an action that writes a source tab refreshes the running week once; closed weeks stay frozen', () => {
   const ctx = setup();
   ctx.Weeks.closeFinished();
   const closed = cells(ctx, { keepComputedAt: true });
-  ctx.Core.emit('day.saved', { date: ctx.Dates.fromKey('2026-12-01') });
-  eq(cells(ctx, { keepComputedAt: true }), closed, 'a day of a closed week leaves Semanas alone');
-  ctx.Core.emit('day.saved', { date: ctx.Dates.fromKey('2026-12-15') });
+  let refreshes = 0;
+  const original = ctx.Weeks.refreshCurrent;
+  ctx.Weeks.refreshCurrent = () => { refreshes += 1; return original(); };
+  ctx.Core.emit('action.committed', { label: 't', tabs: ['Semanas'] });
+  assert.equal(refreshes, 0, 'derived tabs do not trigger a refresh');
+  ctx.Core.emit('action.committed', { label: 't', tabs: ['Diário', 'Alimentação'] });
+  assert.equal(refreshes, 1);
+  const after = cells(ctx, { keepComputedAt: true });
+  eq(after.slice(0, closed.length - 1), closed.slice(0, closed.length - 1), 'closed weeks unchanged');
   assert.equal(ctx.Weeks.stored('2026-12-15').foodCoverage, '2 de 2 dias');
 });

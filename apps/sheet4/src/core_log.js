@@ -7,7 +7,9 @@
  *   {kind: 'update'|'append'|'delete'|'cells', tab: sheet name, row, before, after}
  * with before/after as {header text (or '#col', or A1 for 'cells'): value}; `before` is null for
  * an append and `after` null for a delete. JSON encodes dates as {"$d": iso} and formulas as
- * {"$f": "=..."}.
+ * {"$f": "=..."}. Structural changes (used by the migration) are kind 'structure' with
+ * after = {op, ...}: renameSheet {from, to}, insertSheet {name}, insertColumns {after, count},
+ * namedRange {name}; ChangeLog.structure() logs one before it is made, and Undo reverses it.
  *
  * Undo.last() restores the latest action not yet undone, across every tab it touched, in reverse
  * order: updated cells get their old values, appended rows are deleted, deleted rows are
@@ -59,7 +61,7 @@ const Core = {
 };
 
 const ChangeLog = {
-  KIND_LABELS: { update: 'Alteração', append: 'Inclusão', delete: 'Exclusão', cells: 'Células' },
+  KIND_LABELS: { update: 'Alteração', append: 'Inclusão', delete: 'Exclusão', cells: 'Células', structure: 'Estrutura' },
 
   /** The action being recorded: {id, label} or null. */
   current_: null,
@@ -108,6 +110,16 @@ const ChangeLog = {
     if (!ChangeLog.current_) return;
     const row = ChangeLog.write_(ChangeLog.current_, change);
     ChangeLog.pending_.push({ change, logRow: row });
+  },
+
+  /**
+   * Logs a structural change (sheet rename/insert, columns inserted, named range created) just
+   * before the caller makes it. `tab` is the sheet name after the change.
+   * @param {string} tab
+   * @param {{op: string}} after
+   */
+  structure(tab, after) {
+    ChangeLog.track({ kind: 'structure', tab, row: null, before: null, after });
   },
 
   /**
@@ -269,7 +281,7 @@ const Undo = {
    * reverse order, so by the time c is reverted its original row number is right again.
    */
   currentRow_(c, later) {
-    if (c.kind === 'cells') return c.row;
+    if (c.kind === 'cells' || c.kind === 'structure') return 0; // not row-addressed
     let row = c.row;
     for (let i = 0; i < later.length; i++) {
       const l = later[i];
@@ -282,6 +294,7 @@ const Undo = {
 
   /** Why a change can no longer be undone, or null. */
   conflict_(c) {
+    if (c.kind === 'structure') return Undo.structureConflict_(c.after || {});
     const sheet = SpreadsheetApp.getActive().getSheetByName(c.tab);
     if (!sheet) return `aba "${c.tab}" não existe mais`;
     if (c.kind === 'delete') return null;
@@ -303,6 +316,7 @@ const Undo = {
 
   /** Restores one change (no conflict check, no logging). */
   revert_(c) {
+    if (c.kind === 'structure') { Undo.revertStructure_(c.after || {}); Tabs.invalidate(); return; }
     const sheet = SpreadsheetApp.getActive().getSheetByName(c.tab);
     if (!sheet) throw new Error(`Aba "${c.tab}" não encontrada`);
     if (c.kind === 'append') {
@@ -314,6 +328,38 @@ const Undo = {
       Undo.locate_(sheet, c, c.before || {}).forEach((x) => { if (x.range) Undo.setCell_(x.range, x.value); });
     }
     Tabs.invalidate(c.tab);
+  },
+
+  /** Why a structural change can no longer be undone (its result is gone), or null. */
+  structureConflict_(s) {
+    const ss = SpreadsheetApp.getActive();
+    switch (s.op) {
+      case 'renameSheet':
+        if (!ss.getSheetByName(s.to)) return `aba "${s.to}" não existe mais`;
+        return ss.getSheetByName(s.from) ? `já existe uma aba "${s.from}"` : null;
+      case 'insertSheet':
+        return ss.getSheetByName(s.name) ? null : `aba "${s.name}" não existe mais`;
+      case 'insertColumns': {
+        const sheet = ss.getSheetByName(s.sheet);
+        if (!sheet) return `aba "${s.sheet}" não existe mais`;
+        return sheet.getMaxColumns() < s.after + s.count ? `colunas de "${s.sheet}" mudaram` : null;
+      }
+      case 'namedRange':
+        return null;
+      default:
+        return `alteração estrutural desconhecida (${s.op})`;
+    }
+  },
+
+  revertStructure_(s) {
+    const ss = SpreadsheetApp.getActive();
+    switch (s.op) {
+      case 'renameSheet': ss.getSheetByName(s.to).setName(s.from); break;
+      case 'insertSheet': ss.deleteSheet(ss.getSheetByName(s.name)); break;
+      case 'insertColumns': ss.getSheetByName(s.sheet).deleteColumns(s.after + 1, s.count); break;
+      case 'namedRange': ss.removeNamedRange(s.name); break;
+      default: throw new Error(`Unknown structure op: ${s.op}`);
+    }
   },
 
   /** [{name, col, range, value}] for the cells named in a snapshot of change c. */

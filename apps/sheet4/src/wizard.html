@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <style>
+    body { font: 13px Roboto, Arial, sans-serif; color: #1f2937; margin: 12px; }
+    h2 { font-size: 15px; margin: 16px 0 6px; }
+    textarea { width: 100%; height: 90px; font: 12px monospace; box-sizing: border-box; }
+    table { border-collapse: collapse; width: 100%; }
+    td, th { padding: 3px 6px; border-bottom: 1px solid #e5e7eb; text-align: left; vertical-align: middle; }
+    th { color: #6b7280; font-weight: normal; font-size: 12px; }
+    input, select { width: 100%; box-sizing: border-box; padding: 3px; background: #fffbe6; border: 1px solid #9ca3af; }
+    .src { color: #6b7280; font-size: 11px; white-space: nowrap; }
+    .note { color: #6b7280; font-size: 12px; }
+    .err { color: #b91c1c; white-space: pre-wrap; }
+    .ok { color: #166534; white-space: pre-wrap; }
+    .flag { color: #92400e; }
+    button { margin-top: 10px; padding: 6px 14px; }
+  </style>
+</head>
+<body>
+  <p class="note">
+    <?= mode === 'setup' ? 'Configuração inicial: confira os valores e confirme para criar as abas da 4.0.' : 'Migração 3.0 → 4.0: nada é gravado antes de Confirmar. Tudo o que mudar fica na aba Auditoria e pode ser desfeito.' ?>
+  </p>
+  <h2>Configuração do cliente (colar JSON, opcional)</h2>
+  <textarea id="json" placeholder='{"format": "academy-client/1", "config": {...}, "history": {...}}'></textarea>
+  <button type="button" onclick="load()">Ler proposta</button>
+  <div id="errors" class="err"></div>
+  <div id="form"></div>
+  <button type="button" id="confirm" onclick="confirmRun()" disabled>Confirmar e migrar</button>
+  <div id="out"></div>
+
+  <script>
+    var current = null;
+    var SOURCES = { json: 'JSON colado', '3.0': 'perfil 3.0', config: 'Config atual', 'padrão': 'padrão', planilha: 'planilha', vazio: '—' };
+
+    function esc(s) {
+      return String(s === null || s === undefined ? '' : s).replace(/[&<>"]/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    }
+    function show(v) { return Array.isArray(v) ? v.join(', ') : (v === null || v === undefined ? '' : v); }
+    function input(id, value, options) {
+      if (options) {
+        return '<select id="' + id + '"><option value=""></option>' + options.map(function (o) {
+          return '<option' + (o === value ? ' selected' : '') + '>' + esc(o) + '</option>';
+        }).join('') + '</select>';
+      }
+      return '<input id="' + id + '" value="' + esc(show(value)) + '">';
+    }
+
+    function load() {
+      document.getElementById('errors').textContent = '';
+      google.script.run.withSuccessHandler(render).withFailureHandler(fail)
+        .wizardProposal(document.getElementById('json').value);
+    }
+
+    function render(p) {
+      current = p;
+      var html = '';
+      if (p.errors.length) document.getElementById('errors').textContent = p.errors.join('\n');
+      if (p.migrated) html += '<p class="ok">Esta planilha já está na versão 4.0; confirmar não altera nada.</p>';
+      html += '<h2>Perfil e rotina</h2><table><tr><th>Parâmetro</th><th>Valor</th><th>Unidade</th><th>Origem</th><th>Na 3.0</th></tr>';
+      p.fields.forEach(function (f, i) {
+        html += '<tr><td>' + esc(f.label) + '</td><td>' + input('f' + i, f.value, f.options) + '</td><td class="src">' + esc(f.unit)
+          + '</td><td class="src">' + esc(SOURCES[f.source] || f.source) + '</td><td class="src">' + esc(show(f.legacy)) + '</td></tr>';
+      });
+      html += '</table>';
+      html += '<h2>Objetivo ' + esc(p.objective.id) + ' e meta ' + esc(p.goal.id) + ' (início ' + esc(p.goal.start || p.objective.start || '—') + ')</h2><table>';
+      html += '<tr><td>Objetivo</td><td>' + input('o_name', p.objective.name) + '</td></tr>';
+      html += '<tr><td>Tipo de análise</td><td>' + input('o_analysisType', p.objective.analysisType, p.analysisTypes) + '</td></tr>';
+      [['kcal', 'kcal'], ['protein', 'Proteína g'], ['proteinMin', 'Proteína mín'], ['proteinMax', 'Proteína máx'], ['fat', 'Gordura g']].forEach(function (g) {
+        html += '<tr><td>' + g[1] + '</td><td>' + input('g_' + g[0], p.goal[g[0]]) + '</td></tr>';
+      });
+      html += '</table><p class="note">Carboidrato calculado: ' + esc(p.goal.carbs === null ? '—' : p.goal.carbs) + ' g · TMB (Mifflin): '
+        + esc(p.energy.bmr === null ? '—' : p.energy.bmr) + ' kcal · gasto estimado: ' + esc(p.energy.tdee === null ? '—' : p.energy.tdee) + ' kcal (estimativa).</p>';
+      if (p.plans.length) {
+        html += '<h2>Fichas</h2><p class="note">' + p.plans.map(function (x) {
+          return esc(x.id) + ': ' + esc(x.start || 'sem data') + (x.end ? ' a ' + esc(x.end) : ' em diante');
+        }).join(' · ') + '</p>';
+      }
+      if (p.review.length) {
+        html += '<h2>Para revisar</h2><ul>' + p.review.map(function (r) { return '<li class="flag">' + esc(r.area) + ': ' + esc(r.message) + '</li>'; }).join('') + '</ul>';
+      }
+      document.getElementById('form').innerHTML = html;
+      document.getElementById('confirm').disabled = false;
+    }
+
+    function confirmRun() {
+      if (!current) return;
+      var values = { json: document.getElementById('json').value, config: {}, goal: {}, objective: {} };
+      current.fields.forEach(function (f, i) {
+        var v = document.getElementById('f' + i).value;
+        if (String(v) !== String(show(f.value))) values.config[f.key] = v;
+      });
+      ['kcal', 'protein', 'proteinMin', 'proteinMax', 'fat'].forEach(function (k) {
+        var v = document.getElementById('g_' + k).value;
+        if (String(v) !== String(show(current.goal[k]))) values.goal[k] = v;
+      });
+      ['name', 'analysisType'].forEach(function (k) {
+        var v = document.getElementById('o_' + k).value;
+        if (v && v !== current.objective[k]) values.objective[k] = v;
+      });
+      document.getElementById('confirm').disabled = true;
+      document.getElementById('out').innerHTML = '<p class="note">Migrando…</p>';
+      google.script.run.withSuccessHandler(done).withFailureHandler(fail).wizardConfirm(values);
+    }
+
+    function done(r) {
+      var html = '<p class="ok">' + esc(r.message) + '</p>';
+      if (r.open && r.open.length) html += '<p class="err">Ainda abertos:\n' + r.open.map(esc).join('\n') + '</p>';
+      (r.postSteps || []).forEach(function (s) { html += '<p class="note">' + esc(s.step) + ': ' + esc(s.status) + (s.message ? ' — ' + esc(s.message) : '') + '</p>'; });
+      document.getElementById('out').innerHTML = html;
+    }
+
+    function fail(err) {
+      document.getElementById('confirm').disabled = false;
+      document.getElementById('out').innerHTML = '';
+      document.getElementById('errors').textContent = err && err.message ? err.message : String(err);
+    }
+
+    load();
+  </script>
+</body>
+</html>

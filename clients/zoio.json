@@ -1,0 +1,72 @@
+{
+  "format": "academy-client/1",
+  "_about": "Client data for Projeto Zoio (not code). Pasted into Projeto → Sistema → Configuração inicial / Migrar 3.0 → 4.0. Keys of `config` are the Config keys of spec §3.2; dates are yyyy-mm-dd.",
+  "_decisions": [
+    "client.startDate = 2026-09-28: the 3.0 profile had no start date; O001, M001 and F002 start that day.",
+    "Plans: the Zoio export has F001 with the technical date 01/01/1900 and F002 from 28/09/2026, and the initial plan review on 15/09/2026 (Revisões), the same as Breno: F001 15/09–27/09/2026 (Encerrada), F002 from 28/09/2026.",
+    "M001 = owner's new targets 2650 kcal / P 170 / G 70 / C 335. The 3.0 file had P 155 (140–170) and no kcal/fat. The protein range 160–180 was chosen by us (flagged in `review`).",
+    "routine.rotationMode = continuous: 3.0 Hoje says 'PPL A/B contínuo: a próxima sessão avança ao concluir o treino; não reinicia na segunda' and Guia 'O agendamento semanal não reinicia a rotação do Zoio'.",
+    "No other activities (3.0 'Muay Thai' = 0, 'Não previsto'); cardio 2/week (3.0 'Cardio extra' = 2, 'Começar com 10–15 min por sessão').",
+    "energy.activityFactor = 1.55 is an estimate. TMB Mifflin = 10·85 + 6.25·185 − 5·25 + 5 = 1886.25 kcal.",
+    "3.0 profile facts kept as client.notes: creatine 5 g/day, health, smoking, routine."
+  ],
+  "config": {
+    "client.name": "Zoio",
+    "client.sex": "M",
+    "client.age": 25,
+    "client.heightCm": 185,
+    "client.startWeightKg": 85,
+    "client.startDate": "2026-09-28",
+    "client.reviewer": "Luan",
+    "client.notes": "Creatina: 5 g/dia (data de início não informada). Saúde: sem problema conhecido (relato, não avaliação clínica). Tabagismo: sim, há alguns anos (quantidade desconhecida). Rotina: aulas 18h–22h; almoço e jantar no RU. Cardio: começar com 10–15 min por sessão.",
+    "routine.strengthPerWeek": 5,
+    "routine.cardioPerWeek": 2,
+    "routine.activities": null,
+    "routine.activitiesPerWeek": 0,
+    "routine.sessionRotation": "Push A, Pull A, Legs A, Push B, Pull B, Legs B",
+    "routine.rotationMode": "continuous",
+    "energy.bmrMethod": "mifflin",
+    "energy.activityFactor": 1.55,
+    "analysis.kcalTolerance": 0.05,
+    "analysis.fatTolerance": 0.15
+  },
+  "otherClientNames": ["Breno"],
+  "history": {
+    "objectives": [
+      {
+        "id": "O001",
+        "name": "Recomposição corporal",
+        "analysisType": "recomposicao",
+        "start": "2026-09-28",
+        "startWeightKg": 85,
+        "expectation": "Ganhar músculo e acompanhar cintura, desempenho e recuperação",
+        "reason": "Objetivo inicial (migração 3.0 → 4.0)"
+      }
+    ],
+    "goals": [
+      {
+        "id": "M001",
+        "start": "2026-09-28",
+        "kcal": 2650,
+        "protein": 170,
+        "proteinMin": 160,
+        "proteinMax": 180,
+        "fat": 70,
+        "kcalTolerance": 0.05,
+        "fatTolerance": 0.15,
+        "strengthPerWeek": 5,
+        "cardioPerWeek": 2,
+        "activitiesPerWeek": 0,
+        "reason": "Metas do responsável na migração 3.0 → 4.0 (a 3.0 tinha P 155, faixa 140–170, sem kcal/gordura); início real 28/09/2026."
+      }
+    ],
+    "plans": [
+      { "id": "F001", "start": "2026-09-15", "end": "2026-09-27" },
+      { "id": "F002", "start": "2026-09-28" }
+    ]
+  },
+  "review": [
+    { "area": "Metas", "message": "Faixa de proteína 160–180 g escolhida na migração (meta 170 g do responsável); a 3.0 tinha 155 g com faixa 140–170. Confirmar." },
+    { "area": "Energia", "message": "Fator de atividade 1,55 é uma estimativa; revisar com os primeiros registros de peso e ingestão." }
+  ]
+}

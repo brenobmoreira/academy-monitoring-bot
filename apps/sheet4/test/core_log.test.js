@@ -226,3 +226,47 @@ test('action.committed fires once after the outermost action and after an undo, 
     { label: 'fora', tabs: ['Diário'], undo: true },
   ]);
 });
+
+test('structural changes (rename, new tab, columns, named range) are logged and undone in reverse', () => {
+  const ctx = boot({ tabs: { exercises: [{ name: 'A' }] } });
+  const ss = ctx.__spreadsheet;
+  ss.getSheetByName('Exercícios').setName('Cadastro');
+  const cols = ss.getSheetByName('Cadastro').getMaxColumns();
+  ctx.ChangeLog.run('Estrutura', () => {
+    ctx.ChangeLog.structure('Exercícios', { op: 'renameSheet', from: 'Cadastro', to: 'Exercícios' });
+    ss.getSheetByName('Cadastro').setName('Exercícios');
+    ctx.ChangeLog.structure('Nova', { op: 'insertSheet', name: 'Nova' });
+    ss.insertSheet('Nova');
+    ctx.ChangeLog.structure('Exercícios', { op: 'insertColumns', sheet: 'Exercícios', after: cols, count: 2 });
+    ss.getSheetByName('Exercícios').insertColumnsAfter(cols, 2);
+    ctx.ChangeLog.structure('Exercícios', { op: 'namedRange', name: 'Lista' });
+    ss.setNamedRange('Lista', ss.getSheetByName('Exercícios').getRange('A6:A10'));
+  });
+  assert.equal(ctx.ChangeLog.entries()[0].kind, 'structure');
+  assert.equal(ctx.Tabs.read('log')[0].kind, 'Estrutura');
+  ctx.Undo.last();
+  assert.ok(ss.getSheetByName('Cadastro'));
+  assert.equal(ss.getSheetByName('Exercícios'), null);
+  assert.equal(ss.getSheetByName('Nova'), null);
+  assert.equal(ss.getSheetByName('Cadastro').getMaxColumns(), cols);
+  assert.equal(ss.getRangeByName('Lista'), null);
+});
+
+test('undo refuses a structural change whose result is gone', () => {
+  const ctx = boot({ tabs: { exercises: [{ name: 'A' }] } });
+  const ss = ctx.__spreadsheet;
+  ctx.ChangeLog.run('Nova aba', () => {
+    ctx.ChangeLog.structure('Nova', { op: 'insertSheet', name: 'Nova' });
+    ss.insertSheet('Nova');
+  });
+  ss.getSheetByName('Nova').setName('Renomeada');
+  assert.throws(() => ctx.Undo.last(), /aba "Nova" não existe mais/);
+});
+
+test('layout cells changed since the action block the undo', () => {
+  const ctx = boot({ tabs: { exercises: [] } });
+  ctx.Tabs.ensure('today');
+  ctx.ChangeLog.run('Hoje', () => ctx.Tabs.setCells('today', { B7: 70 }));
+  ctx.__spreadsheet.getSheetByName('Hoje').getRange('B7').setValue(71);
+  assert.throws(() => ctx.Undo.last(), /células B7 de "Hoje" mudaram/);
+});

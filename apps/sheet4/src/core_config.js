@@ -28,6 +28,7 @@ const Config = {
     'client.startWeightKg': { section: 'Perfil', label: 'Peso inicial', type: 'number', default: null, unit: 'kg', description: 'Peso no início do acompanhamento (referência, não medição datada).' },
     'client.startDate': { section: 'Perfil', label: 'Início do acompanhamento', type: 'date', default: null, unit: 'data', description: 'Data do primeiro registro.' },
     'client.reviewer': { section: 'Perfil', label: 'Revisor', type: 'text', default: null, unit: '', description: 'Quem revisa metas, fichas e fases.' },
+    'client.notes': { section: 'Perfil', label: 'Observações do perfil', type: 'text', default: null, unit: '', description: 'Saúde, suplementos, rotina e outros fatos relatados (não é avaliação clínica).' },
 
     'routine.strengthPerWeek': { section: 'Rotina', label: 'Musculação', type: 'integer', default: null, unit: 'sessões/semana', description: 'Treinos de musculação planejados por semana.' },
     'routine.cardioPerWeek': { section: 'Rotina', label: 'Cardio', type: 'integer', default: null, unit: 'sessões/semana', description: 'Sessões de cardio planejadas por semana.' },
@@ -61,6 +62,7 @@ const Config = {
 
     'system.schemaVersion': { section: 'Sistema', label: 'Versão do esquema', type: 'text', default: null, unit: '', description: 'Gravada pela migração/configuração inicial. Não editar.' },
     'system.timezone': { section: 'Sistema', label: 'Fuso horário', type: 'text', default: null, unit: '', description: 'Vazio = fuso do projeto do Apps Script.' },
+    'system.otherClientNames': { section: 'Sistema', label: 'Outros clientes (auditoria)', type: 'list', default: [], unit: 'lista', description: 'Nomes de outras pessoas acompanhadas com esta planilha-modelo; a auditoria aponta textos que os mencionem.' },
   },
 
   /** Script Properties holding secrets. */

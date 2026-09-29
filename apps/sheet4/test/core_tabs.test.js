@@ -161,7 +161,7 @@ test('remove deletes the row; ensure creates a bare tab with title, help and hea
   eq(ctx.Tabs.read('exercises').map((r) => r.name), ['A', 'C']);
   const s = ctx.Tabs.ensure('audit');
   assert.equal(s.cell_(2, 1), 'Auditoria');
-  assert.equal(s.cell_(5, 1), 'Quando');
+  assert.equal(s.cell_(5, 1), 'Data');
   assert.equal(ctx.Tabs.ensure('audit'), s, 'idempotent');
 });
 

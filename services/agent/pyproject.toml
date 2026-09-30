@@ -6,13 +6,13 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "functions-framework>=3.10.2",
-    "google-adk>=2.9.2",
+    "google-adk>=2.10.0",
     "httpx>=0.28.1",
-    "litellm>=1.102.0",
+    "litellm>=1.102.1",
     "pydantic-settings[yaml]>=2.15.0",
     "python-dotenv>=1.2.3",
-    "starlette>=1.6.0",
-    "uvicorn>=0.53.0",
+    "starlette>=1.7.0",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]
@@ -20,15 +20,15 @@ agent-poll = "agent.poll:main"
 agent-commands = "agent.commands:main"
 
 [build-system]
-requires = ["uv_build>=0.12.15,<0.13.0"]
+requires = ["uv_build>=0.12.19,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "ruff>=0.16.8",
-    "ty>=0.0.83",
+    "ruff>=0.16.9",
+    "ty>=0.0.84",
 ]
 
 [tool.pytest.ini_options]

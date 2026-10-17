@@ -255,10 +255,19 @@ End to end without Telegram or Google: [`e2e/`](../../e2e).
 
 ## Deploy (Cloud Run functions)
 
-One-time setup:
+Each client has a dedicated Cloud Run service (`SERVICE=fitness-agent-<client>`, e.g.
+`fitness-agent-breno`, `fitness-agent-zoio`) bound to that client's spreadsheet URL, API key,
+chat id, and Telegram bot token. When a release updates the Sheet API contract, run
+`clasp push` + `clasp deploy -i <deploymentId>` on each client spreadsheet before deploying or
+merging the agent changes to `main` (if an older Web App rejects `requestId`, `SheetClient` logs a
+warning and retries once without `requestId`).
+
+One-time project setup (plus per-client secrets):
 
 ```bash
 PROJECT=<project-id>; REGION=us-central1
+CLIENT=<client-slug>                      # e.g. breno or zoio (one service per client)
+SERVICE=fitness-agent-${CLIENT}
 gcloud config set project $PROJECT
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
   secretmanager.googleapis.com
@@ -267,7 +276,7 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregi
 gcloud iam service-accounts create fitness-agent
 SA=fitness-agent@$PROJECT.iam.gserviceaccount.com
 
-for s in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET SHEET_API_KEY LLM_API_KEY; do
+for s in TELEGRAM_BOT_TOKEN_${CLIENT} TELEGRAM_WEBHOOK_SECRET_${CLIENT} SHEET_API_KEY_${CLIENT} LLM_API_KEY; do
   read -rsp "$s: " v; echo; printf %s "$v" | gcloud secrets create $s --data-file=-
   gcloud secrets add-iam-policy-binding $s --member=serviceAccount:$SA --role=roles/secretmanager.secretAccessor
 done
@@ -277,14 +286,17 @@ With `vertex_ai/...` instead of an API key: enable `aiplatform.googleapis.com`, 
 service account `roles/aiplatform.user`, skip the `LLM_API_KEY` secret and set
 `VERTEXAI_PROJECT=$PROJECT,VERTEXAI_LOCATION=$REGION` in the env vars below.
 
-First deploy from this folder (`openssl rand -hex 24` makes a good webhook secret):
+First deploy from this folder (`openssl rand -hex 24` makes a good webhook secret). Note that
+`UpdateDeduplicator` is in-memory per container instance (`--max-instances 1` keeps all webhook
+deliveries for a client on the same warm instance; across instances or restarts, `catalog.recent`
+and deterministic `requestId`s guard writes in the sheet):
 
 ```bash
-gcloud run deploy fitness-agent --source . --function telegram_webhook \
+gcloud run deploy "$SERVICE" --source . --function telegram_webhook \
   --base-image python312 --region $REGION --service-account $SA \
-  --allow-unauthenticated --timeout 120 --max-instances 2 \
+  --allow-unauthenticated --timeout 120 --max-instances 1 \
   --set-env-vars ALLOWED_CHAT_IDS=<your chat id>,SHEET_API_URL=<apps script /exec url> \
-  --set-secrets TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,SHEET_API_KEY=SHEET_API_KEY:latest,LLM_API_KEY=LLM_API_KEY:latest
+  --set-secrets TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN_${CLIENT}:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET_${CLIENT}:latest,SHEET_API_KEY=SHEET_API_KEY_${CLIENT}:latest,LLM_API_KEY=LLM_API_KEY:latest
 ```
 
 `--allow-unauthenticated` is required because Telegram cannot send Google credentials; the
@@ -294,7 +306,7 @@ Then register the webhook:
 
 ```bash
 export TELEGRAM_BOT_TOKEN=... TELEGRAM_WEBHOOK_SECRET=...
-export AGENT_URL=$(gcloud run services describe fitness-agent --region $REGION --format 'value(status.url)')
+export AGENT_URL=$(gcloud run services describe "$SERVICE" --region $REGION --format 'value(status.url)')
 ../../scripts/set-webhook.sh set          # webhook (messages, button taps), command menu; or, from the repo root: make webhook-set
 ../../scripts/set-webhook.sh info         #                                                        make webhook-info
 ```
@@ -308,27 +320,27 @@ keeps its own copy of the list; `tests/test_commands.py` fails when it drifts fr
 Create the secret, give it to the function, then one Cloud Scheduler job per kind:
 
 ```bash
-openssl rand -hex 24 | tr -d '\n' | gcloud secrets create REMINDER_TOKEN --data-file=-
-gcloud secrets add-iam-policy-binding REMINDER_TOKEN --member=serviceAccount:$SA --role=roles/secretmanager.secretAccessor
-gcloud run services update fitness-agent --region $REGION --update-secrets REMINDER_TOKEN=REMINDER_TOKEN:latest
+openssl rand -hex 24 | tr -d '\n' | gcloud secrets create REMINDER_TOKEN_${CLIENT} --data-file=-
+gcloud secrets add-iam-policy-binding REMINDER_TOKEN_${CLIENT} --member=serviceAccount:$SA --role=roles/secretmanager.secretAccessor
+gcloud run services update "$SERVICE" --region $REGION --update-secrets REMINDER_TOKEN=REMINDER_TOKEN_${CLIENT}:latest
 
 gcloud services enable cloudscheduler.googleapis.com
-AGENT_URL=$(gcloud run services describe fitness-agent --region $REGION --format 'value(status.url)')
-TOKEN=$(gcloud secrets versions access latest --secret REMINDER_TOKEN)
+AGENT_URL=$(gcloud run services describe "$SERVICE" --region $REGION --format 'value(status.url)')
+TOKEN=$(gcloud secrets versions access latest --secret REMINDER_TOKEN_${CLIENT})
 
-gcloud scheduler jobs create http agent-remind-daily --location $REGION \
+gcloud scheduler jobs create http "${SERVICE}-remind-daily" --location $REGION \
   --schedule "0 21 * * *" --time-zone America/Sao_Paulo \
   --uri "$AGENT_URL/remind" --http-method POST \
   --headers X-Reminder-Token=$TOKEN,Content-Type=application/json \
   --message-body '{"kind":"daily"}'
 
-gcloud scheduler jobs create http agent-remind-weekly --location $REGION \
+gcloud scheduler jobs create http "${SERVICE}-remind-weekly" --location $REGION \
   --schedule "0 20 * * 0" --time-zone America/Sao_Paulo \
   --uri "$AGENT_URL/remind" --http-method POST \
   --headers X-Reminder-Token=$TOKEN,Content-Type=application/json \
   --message-body '{"kind":"weekly"}'
 
-gcloud scheduler jobs run agent-remind-daily --location $REGION   # try it now
+gcloud scheduler jobs run "${SERVICE}-remind-daily" --location $REGION   # try it now
 ```
 
 Daily at 21:00 and Sundays at 20:00, São Paulo time; change `--schedule` to taste. The token
@@ -339,7 +351,7 @@ continuous deployment below, like the others.
 
 ### Continuous deployment from GitHub
 
-Cloud Run console → service `fitness-agent` → **Connect repo** (continuous deployment) →
+Cloud Run console → service `fitness-agent-<client>` → **Connect repo** (continuous deployment) →
 GitHub → this repository → branch `^main$`, build type **Go, Node.js, Python, Java, .NET Core,
 Ruby or PHP via Google Cloud's buildpacks**, build context directory `/services/agent`, entry
 point `telegram_webhook`. In the created Cloud Build trigger, set **Included files filter** to
@@ -362,5 +374,5 @@ Under a confirmation, ↩️ Desfazer does the same for that message's writes, �
 and ✏️ Corrigir asks for the correction as a reply.
 `/hoje` then shows both, and typing `/` lists the commands.
 Nothing back? Cloud Run → Logs for the function, and Apps Script → Executions for `doPost`.
-With the reminder jobs: `gcloud scheduler jobs run agent-remind-daily --location $REGION` on a
+With the reminder jobs: `gcloud scheduler jobs run "${SERVICE}-remind-daily" --location $REGION` on a
 day without steps → "Faltou registrar hoje: passos." in the chat.

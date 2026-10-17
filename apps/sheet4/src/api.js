@@ -31,7 +31,9 @@ function doPost(e) {
 }
 
 const SheetApi = {
-  ENVELOPE: ['key', 'op', 'args'],
+  ENVELOPE: ['key', 'op', 'args', 'requestId'],
+  MAX_REQUEST_ID: 120,
+  REQUEST_ID_SCAN_ROWS: 200,
   /** How far back catalog.recent looks. */
   RECENT_MINUTES: 30,
   LABEL_PREFIX: 'Bot:',
@@ -127,23 +129,42 @@ const SheetApi = {
     if (unknown.length) {
       return { ok: false, errors: unknown.map((k) => ({ path: k, code: 'unknown_field', message: `campo desconhecido; aceitos: ${SheetApi.ENVELOPE.join(', ')}` })) };
     }
-    return SheetApi.run(request.op, request.args === undefined ? {} : request.args);
+    return SheetApi.run(request.op, request.args === undefined ? {} : request.args, request.requestId);
   },
 
   /**
    * In-process entry: validate, then run; writes hold the script lock and run as one ChangeLog
-   * action (writeId = its id, added only when something was written).
+   * action (writeId = its id, added only when something was written). When `requestId` is given,
+   * an already-committed non-undone write with the same `requestId` is returned idempotently.
    */
-  run(op, args) {
+  run(op, args, requestId) {
     const spec = typeof op === 'string' && Object.prototype.hasOwnProperty.call(SheetApi.OPS, op) ? SheetApi.OPS[op] : null;
     if (!spec) return SheetApi.fail_('op', 'unknown_op', `operação desconhecida ${JSON.stringify(op)}; aceitas: ${Object.keys(SheetApi.OPS).join(', ')}`);
     const exec = () => {
+      const reqCheck = SheetApi.validateRequestId_(requestId);
       const checked = spec.validate(args);
-      if (checked.errors.length) return { ok: false, errors: checked.errors };
+      const errors = reqCheck.errors.concat(checked.errors);
+      if (errors.length) return { ok: false, errors };
       const value = checked.value;
+      const reqId = reqCheck.value;
       if (!spec.write || spec.logged === false) return { ok: true, result: spec.run(value) };
+      const sig = reqId ? SheetApi.signature_(op, value) : null;
+      if (reqId) {
+        const existing = SheetApi.findByRequestId_(reqId);
+        if (existing) {
+          if (existing.meta.op !== op || (existing.meta.sig && existing.meta.sig !== sig)) {
+            return SheetApi.fail_('requestId', 'conflict', `requestId "${reqId}" já utilizado em outra gravação (${existing.id})`);
+          }
+          return { ok: true, result: SheetApi.deduplicatedResult_(op, value, existing) };
+        }
+      }
+      const meta = spec.meta(value);
+      if (reqId) {
+        meta.requestId = reqId;
+        meta.sig = sig;
+      }
       let writeId = null;
-      const result = ChangeLog.run(SheetApi.label_(spec.meta(value)), () => {
+      const result = ChangeLog.run(SheetApi.label_(meta), () => {
         const r = spec.run(value);
         if (ChangeLog.changeCount() > 0) writeId = ChangeLog.active().id;
         return r;
@@ -159,6 +180,207 @@ const SheetApi = {
       Tabs.invalidate();
       Config.invalidate();
     }
+  },
+
+  validateRequestId_(requestId) {
+    if (requestId === undefined) return { value: null, errors: [] };
+    if (typeof requestId !== 'string') {
+      return { value: null, errors: [{ path: 'requestId', code: 'wrong_type', message: 'esperado texto' }] };
+    }
+    const trimmed = requestId.trim();
+    if (!trimmed) {
+      return { value: null, errors: [{ path: 'requestId', code: 'empty', message: 'requestId vazio' }] };
+    }
+    if (trimmed.length > SheetApi.MAX_REQUEST_ID) {
+      return { value: null, errors: [{ path: 'requestId', code: 'too_long', message: `máximo ${SheetApi.MAX_REQUEST_ID} caracteres` }] };
+    }
+    return { value: trimmed, errors: [] };
+  },
+
+  canonical_(x) {
+    if (x === null || typeof x !== 'object') return JSON.stringify(x);
+    if (Array.isArray(x)) return '[' + x.map((v) => SheetApi.canonical_(v)).join(',') + ']';
+    const keys = Object.keys(x).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + SheetApi.canonical_(x[k])).join(',') + '}';
+  },
+
+  signature_(op, value) {
+    const str = SheetApi.canonical_([op, value]);
+    let h1 = 0x811c9dc5;
+    let h2 = 0x01000193;
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+      h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0;
+    }
+    return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
+  },
+
+  findByRequestId_(reqId) {
+    if (!reqId || !SheetApi.has_('log')) return null;
+    const spec = Tabs.get('log');
+    const { sheet, map, lastCol } = Tabs.layout('log');
+    const first = spec.firstDataRow;
+    const last = sheet.getLastRow();
+    if (last < first || !lastCol || !map.action || !map.actionId) return null;
+    const start = Math.max(first, last - SheetApi.REQUEST_ID_SCAN_ROWS + 1);
+    const values = sheet.getRange(start, 1, last - start + 1, lastCol).getValues();
+    const needle = `"requestId":${JSON.stringify(reqId)}`;
+    let targetId = null;
+    let targetParsed = null;
+    let targetRawLabel = null;
+    for (let i = values.length - 1; i >= 0; i--) {
+      const actionText = String(values[i][map.action - 1] || '');
+      if (actionText.indexOf(needle) < 0) continue;
+      const p = SheetApi.parseLabel_(actionText);
+      if (p.meta && p.meta.requestId === reqId) {
+        targetId = String(values[i][map.actionId - 1] || '');
+        targetParsed = p;
+        targetRawLabel = actionText;
+        break;
+      }
+    }
+    if (!targetId || !targetParsed) return null;
+    const kinds = {};
+    Object.keys(ChangeLog.KIND_LABELS).forEach((k) => { kinds[ChangeLog.KIND_LABELS[k]] = k; });
+    const changes = [];
+    let undone = true;
+    let at = null;
+    for (let i = 0; i < values.length; i++) {
+      if (String(values[i][map.actionId - 1] || '') !== targetId) continue;
+      const r = Tabs.toObject_('log', values[i], start + i);
+      if (!at) at = r.at;
+      if (!r.undone) undone = false;
+      changes.push({
+        logRow: r._row,
+        at: r.at,
+        actionId: r.actionId,
+        action: r.action,
+        kind: kinds[r.kind],
+        tab: r.tab,
+        row: r.row,
+        after: ChangeLog.decode(r.after),
+        undone: r.undone,
+      });
+    }
+    return { id: targetId, at, label: targetRawLabel, meta: targetParsed.meta, undone, changes };
+  },
+
+  rowFromAfter_(tabId, after) {
+    const obj = {};
+    if (!after) return obj;
+    Tabs.columns(tabId).forEach((col) => {
+      obj[col.key] = Object.prototype.hasOwnProperty.call(after, col.header)
+        ? Tabs.fromCell(col, after[col.header])
+        : null;
+    });
+    return obj;
+  },
+
+  publicMeta_(meta) {
+    if (!meta) return {};
+    const out = Object.assign({}, meta);
+    delete out.requestId;
+    delete out.sig;
+    return out;
+  },
+
+  deduplicatedResult_(op, value, existing) {
+    if (op === 'diary.upsert') {
+      const day = !existing.undone && SheetApi.has_('diary') ? Days.get(value.date) : null;
+      const diaryName = Tabs.get('diary').name;
+      const headers = {};
+      const fromLog = {};
+      existing.changes.filter((c) => c.tab === diaryName && c.after).forEach((c) => {
+        Object.keys(c.after).forEach((h) => { headers[h] = true; });
+        Object.assign(fromLog, SheetApi.rowFromAfter_('diary', c.after));
+      });
+      const source = day || fromLog;
+      const fields = SheetApi.pick_(source, Object.keys(value.fields));
+      const ids = day ? SheetApi.pick_(day, ['objective', 'goal', 'plan']) : Days.idsOn(Dates.fromKey(value.date));
+      const colByKey = {};
+      Tabs.columns('diary').forEach((c) => { colByKey[c.key] = c.header; });
+      const changed = Object.keys(value.fields).filter((k) => headers[colByKey[k]]);
+      const out = {
+        date: value.date,
+        row: day ? day._row : null,
+        fields,
+        changed: changed.length ? changed : Object.keys(value.fields),
+        dayState: Diary.dayState(day || value.date),
+        ids,
+        writeId: existing.id,
+        deduplicated: true,
+      };
+      if (existing.undone) out.undone = true;
+      return out;
+    }
+    if (op === 'workout.upsert') {
+      const d = Dates.fromKey(value.date);
+      const all = Workouts.rows();
+      const ctx = SheetApi.exCtx_(all, true);
+      const s = Workouts.sessionsOn(all, d).find((x) => Exercises.normalize(x.session) === Exercises.normalize(value.session));
+      const saved = !existing.undone ? (s ? s.rows : Workouts.ofSession(all, d, value.session)) : [];
+      const workoutName = Tabs.get('workouts').name;
+      const logRows = existing.changes
+        .filter((c) => c.tab === workoutName && c.after)
+        .map((c) => Object.assign({ date: d, session: value.session }, SheetApi.rowFromAfter_('workouts', c.after)));
+      const exercises = value.exercises.map((ex) => {
+        const norm = Exercises.normalize(ex.name);
+        const row = saved.find((r) => Exercises.normalize(r.exercise) === norm)
+          || logRows.find((r) => r.exercise && Exercises.normalize(r.exercise) === norm)
+          || Object.assign({ date: d, session: value.session }, SheetApi.sessionRow_(ex, null));
+        return SheetApi.exercise_(row, ctx);
+      });
+      const effectiveRows = saved.length ? saved : logRows;
+      const first = effectiveRows[0] || {};
+      const state = s && !existing.undone ? s.state : (value.complete ? 'Concluído' : 'Parcial');
+      const workSets = effectiveRows.reduce((sum, r) => sum + (Number(r.workSetsDone) || 0), 0);
+      const workVolume = Math.round(effectiveRows.reduce((sum, r) => sum + (Number(r.workVolume) || 0), 0) * 100) / 100;
+      const concluded = Workouts.sessionsOn(all, d).filter((x) => x.state === Sessions.STATE.DONE).length;
+      const day = SheetApi.has_('diary') ? Days.get(d) : null;
+      let next = null;
+      if (state === 'Concluído') {
+        try { next = Sessions.nextSession(d, all); } catch (err) { next = null; }
+      }
+      const out = {
+        date: value.date,
+        session: s ? s.session : value.session,
+        state,
+        plan: first.plan || null,
+        objective: first.objective || null,
+        phase: first.phase || null,
+        exercises,
+        workSets,
+        workVolume,
+        sessionsConcluded: day && SheetApi.isNum_(day.sessions) ? day.sessions : concluded,
+        next,
+        writeId: existing.id,
+        deduplicated: true,
+      };
+      if (existing.undone) out.undone = true;
+      return out;
+    }
+    const foodName = Tabs.get('food').name;
+    const dayRows = !existing.undone && SheetApi.has_('food') ? FoodLog.rows(value.date) : [];
+    const items = existing.changes
+      .filter((c) => c.tab === foodName && c.kind === 'append' && c.after)
+      .map((c) => {
+        const fromLog = SheetApi.rowFromAfter_('food', c.after);
+        const live = fromLog.entryId ? dayRows.find((r) => r.entryId === fromLog.entryId) : null;
+        return SheetApi.foodItem_(live || fromLog);
+      });
+    const totals = FoodLog.dayTotals(value.date);
+    const out = {
+      date: value.date,
+      meal: value.meal,
+      items,
+      totals: totals ? SheetApi.pick_(totals, SheetApi.TOTAL_KEYS) : null,
+      dayState: Diary.dayState(value.date),
+      writeId: existing.id,
+      deduplicated: true,
+    };
+    if (existing.undone) out.undone = true;
+    return out;
   },
 
   /** An exception as {ok: false, errors}. */
@@ -344,7 +566,7 @@ const SheetApi = {
       .reverse()
       .map((a) => {
         const p = SheetApi.parseLabel_(a.label);
-        return Object.assign({ writeId: a.id, at: a.at.toISOString(), action: p.text }, p.meta || {});
+        return Object.assign({ writeId: a.id, at: a.at.toISOString(), action: p.text }, SheetApi.publicMeta_(p.meta));
       });
   },
 
@@ -568,6 +790,6 @@ const SheetApi = {
   undo_(v) {
     const r = v.writeId === undefined ? Undo.last() : Undo.action(v.writeId);
     const p = SheetApi.parseLabel_(r.action);
-    return { writeId: r.actionId, undone: Object.assign({ action: p.text, changes: r.changes }, p.meta || {}) };
+    return { writeId: r.actionId, undone: Object.assign({ action: p.text, changes: r.changes }, SheetApi.publicMeta_(p.meta)) };
   },
 };

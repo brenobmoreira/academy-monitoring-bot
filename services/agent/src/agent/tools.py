@@ -8,11 +8,30 @@ every rejected call, reads included, are kept there too, so the bot can tell a s
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import FunctionType
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
+
+from agent.sheet_client import request_id_scope
+
+_current_update_key: ContextVar[str | None] = ContextVar("telegram_update_key", default=None)
+
+
+@contextmanager
+def update_key_scope(key: str | None) -> Iterator[None]:
+    """Binds a Telegram update prefix (e.g. 'tg:123') so write tools derive deterministic requestIds."""
+    token = _current_update_key.set(key)
+    try:
+        yield
+    finally:
+        _current_update_key.reset(token)
 
 
 class SheetApi(Protocol):
@@ -109,6 +128,9 @@ class FoodItem(BaseModel):
 OUTAGE_CODES = frozenset({"unavailable", "internal"})
 
 
+RequestToken = tuple[str, int]
+
+
 @dataclass
 class Journal:
     """Successful writes of one message, in order: (op, result), and the error codes of every
@@ -116,24 +138,84 @@ class Journal:
 
     writes: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     error_codes: list[str] = field(default_factory=list)
+    request_prefix: str | None = field(default_factory=lambda: _current_update_key.get())
+    _issued_counts: dict[str, int] = field(default_factory=dict)
+    _reusable_seqs: dict[str, list[int]] = field(default_factory=dict)
+    _unresolved_outages: set[str] = field(default_factory=set)
 
-    def record(self, op: str, response: dict[str, Any]) -> dict[str, Any]:
-        """For writes: journals the result on success, the error codes otherwise."""
+    def request_id_for(self, op: str, args: dict[str, Any]) -> tuple[str | None, RequestToken | None]:
+        """Deterministic idempotency key for a write tool call within a Telegram update.
+        Reserves a sequence number at issuance so parallel tool calls get distinct keys; if a call
+        fails transiently (`unavailable`/`internal`), `record` returns its sequence number to the
+        reusable pool so a retry reuses the same key."""
+        if not self.request_prefix:
+            return None, None
+        canonical = json.dumps([op, args], sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+        base_key = f"{op}:{digest}"
+        pool = self._reusable_seqs.get(base_key)
+        if pool:
+            seq = pool.pop(0)
+        else:
+            seq = self._issued_counts.get(base_key, 0) + 1
+            self._issued_counts[base_key] = seq
+        suffix = "" if seq == 1 else f":{seq}"
+        return f"{self.request_prefix}:{base_key}{suffix}", (base_key, seq)
+
+    def record(self, op: str, response: dict[str, Any], token: RequestToken | None = None) -> dict[str, Any]:
+        """For writes: journals the result on success, the error codes otherwise.
+        If a retried write returns an already-recorded writeId, updates it in place instead of
+        duplicating the confirmation entry; if the action was already undone by the user, leaves
+        `writes` untouched and informs the model."""
         if response.get("ok"):
-            self.writes.append((op, response["result"]))
-        return self.check(response)
+            result = response["result"]
+            if result.get("undone"):
+                note = "Esta gravação já havia sido desfeita pelo usuário e não foi reaplicada."
+                return self.check({**response, "result": {**result, "message": note}}, op=op, token=token)
+            write_id = result.get("writeId")
+            if write_id:
+                for idx, (_, prev) in enumerate(self.writes):
+                    if prev.get("writeId") == write_id:
+                        self.writes[idx] = (op, result)
+                        return self.check(response, op=op, token=token)
+            self.writes.append((op, result))
+            return self.check(response, op=op, token=token)
+        errors = response.get("errors")
+        if token is not None and any(
+            isinstance(e, dict) and str(e.get("code", "")) in OUTAGE_CODES
+            for e in (errors if isinstance(errors, list) else [])
+        ):
+            base_key, seq = token
+            pool = self._reusable_seqs.setdefault(base_key, [])
+            if seq not in pool:
+                pool.append(seq)
+                pool.sort()
+        return self.check(response, op=op, token=token)
 
-    def check(self, response: dict[str, Any]) -> dict[str, Any]:
-        """For any call: keeps the error codes of a rejected response."""
-        if not response.get("ok"):
-            errors = response.get("errors")
-            for error in errors if isinstance(errors, list) else []:
-                self.error_codes.append(str(error.get("code", "")) if isinstance(error, dict) else "")
+    def check(
+        self, response: dict[str, Any], *, op: str = "", token: RequestToken | None = None
+    ) -> dict[str, Any]:
+        """For any call: keeps the error codes of a rejected response and tracks unresolved outages."""
+        outage_key = f"{token[0]}:{token[1]}" if token is not None else op
+        if response.get("ok"):
+            self._unresolved_outages.discard(outage_key)
+            if op:
+                self._unresolved_outages.discard(op)
+            return response
+        errors = response.get("errors")
+        has_outage = False
+        for error in errors if isinstance(errors, list) else []:
+            code = str(error.get("code", "")) if isinstance(error, dict) else ""
+            self.error_codes.append(code)
+            if code in OUTAGE_CODES:
+                has_outage = True
+        if has_outage:
+            self._unresolved_outages.add(outage_key)
         return response
 
     @property
     def sheet_failed(self) -> bool:
-        return not OUTAGE_CODES.isdisjoint(self.error_codes)
+        return bool(self._unresolved_outages)
 
     @property
     def write_ids(self) -> list[str]:
@@ -149,7 +231,7 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         prescritos); foods e favorites (nomes exatos); meals; recent: as gravações dos últimos
         30 minutos, a mais recente primeiro. Chame antes de save_workout, save_food ou
         get_exercise_history, e para continuar ou corrigir uma gravação recente."""
-        return journal.check(await sheet.catalog())
+        return journal.check(await sheet.catalog(), op="catalog")
 
     async def save_diary(
         date: str, fields: DiaryFields, clear: list[DiaryKey] | None = None
@@ -164,8 +246,10 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         values = _plain(fields)
         for key in clear or []:
             values[key] = None
-        response = await sheet.upsert_diary(date, values)
-        return journal.record("diary.upsert", response)
+        req_id, token = journal.request_id_for("diary.upsert", {"date": date, "fields": values})
+        with request_id_scope(req_id):
+            response = await sheet.upsert_diary(date, values)
+        return journal.record("diary.upsert", response, token)
 
     async def save_workout(
         date: str, session: str, exercises: list[Exercise], complete: bool = False
@@ -181,8 +265,15 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
             complete: true só quando a pessoa disser que terminou o treino (conclui a sessão);
                 senão a sessão fica parcial.
         """
-        response = await sheet.upsert_workout(date, session, _plain(exercises), True if complete else None)
-        return journal.record("workout.upsert", response)
+        plain_ex = _plain(exercises)
+        done = True if complete else None
+        args: dict[str, Any] = {"date": date, "session": session, "exercises": plain_ex}
+        if done is not None:
+            args["complete"] = done
+        req_id, token = journal.request_id_for("workout.upsert", args)
+        with request_id_scope(req_id):
+            response = await sheet.upsert_workout(date, session, plain_ex, done)
+        return journal.record("workout.upsert", response, token)
 
     async def save_food(date: str, meal: str, items: list[FoodItem]) -> dict[str, Any]:
         """Lança o que foi comido numa refeição na Alimentação. Cada item é um alimento do
@@ -194,8 +285,11 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
             meal: refeição (ex.: Café da manhã, Almoço, Jantar), conforme meals do catálogo.
             items: itens da refeição.
         """
-        response = await sheet.add_food(date, meal, _plain(items))
-        return journal.record("food.add", response)
+        plain_items = _plain(items)
+        req_id, token = journal.request_id_for("food.add", {"date": date, "meal": meal, "items": plain_items})
+        with request_id_scope(req_id):
+            response = await sheet.add_food(date, meal, plain_items)
+        return journal.record("food.add", response, token)
 
     async def get_exercise_history(name: str, limit: int | None = None) -> dict[str, Any]:
         """Sessões anteriores de um exercício (só work sets), da mais recente para a mais antiga.
@@ -204,7 +298,7 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
             name: nome exato do exercício no catálogo.
             limit: quantas sessões (1 a 50, padrão 10).
         """
-        return journal.check(await sheet.exercise_history(name, limit))
+        return journal.check(await sheet.exercise_history(name, limit), op="exercise.history")
 
     async def get_diary_history(date_from: str, date_to: str) -> dict[str, Any]:
         """Dados do Diário num período, do dia mais antigo ao mais recente. Só vêm os dias que
@@ -215,7 +309,7 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
             date_from: primeiro dia, yyyy-MM-dd.
             date_to: último dia, yyyy-MM-dd; no máximo 92 dias depois de date_from.
         """
-        return journal.check(await sheet.diary_range(date_from, date_to))
+        return journal.check(await sheet.diary_range(date_from, date_to), op="diary.range")
 
     async def get_phase(date: str) -> dict[str, Any]:
         """Objetivo, meta (alvos de kcal e macros) e ficha em vigor numa data, e a última
@@ -225,7 +319,7 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         Args:
             date: dia, yyyy-MM-dd.
         """
-        return journal.check(await sheet.phase(date))
+        return journal.check(await sheet.phase(date), op="phase.get")
 
     async def get_week(date: str) -> dict[str, Any]:
         """Análise da semana (segunda a domingo) que contém a data: peso, cintura, alimentação,
@@ -234,7 +328,7 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         Args:
             date: qualquer dia da semana, yyyy-MM-dd.
         """
-        return journal.check(await sheet.week(date))
+        return journal.check(await sheet.week(date), op="week.get")
 
     return [
         get_catalog,

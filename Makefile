@@ -2,7 +2,7 @@
 # CI calls the tools directly (.github/workflows/ci.yml); keep both in sync when a command changes.
 
 AGENT := services/agent
-SHEET := apps/sheet
+SHEET := apps/sheet4
 
 HOST ?= 127.0.0.1
 PORT ?= 8080
@@ -65,5 +65,5 @@ webhook-delete: ## Remove the Telegram webhook, needed before polling (env: TELE
 commands: ## Set the bot's command menu via setMyCommands (uv run agent-commands)
 	cd $(AGENT) && uv run agent-commands
 
-push-sheet: ## Push apps/sheet to Apps Script (clasp push; needs apps/sheet/.clasp.json)
+push-sheet: ## Push apps/sheet4 to Apps Script (clasp push; needs apps/sheet4/.clasp.json)
 	cd $(SHEET) && $(CLASP) push

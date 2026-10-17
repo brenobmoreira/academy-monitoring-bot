@@ -1,6 +1,17 @@
+import asyncio
+
 import pytest
 
-from agent.tools import DiaryFields, Exercise, FoodItem, Journal, LoadSet, WorkSet, build_tools
+from agent.tools import (
+    DiaryFields,
+    Exercise,
+    FoodItem,
+    Journal,
+    LoadSet,
+    WorkSet,
+    build_tools,
+    update_key_scope,
+)
 
 from .fakes import OK_DIARY, FakeSheet
 
@@ -156,3 +167,98 @@ def test_journal_lists_the_write_ids_of_the_message_in_order():
     journal.record("workout.upsert", {"ok": True, "result": {"date": "2026-09-21", "writeId": "b2"}})
     journal.record("diary.upsert", {"ok": True, "result": {"date": "2026-09-21"}})
     assert journal.write_ids == ["a1", "b2"]
+
+
+async def test_write_tools_attach_deterministic_request_ids_and_sequence_identical_calls():
+    outage = {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": "timeout"}]}
+    food_ok_1 = {
+        "ok": True,
+        "result": {
+            "date": "2026-09-21",
+            "meal": "Almoço",
+            "items": [{"food": "Arroz branco cozido", "qty": 150.0, "unit": "g", "kcal": 192}],
+            "writeId": "w-food-1",
+        },
+    }
+    food_ok_2 = {
+        "ok": True,
+        "result": {
+            "date": "2026-09-21",
+            "meal": "Almoço",
+            "items": [{"food": "Arroz branco cozido", "qty": 150.0, "unit": "g", "kcal": 192}],
+            "writeId": "w-food-2",
+        },
+    }
+    sheet = FakeSheet(food_add=[outage, food_ok_1, food_ok_2])
+    with update_key_scope("tg:99"):
+        journal = Journal()
+        t = tools(sheet, journal)
+        await t["get_catalog"]()
+        items = [FoodItem(food="Arroz branco cozido", qty=150, unit="g")]
+        await t["save_food"]("2026-09-21", "Almoço", items)  # fails -> does not advance seq
+        await t["save_food"]("2026-09-21", "Almoço", items)  # retry -> reuses seq 1
+        await t["save_food"]("2026-09-21", "Almoço", items)  # intentional 2nd call -> gets :2
+
+    assert sheet.request_ids[0] is None  # read call has no requestId
+    assert sheet.request_ids[1] is not None and sheet.request_ids[1].startswith("tg:99:food.add:")
+    assert sheet.request_ids[2] == sheet.request_ids[1]  # retry after failure reuses same requestId
+    assert sheet.request_ids[3] == f"{sheet.request_ids[1]}:2"  # 2nd success in same turn gets :2
+    assert journal.write_ids == ["w-food-1", "w-food-2"]
+    assert not journal.sheet_failed  # initial outage was recovered by the retry
+
+
+async def test_parallel_write_tools_keep_distinct_sequence_numbers():
+    class YieldingSheet(FakeSheet):
+        async def add_food(self, date, meal, items):
+            res = super()._next("food.add", {"date": date, "meal": meal, "items": items})
+            await asyncio.sleep(0)
+            return res
+
+        async def upsert_diary(self, date, fields):
+            res = super()._next("diary.upsert", {"date": date, "fields": fields})
+            await asyncio.sleep(0)
+            return res
+
+    items = [FoodItem(food="Ovo cozido", qty=2, unit="un")]
+    sheet = YieldingSheet()
+    with update_key_scope("tg:100"):
+        journal = Journal()
+        t = tools(sheet, journal)
+        await asyncio.gather(
+            t["save_food"]("2026-09-21", "Café", items),
+            t["save_food"]("2026-09-21", "Café", items),
+        )
+    assert sheet.request_ids[0] is not None
+    assert sheet.request_ids[1] == f"{sheet.request_ids[0]}:2"
+
+    sheet2 = YieldingSheet()
+    with update_key_scope("tg:101"):
+        journal2 = Journal()
+        t2 = tools(sheet2, journal2)
+        await asyncio.gather(
+            t2["save_food"]("2026-09-21", "Café", items),
+            t2["save_diary"]("2026-09-21", DiaryFields(weightKg=80)),
+        )
+        await t2["save_food"]("2026-09-21", "Café", items)
+    food_ids = [r for (op, _), r in zip(sheet2.calls, sheet2.request_ids, strict=True) if op == "food.add"]
+    assert len(food_ids) == 2 and food_ids[0] is not None
+    assert food_ids[1] == f"{food_ids[0]}:2"
+
+
+async def test_undone_replay_is_not_journaled_and_warns_the_model():
+    undone_res = {
+        "ok": True,
+        "result": {
+            "date": "2026-09-21",
+            "row": 6,
+            "fields": {"weightKg": 82.4},
+            "writeId": "w1",
+            "undone": True,
+        },
+    }
+    sheet = FakeSheet(diary_upsert=[undone_res])
+    journal = Journal()
+    res = await tools(sheet, journal)["save_diary"]("2026-09-21", DiaryFields(weightKg=82.4))
+    assert journal.writes == []
+    assert journal.write_ids == []
+    assert "desfeita" in res["result"]["message"]

@@ -3,10 +3,17 @@ from datetime import datetime
 
 import pytest
 
-from agent.bot import MEDIA_UNREADABLE, Answer, Media
+from agent.bot import (
+    MEDIA_UNREADABLE,
+    MODEL_FAILED,
+    MODEL_FAILED_NOTHING_WRITTEN,
+    SHEET_FAILED,
+    Answer,
+    Media,
+)
 from agent.buttons import FIX_PLACEHOLDER, FIX_PROMPT, keyboard
 from agent.commands import Reply, help_text
-from agent.handler import DOWNLOAD_FAILED, FAILURE, Handler, media_ref, too_large
+from agent.handler import DOWNLOAD_FAILED, FAILURE, Handler, UpdateDeduplicator, media_ref, too_large
 from agent.undo import ALREADY, SHEET_DOWN
 
 from .fakes import FakeSheet
@@ -85,8 +92,8 @@ class FakeTelegram:
         return next(data for info, data in self._files.values() if info["file_path"] == file_path)
 
 
-def update(text="peso 82", chat_id=42):
-    return {"update_id": 1, "message": {"chat": {"id": chat_id}, "text": text}}
+def update(text="peso 82", chat_id=42, update_id=1):
+    return {"update_id": update_id, "message": {"chat": {"id": chat_id}, "text": text}}
 
 
 CONFIRMATION = "21/09 · Peso kg 82,4"
@@ -495,3 +502,57 @@ async def test_a_photo_replying_to_the_bot_carries_the_context_and_gets_the_butt
     assert bot.contexts == ["24/09 · Peso kg 81"]
     assert bot.media == [[Media("image/jpeg", b"jpeg")]]
     assert tg.options[-1]["reply_markup"] == keyboard(("w1",))
+
+
+async def test_duplicate_update_id_is_ignored_while_in_flight_and_after_completion():
+    bot, tg = FakeBot("gravado", seconds=0.03), FakeTelegram()
+    handler = Handler({42}, bot, tg)
+    u = update("peso 82", update_id=77)
+    await asyncio.gather(handler.handle_update(u), handler.handle_update(u))
+    await handler.handle_update(u)
+    assert bot.texts == [("peso 82", "42")]
+    assert tg.sent == [(42, "gravado")]
+
+
+async def test_transient_failures_release_update_id_so_a_retry_can_succeed():
+    dedup = UpdateDeduplicator()
+    tg = FakeTelegram()
+    u = update("peso 82", update_id=88)
+
+    for transient in (
+        Answer(SHEET_FAILED, failed=True),
+        Answer(MODEL_FAILED_NOTHING_WRITTEN, failed=True),
+        Answer(f"<b>21/09</b> · Peso kg 82\n\n{MODEL_FAILED}", ("w1",), wrote=True, failed=True),
+    ):
+        await Handler({42}, FakeBot(transient), tg, deduplicator=dedup).handle_update(u)
+
+    await Handler({42}, FakeBot(error=RuntimeError("boom")), tg, deduplicator=dedup).handle_update(u)
+    await Handler(
+        {42}, FakeBot("ok"), FakeTelegram(error=RuntimeError("net")), deduplicator=dedup
+    ).handle_update(u)
+
+    ok_bot = FakeBot(Answer("<b>21/09</b> · Peso kg 82", ("w1",), wrote=True))
+    await Handler({42}, ok_bot, tg, deduplicator=dedup).handle_update(u)
+    await Handler({42}, ok_bot, tg, deduplicator=dedup).handle_update(u)  # now completed -> ignored
+    assert ok_bot.texts == [("peso 82", "42")]
+
+
+async def test_command_outage_releases_a_read_but_a_permanent_refusal_or_an_undo_completes():
+    dedup = UpdateDeduplicator()
+    tg = FakeTelegram()
+    outage = {"ok": False, "errors": [{"code": "unavailable", "message": "timeout"}]}
+    refusal = {"ok": False, "errors": [{"code": "invalid", "message": "data inválida"}]}
+
+    sheet = FakeSheet(day_get=[outage, refusal, refusal])
+    u = update("/hoje", update_id=89)
+    await Handler({42}, FakeBot(), tg, sheet=sheet, deduplicator=dedup).handle_update(u)  # transient -> retry
+    await Handler({42}, FakeBot(), tg, sheet=sheet, deduplicator=dedup).handle_update(u)  # permanent -> done
+    await Handler({42}, FakeBot(), tg, sheet=sheet, deduplicator=dedup).handle_update(u)  # ignored
+    assert len(sheet.calls) == 2
+
+    # A timed-out undo may have been applied: replaying /desfazer would undo a second action.
+    sheet = FakeSheet(write_undo=[outage, outage])
+    u = update("/desfazer", update_id=90)
+    await Handler({42}, FakeBot(), tg, sheet=sheet, deduplicator=dedup).handle_update(u)
+    await Handler({42}, FakeBot(), tg, sheet=sheet, deduplicator=dedup).handle_update(u)  # ignored
+    assert len(sheet.calls) == 1

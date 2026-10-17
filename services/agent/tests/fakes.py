@@ -8,6 +8,8 @@ from google.adk.models import BaseLlm, LlmRequest, LlmResponse
 from google.adk.models.lite_llm import LiteLLMClient
 from google.genai import types
 
+from agent.sheet_client import current_request_id
+
 OK_DIARY = {"ok": True, "result": {"date": "2026-09-21", "row": 6, "fields": {"weightKg": 82.4}}}
 
 
@@ -17,9 +19,11 @@ class FakeSheet:
     def __init__(self, **responses: list[dict[str, Any]]) -> None:
         self.responses = responses
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.request_ids: list[str | None] = []
 
     def _next(self, op: str, args: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((op, args))
+        self.request_ids.append(current_request_id())
         queue = self.responses.get(op.replace(".", "_"))
         return queue.pop(0) if queue else {"ok": True, "result": {}}
 

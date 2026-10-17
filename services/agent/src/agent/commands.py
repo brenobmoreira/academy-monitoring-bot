@@ -56,6 +56,7 @@ class Reply:
     html: bool = False
     reply_markup: dict[str, Any] | None = None
     failed: bool = False  # the sheet API refused or did not answer (see sheet_failure)
+    transient: bool = False  # transient outage: release update_id so a retry can run
 
 
 @dataclass(frozen=True)
@@ -342,7 +343,7 @@ def parse_day(text: str, today: date) -> date:
 def sheet_failure(response: dict[str, Any]) -> Reply:
     error = (response.get("errors") or [{}])[0]
     if error.get("code") in ("unavailable", "internal"):
-        return Reply(SHEET_DOWN, failed=True)
+        return Reply(SHEET_DOWN, failed=True, transient=True)
     return Reply(f"⚠ A planilha recusou o pedido: {error.get('message', '')}", failed=True)
 
 

@@ -7,11 +7,45 @@ Failures to reach the API are folded into the same shape with code "unavailable"
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
 
+log = logging.getLogger(__name__)
+
 Response = dict[str, Any]
+
+_current_request_id: ContextVar[str | None] = ContextVar("sheet_request_id", default=None)
+
+
+@contextmanager
+def request_id_scope(request_id: str | None) -> Iterator[None]:
+    """Binds a deterministic requestId to SheetClient calls made inside the block."""
+    token = _current_request_id.set(request_id)
+    try:
+        yield
+    finally:
+        _current_request_id.reset(token)
+
+
+def current_request_id() -> str | None:
+    return _current_request_id.get()
+
+
+def _rejected_request_id(body: Response) -> bool:
+    if body.get("ok") is not False:
+        return False
+    errors = body.get("errors")
+    if not isinstance(errors, list):
+        return False
+    return any(
+        isinstance(e, dict) and e.get("path") == "requestId" and e.get("code") == "unknown_field"
+        for e in errors
+    )
 
 
 class SheetClient:
@@ -20,16 +54,22 @@ class SheetClient:
         self._key = key
         self._http = http
 
-    async def call(self, op: str, args: dict[str, Any]) -> Response:
+    async def call(self, op: str, args: dict[str, Any], *, request_id: str | None = None) -> Response:
         # Apps Script answers a POST with a 302 to script.googleusercontent.com, whose GET holds
         # the body; following redirects is part of the protocol, not a fallback.
+        effective_id = request_id if request_id is not None else _current_request_id.get()
+        payload: dict[str, Any] = {"key": self._key, "op": op, "args": args}
+        if effective_id:
+            payload["requestId"] = effective_id
+        body = await self._post(payload)
+        if effective_id and _rejected_request_id(body):
+            log.warning("sheet Web App rejected requestId (unknown_field); retrying without requestId")
+            body = await self._post({"key": self._key, "op": op, "args": args})
+        return body
+
+    async def _post(self, payload: dict[str, Any]) -> Response:
         try:
-            response = await self._http.post(
-                self._url,
-                json={"key": self._key, "op": op, "args": args},
-                follow_redirects=True,
-                timeout=30.0,
-            )
+            response = await self._http.post(self._url, json=payload, follow_redirects=True, timeout=30.0)
         except httpx.HTTPError as err:
             return _unavailable(f"falha de rede ao chamar a planilha: {err!r}")
         if response.status_code != 200:
@@ -48,8 +88,10 @@ class SheetClient:
     async def catalog(self) -> Response:
         return await self.call("catalog", {})
 
-    async def upsert_diary(self, date: str, fields: dict[str, Any]) -> Response:
-        return await self.call("diary.upsert", {"date": date, "fields": fields})
+    async def upsert_diary(
+        self, date: str, fields: dict[str, Any], *, request_id: str | None = None
+    ) -> Response:
+        return await self.call("diary.upsert", {"date": date, "fields": fields}, request_id=request_id)
 
     async def upsert_workout(
         self,
@@ -57,17 +99,28 @@ class SheetClient:
         session: str,
         exercises: list[dict[str, Any]],
         complete: bool | None = None,
+        *,
+        request_id: str | None = None,
     ) -> Response:
         """Exercises as {name, warmup?, feeder?, work: [{kg, reps, rir?}] (1-2), pain?, note?,
         equipment?}; `complete` concludes the session (Estado sessão Concluído)."""
         args: dict[str, Any] = {"date": date, "session": session, "exercises": exercises}
         if complete is not None:
             args["complete"] = complete
-        return await self.call("workout.upsert", args)
+        return await self.call("workout.upsert", args, request_id=request_id)
 
-    async def add_food(self, date: str, meal: str, items: list[dict[str, Any]]) -> Response:
+    async def add_food(
+        self,
+        date: str,
+        meal: str,
+        items: list[dict[str, Any]],
+        *,
+        request_id: str | None = None,
+    ) -> Response:
         """Items as {food, qty, unit?} | {favorite, portions?} | {description} (sem cálculo)."""
-        return await self.call("food.add", {"date": date, "meal": meal, "items": items})
+        return await self.call(
+            "food.add", {"date": date, "meal": meal, "items": items}, request_id=request_id
+        )
 
     async def exercise_history(self, name: str, limit: int | None = None) -> Response:
         args: dict[str, Any] = {"name": name}

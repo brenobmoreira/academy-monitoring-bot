@@ -659,18 +659,36 @@ Files `apps/sheet4/src/api.js` (`doPost`, `SheetApi`), `api_validator.js` (`ApiV
 `/semana`, new `/fase`); e2e: `e2e/sheet_server.js` serves `apps/sheet4/src` (`SHEET_SRC=legacy`
 for the old code) seeded with a synthetic client.
 
-- **Contract** unchanged: `{key, op, args}` → `{ok, result} | {ok:false, errors:[{path, code,
+- **Contract**: `{key, op, args, requestId?}` → `{ok, result} | {ok:false, errors:[{path, code,
   message, suggestions?}]}`, key = Script Property `SHEET_API_KEY`, strict types, every error at
   once, Portuguese messages, nothing written unless valid. Names (session, exercise, food,
   favourite) match ignoring case/accents and come back canonical; unknown ones get suggestions.
-- **Writes** call only domain modules (`Diary.save`, `FoodLog.add/addFavorite/addNoCalc`,
-  `Sessions.savePartial/complete`) inside `Core.withLock` and one `ChangeLog` action; `writeId` =
-  the action id (only when something changed). Its commit refreshes the running week. A domain
-  refusal (plain `Error`) rolls the whole action back and answers `rejected`; lock timeout →
-  `unavailable`; other exceptions → `internal`. The action label is `Bot: <texto> {json}` where the
-  JSON is the op summary (`op`, `date`, `session`/`meal`, `fields`/`exercises`/`items`), which
-  `catalog.recent` (Log actions of the last 30 min, not undone, newest first) and `write.undo`
-  read back; actions made in the sheet come back with their label only.
+  Deployment topology is one deploy per client (one bound `apps/sheet4` Web App and one agent
+  configuration per spreadsheet).
+- **Writes & idempotency**: writes call only domain modules (`Diary.save`,
+  `FoodLog.add/addFavorite/addNoCalc`, `Sessions.savePartial/complete`) inside `Core.withLock` and
+  one `ChangeLog` action; `writeId` = the action id (only when something changed). Its commit
+  refreshes the running week. When `requestId` (non-empty string ≤ 120 chars) is provided, `SheetApi`
+  scans the last 200 rows of `Log` (`REQUEST_ID_SCAN_ROWS`) inside the lock before running the write
+  (decoding `Depois` only for matching rows; a retry arriving after more than 200 intervening `Log`
+  rows — e.g. after a bulk migration or manual recompute — falls outside the window and executes as a
+  new write): if an action with the same `requestId` and payload signature already exists,
+  the write is skipped and the stored result is returned with `writeId` and `deduplicated: true`
+  (plus `undone: true` if that action was already undone by the user; rolled-back partial failures
+  strip the API metadata JSON so retries can run again); if the same `requestId` is reused with a
+  different operation or payload, `SheetApi` rejects it with `requestId:conflict`. On the Python
+  agent side, `Handler` deduplicates concurrent and completed Telegram `update_id`s in-memory per
+  instance (while allowing retries after transient failures) and stamps each write tool call with a
+  deterministic `requestId` (`tg:<update_id>:<op>:<sha256[:16]>`, sequenced `:2`, `:3` only after a
+  completed call with the same payload in the same turn) so HTTP retries and re-executions that emit
+  the same tool arguments are idempotent in the sheet (complementing `catalog.recent`; if an older
+  Web App deployment rejects `requestId`, `SheetClient` retries without it). A domain refusal (plain
+  `Error`) rolls the whole action back and answers `rejected`; lock timeout → `unavailable`; other
+  exceptions → `internal`. The action label is `Bot: <texto> {json}` where the JSON is the op
+  summary (`op`, `date`, `session`/`meal`, `fields`/`exercises`/`items`, plus `requestId`/`sig` when
+  present), which `catalog.recent` (Log actions of the last 30 min, not undone, newest first) and
+  `write.undo` read back (stripping the trailing JSON from user-facing undo error messages); actions
+  made in the sheet come back with their label only.
 - **Ops**: `catalog` (today, timezone, client name, `phase` = phase.get(today), `trainingPhase`,
   sessions, rotation, `nextSession`, `lastWorkout`, exercises with group, plan rows with
   prescription, foods, favourites, meals, units, recent) · `diary.upsert {date, fields}` (the 12

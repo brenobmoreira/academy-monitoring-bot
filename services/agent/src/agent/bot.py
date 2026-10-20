@@ -135,11 +135,13 @@ instrução):
 @dataclass(frozen=True)
 class Answer:
     """The HTML reply to one message and what it wrote: `wrote` is true when anything was saved,
-    `write_ids` are the sheet's undo ids of those writes, oldest first (the buttons use both)."""
+    `write_ids` are the sheet's undo ids of those writes, oldest first (the buttons use both), and
+    `failed` marks a transient model or sheet failure."""
 
     text: str
     write_ids: tuple[str, ...] = ()
     wrote: bool = False
+    failed: bool = False
 
 
 def instruction(now: datetime, context: str | None = None) -> str:
@@ -244,6 +246,7 @@ class Bot:
             parts.append(types.Part(text=f"{label}\n{text}" if text.strip() else label))
         message = types.Content(role="user", parts=parts)
         final, note = "", ""
+        model_failed = False
         try:
             async for event in runner.run_async(
                 user_id=user_id,
@@ -265,13 +268,15 @@ class Bot:
             else:
                 log.exception("model call failed for message %r", text)
                 note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
+                model_failed = True
         if journal.sheet_failed and not journal.writes:
             log.warning("sheet unavailable for message %r: %s", text, journal.error_codes)
-            return Answer(SHEET_FAILED)
+            return Answer(SHEET_FAILED, failed=True)
         return Answer(
             compose(confirmation(journal.writes), final, note),
             write_ids=tuple(journal.write_ids),
             wrote=bool(journal.writes),
+            failed=model_failed or journal.sheet_failed,
         )
 
 

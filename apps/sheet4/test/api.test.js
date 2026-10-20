@@ -40,7 +40,7 @@ function setup(opts = {}) {
     now: opts.now || NOW,
     properties: { SHEET_API_KEY: KEY },
   });
-  ctx.api = (op, args) => plain(ctx.SheetApi.run(op, args));
+  ctx.api = (op, args, requestId) => plain(ctx.SheetApi.run(op, args, requestId));
   ctx.http = (body) => plain(JSON.parse(ctx.doPost({ postData: { contents: typeof body === 'string' ? body : JSON.stringify(body) } }).getContent()));
   return ctx;
 }
@@ -398,4 +398,125 @@ test('a domain refusal rolls the whole action back and answers rejected', () => 
   assert.match(r.errors[0].message, /Não foi possível lançar "Lanche · v1"/);
   assert.equal(ctx.Tabs.read('food').length, 0, 'the first item was rolled back too');
   assert.equal(ctx.Days.get('2026-10-20'), null);
+});
+
+/* requestId idempotency ------------------------------------------------------------------------- */
+
+test('requestId validation: wrong_type, empty and too_long reported together with args errors', () => {
+  const ctx = setup();
+  assert.deepEqual(codes(ctx.http({ key: KEY, op: 'diary.upsert', requestId: 123, args: { date: '2026-10-20', fields: { weightKg: 82 } } })), ['requestId:wrong_type']);
+  assert.deepEqual(codes(ctx.http({ key: KEY, op: 'diary.upsert', requestId: '   ', args: { date: '2026-10-20', fields: { weightKg: 82 } } })), ['requestId:empty']);
+  assert.deepEqual(codes(ctx.http({ key: KEY, op: 'diary.upsert', requestId: 'x'.repeat(121), args: { date: '2026-10-20', fields: {} } })).sort(), ['args.fields:empty', 'requestId:too_long']);
+  assert.equal(ctx.Tabs.read('diary').length, 0);
+});
+
+test('requestId idempotency: retrying food.add, diary.upsert and workout.upsert does not duplicate rows or actions', () => {
+  const ctx = setup();
+
+  // 1. food.add retry via doPost envelope
+  const foodReq = {
+    key: KEY,
+    op: 'food.add',
+    requestId: 'tg:101:food.add:abc',
+    args: {
+      date: '2026-10-20',
+      meal: 'Almoço',
+      items: [
+        { food: 'arroz branco cozido', qty: 150, unit: 'g' },
+        { food: 'Ovo inteiro cozido', qty: 2, unit: 'un' },
+      ],
+    },
+  };
+  const f1 = ok(ctx.http(foodReq));
+  const f2 = ok(ctx.http(foodReq));
+  assert.equal(f2.writeId, f1.writeId);
+  assert.equal(f2.deduplicated, true);
+  assert.deepEqual(f2.items, f1.items);
+  assert.deepEqual(f2.totals, f1.totals);
+  assert.equal(ctx.Tabs.read('food').length, 2, 'still 2 food rows, not 4');
+  assert.equal(ctx.Days.get('2026-10-20').kcal, 338, 'day kcal not doubled');
+
+  // 2. diary.upsert retry (even with different key order)
+  const d1 = ok(ctx.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: 82.4, sleepH: 7.5 } }, 'tg:101:diary.upsert:def'));
+  const d2 = ok(ctx.api('diary.upsert', { date: '2026-10-20', fields: { sleepH: 7.5, weightKg: 82.4 } }, 'tg:101:diary.upsert:def'));
+  assert.equal(d2.writeId, d1.writeId);
+  assert.equal(d2.deduplicated, true);
+  assert.deepEqual(d2.fields, d1.fields);
+  assert.deepEqual(plain(d2.changed).sort(), ['sleepH', 'weightKg']);
+
+  // 3. workout.upsert retry
+  const w1 = ok(ctx.api('workout.upsert', { date: '2026-10-20', session: 'upper', exercises: UPPER, complete: true }, 'tg:101:workout.upsert:ghi'));
+  const w2 = ok(ctx.api('workout.upsert', { date: '2026-10-20', session: 'Upper', exercises: UPPER, complete: true }, 'tg:101:workout.upsert:ghi'));
+  assert.equal(w2.writeId, w1.writeId);
+  assert.equal(w2.deduplicated, true);
+  assert.equal(w2.state, 'Concluído');
+  assert.equal(w2.workVolume, w1.workVolume);
+  assert.equal(w2.sessionsConcluded, w1.sessionsConcluded);
+  assert.equal(w2.sessionsConcluded, 1);
+  assert.deepEqual(w2.exercises, w1.exercises);
+  assert.equal(ctx.ChangeLog.actions().length, 3, 'only 3 actions logged across 6 calls');
+
+  // catalog.recent and write.undo do not leak internal requestId/sig fields
+  const recent = ok(ctx.api('catalog', {})).recent;
+  assert.equal(recent[0].requestId, undefined);
+  assert.equal(recent[0].sig, undefined);
+});
+
+test('requestId conflict, user undo vs rolled-back partial failure, entryId lookup and log scan', () => {
+  const ctx = setup({
+    tabs: {
+      favorites: [{ name: 'Lanche quebrado', version: 'v1' }],
+      ingredients: [{ favorite: 'Lanche quebrado', food: 'Inexistente', qty: 50, unit: 'g', version: 'v1', check: 'Calculado' }],
+    },
+  });
+
+  // 1. A failed write rolls back and strips requestId from its log rows, so retrying with the same requestId succeeds (B1)
+  const bad = ctx.api('food.add', { date: '2026-10-20', meal: 'Lanche', items: [{ food: 'Arroz branco cozido', qty: 100 }, { favorite: 'Lanche quebrado' }] }, 'req-retry-after-fail');
+  assert.equal(bad.ok, false);
+  const fixed = ok(ctx.api('food.add', { date: '2026-10-20', meal: 'Lanche', items: [{ food: 'Arroz branco cozido', qty: 100 }] }, 'req-retry-after-fail'));
+  assert.ok(fixed.writeId);
+  assert.equal(ctx.Tabs.read('food').length, 1);
+
+  // 2. Reusing the same requestId for a different payload or op is rejected with conflict
+  const conflictPayload = ctx.api('food.add', { date: '2026-10-20', meal: 'Lanche', items: [{ food: 'Arroz branco cozido', qty: 200 }] }, 'req-retry-after-fail');
+  assert.deepEqual(codes(conflictPayload), ['requestId:conflict']);
+  const conflictOp = ctx.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: 80 } }, 'req-retry-after-fail');
+  assert.deepEqual(codes(conflictOp), ['requestId:conflict']);
+
+  // 3. M5: deleting an earlier food row shifts row numbers, but deduplicated food.add still resolves by entryId
+  const second = ok(ctx.api('food.add', { date: '2026-10-20', meal: 'Jantar', items: [{ food: 'Ovo inteiro cozido', qty: 2, unit: 'un' }] }, 'req-second-food'));
+  ctx.FoodLog.remove([6]);
+  assert.equal(ctx.Tabs.read('food').length, 1);
+  const secondRetry = ok(ctx.api('food.add', { date: '2026-10-20', meal: 'Jantar', items: [{ food: 'Ovo inteiro cozido', qty: 2, unit: 'un' }] }, 'req-second-food'));
+  assert.equal(secondRetry.deduplicated, true);
+  assert.deepEqual(secondRetry.items, second.items);
+
+  // 4. B2: Undo error messages (not_latest / conflict) never leak requestId or sig
+  const diaryWrite = ok(ctx.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: 82.0 } }, 'req-diary-secret-id'));
+  const notLatest = ctx.api('write.undo', { writeId: second.writeId });
+  assert.equal(notLatest.ok, false);
+  assert.ok(!notLatest.errors[0].message.includes('req-diary-secret-id'));
+  assert.ok(!notLatest.errors[0].message.includes('"sig"'));
+  ctx.SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Diário').getRange('B6').setValue(99);
+  const conflictUndo = ctx.api('write.undo', { writeId: diaryWrite.writeId });
+  assert.equal(conflictUndo.ok, false);
+  assert.ok(!conflictUndo.errors[0].message.includes('req-diary-secret-id'));
+  assert.ok(!conflictUndo.errors[0].message.includes('"sig"'));
+  ctx.SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Diário').getRange('B6').setValue(82.0);
+
+  // 5. B1: After write.undo, a late redelivery of the same requestId returns deduplicated+undone without resurrecting the write
+  ok(ctx.api('write.undo', { writeId: diaryWrite.writeId }));
+  assert.equal(ctx.Days.get('2026-10-20').weightKg, null);
+  const lateRedelivery = ok(ctx.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: 82.0 } }, 'req-diary-secret-id'));
+  assert.equal(lateRedelivery.writeId, diaryWrite.writeId);
+  assert.equal(lateRedelivery.deduplicated, true);
+  assert.equal(lateRedelivery.undone, true);
+  assert.equal(ctx.Days.get('2026-10-20').weightKg, null, 'undone write is not resurrected');
+
+  // 6. M4: A write with a new requestId does 0 ChangeLog.decode calls while scanning Log
+  let decodeCalls = 0;
+  const origDecode = ctx.ChangeLog.decode;
+  ctx.ChangeLog.decode = (t) => { decodeCalls += 1; return origDecode(t); };
+  ok(ctx.api('diary.upsert', { date: '2026-10-20', fields: { sleepH: 8 } }, 'req-brand-new'));
+  assert.equal(decodeCalls, 0, 'no Log JSON decoded on a fresh requestId');
 });

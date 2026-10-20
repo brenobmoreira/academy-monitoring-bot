@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, NamedTuple, Protocol
@@ -20,6 +22,7 @@ from agent.llm import build_model
 from agent.settings import Settings
 from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient
+from agent.tools import update_key_scope
 from agent.undo import undo_writes
 
 log = logging.getLogger(__name__)
@@ -28,6 +31,39 @@ FAILURE = "⚠ Não consegui processar agora. Confira a planilha antes de reenvi
 TYPING_EVERY = 4.0  # seconds; Telegram clears the "typing…" status after about 5 s
 MEDIA_MAX_BYTES = 5_000_000
 DOWNLOAD_FAILED = "⚠ Não consegui baixar o arquivo do Telegram. Tente de novo ou envie em texto."
+
+
+class UpdateDeduplicator:
+    """Thread-safe, in-process guard against duplicate Telegram update deliveries.
+
+    While an update_id is in flight, a second delivery in the same instance is ignored immediately.
+    Once an update finishes without a transient failure (`reply.transient` is False), its update_id
+    is kept in a bounded FIFO cache so late webhook retries are also ignored. If an update fails
+    transiently (sheet/model/download/send error), it is released without marking completed so a
+    retry can complete the work.
+    """
+
+    def __init__(self, max_size: int = 1024) -> None:
+        self._max_size = max_size
+        self._lock = threading.Lock()
+        self._in_flight: set[int] = set()
+        self._completed: OrderedDict[int, None] = OrderedDict()
+
+    def try_begin(self, update_id: int) -> bool:
+        with self._lock:
+            if update_id in self._in_flight or update_id in self._completed:
+                return False
+            self._in_flight.add(update_id)
+            return True
+
+    def finish(self, update_id: int, *, completed: bool) -> None:
+        with self._lock:
+            self._in_flight.discard(update_id)
+            if completed:
+                self._completed[update_id] = None
+                self._completed.move_to_end(update_id)
+                while len(self._completed) > self._max_size:
+                    self._completed.popitem(last=False)
 
 
 def too_large(max_bytes: int) -> str:
@@ -113,6 +149,10 @@ def _size(item: dict[str, Any]) -> int | None:
     return size if isinstance(size, int) else None
 
 
+def _update_id(raw: Any) -> int | None:
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+
+
 class Handler:
     def __init__(
         self,
@@ -125,6 +165,7 @@ class Handler:
         typing_every: float = TYPING_EVERY,
         media_enabled: bool = True,
         media_max_bytes: int = MEDIA_MAX_BYTES,
+        deduplicator: UpdateDeduplicator | None = None,
     ) -> None:
         self._allowed = allowed_chat_ids
         self._bot = bot
@@ -135,31 +176,45 @@ class Handler:
         self._typing_every = typing_every
         self._media_enabled = media_enabled
         self._media_max_bytes = media_max_bytes
+        self._deduplicator = deduplicator if deduplicator is not None else UpdateDeduplicator()
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         """Never raises: a webhook that errors makes Telegram resend the same update."""
-        if "callback_query" in update:
-            await self._callback(update["callback_query"])
+        update_id = _update_id(update.get("update_id"))
+        if update_id is not None and not self._deduplicator.try_begin(update_id):
+            log.info("ignoring duplicate Telegram update %s", update_id)
             return
+        completed = False
+        try:
+            completed = await self._process_update(update, update_id)
+        finally:
+            if update_id is not None:
+                self._deduplicator.finish(update_id, completed=completed)
+
+    async def _process_update(self, update: dict[str, Any], update_id: int | None) -> bool:
+        if "callback_query" in update:
+            return await self._callback(update["callback_query"])
         message = update.get("message") or {}
         text = message.get("text")
         chat_id = (message.get("chat") or {}).get("id")
         if chat_id not in self._allowed:
-            return
+            return True
         if not isinstance(text, str) or not text.strip():
-            reply = await self._media(message, chat_id, update.get("update_id"))
+            reply = await self._media(message, chat_id, update_id)
             if reply is None:
-                return
+                return True
         else:
             parsed = parse_command(text)
             if parsed is not None:
                 reply = await self._command(*parsed, chat_id=chat_id)
             else:
-                reply = await self._run_bot(text, message, update.get("update_id"))
+                reply = await self._run_bot(text, message, update_id)
         try:
             await self._send(chat_id, reply)
         except Exception:
             log.exception("could not send the reply to chat %s", chat_id)
+            return False
+        return not reply.transient
 
     async def _run_bot(
         self, text: str, message: dict[str, Any], update_id: Any, media: list[Media] | None = None
@@ -169,15 +224,20 @@ class Handler:
         await asyncio.sleep(0)  # let the first action go out before the bot starts
         try:
             context = replied_text(message)
-            if media:
-                answer = await self._bot.reply(text, user_id=str(chat_id), context=context, media=media)
-            else:
-                answer = await self._bot.reply(text, user_id=str(chat_id), context=context)
+            uid = _update_id(update_id)
+            scope_key = f"tg:{uid}" if uid is not None else None
+            with update_key_scope(scope_key):
+                if media:
+                    answer = await self._bot.reply(text, user_id=str(chat_id), context=context, media=media)
+                else:
+                    answer = await self._bot.reply(text, user_id=str(chat_id), context=context)
             markup = buttons.keyboard(answer.write_ids) if answer.wrote else None
-            return Reply(answer.text, html=True, reply_markup=markup)
+            return Reply(
+                answer.text, html=True, reply_markup=markup, failed=answer.failed, transient=answer.failed
+            )
         except Exception:
             log.exception("bot failed on update %s", update_id)
-            return Reply(FAILURE)
+            return Reply(FAILURE, failed=True, transient=True)
         finally:
             typing.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -201,7 +261,7 @@ class Handler:
             return Reply(too_large(self._media_max_bytes))
         except Exception:
             log.exception("could not download the file of update %s", update_id)
-            return Reply(DOWNLOAD_FAILED)
+            return Reply(DOWNLOAD_FAILED, failed=True, transient=True)
         return await self._run_bot(caption, message, update_id, media=[Media(ref.mime_type, data)])
 
     async def _download(self, ref: MediaRef) -> bytes:
@@ -224,42 +284,48 @@ class Handler:
             return await COMMANDS[name].run(ctx, args)
         except Exception:
             log.exception("command /%s failed", name)
-            return Reply(FAILURE)
+            return Reply(FAILURE, failed=True, transient=True)
 
-    async def _callback(self, query: dict[str, Any]) -> None:
+    async def _callback(self, query: dict[str, Any]) -> bool:
         """A tap on an inline button. Always answered (Telegram shows a spinner until then), even
         when the chat is not allowed or the action fails; the failure shows as a toast."""
         message = query.get("message") or {}
         chat_id = (message.get("chat") or {}).get("id")
         message_id = message.get("message_id")
         toast = None
+        completed = True
         try:
             if chat_id in self._allowed and isinstance(message_id, int):
-                await self._button(str(query.get("data") or ""), chat_id, message_id, message)
+                completed = await self._button(str(query.get("data") or ""), chat_id, message_id, message)
         except Exception:
             log.exception("button %r failed", query.get("data"))
             toast = FAILURE
+            completed = False
         try:
             await self._telegram.answer_callback_query(str(query.get("id", "")), toast)
         except Exception:
             log.exception("could not answer callback query %s", query.get("id"))
+        return completed
 
-    async def _button(self, data: str, chat_id: int, message_id: int, message: dict[str, Any]) -> None:
+    async def _button(self, data: str, chat_id: int, message_id: int, message: dict[str, Any]) -> bool:
         verb, ids = buttons.parse(data)
         if verb == buttons.OK:
             await self._remove_keyboard(chat_id, message_id)
-        elif verb == buttons.UNDO:
+            return True
+        if verb == buttons.UNDO:
             if self._sheet is None:
                 raise RuntimeError("this handler has no sheet API")
             text, sheet_down = await undo_writes(self._sheet, ids)
             if not sheet_down:  # otherwise keep the button for another try
                 await self._remove_keyboard(chat_id, message_id)
             await self._send(chat_id, Reply(text), reply_to=message_id)
-        elif verb == buttons.FIX:
+            return not sheet_down
+        if verb == buttons.FIX:
             text, markup = buttons.fix_prompt(message.get("text"))
             await self._send(chat_id, Reply(text, reply_markup=markup), reply_to=message_id)
-        else:
-            log.warning("unknown button data %r", data)
+            return True
+        log.warning("unknown button data %r", data)
+        return True
 
     async def _remove_keyboard(self, chat_id: int, message_id: int) -> None:
         """Cosmetic: a message already edited (double tap) or too old to edit keeps its buttons."""
@@ -299,7 +365,12 @@ def replied_text(message: dict[str, Any]) -> str | None:
     return text if isinstance(text, str) and text.strip() else None
 
 
-def build_handler(settings: Settings, http: httpx.AsyncClient) -> Handler:
+def build_handler(
+    settings: Settings,
+    http: httpx.AsyncClient,
+    *,
+    deduplicator: UpdateDeduplicator | None = None,
+) -> Handler:
     sheet = SheetClient(settings.SHEET_API_URL, settings.SHEET_API_KEY.get_secret_value(), http)
     bot = Bot(sheet, build_model(settings), timezone=settings.TIMEZONE, max_llm_calls=settings.MAX_LLM_CALLS)
     telegram = TelegramClient(settings.TELEGRAM_BOT_TOKEN.get_secret_value(), http)
@@ -311,4 +382,5 @@ def build_handler(settings: Settings, http: httpx.AsyncClient) -> Handler:
         timezone=settings.TIMEZONE,
         media_enabled=settings.MEDIA_ENABLED,
         media_max_bytes=settings.MEDIA_MAX_BYTES,
+        deduplicator=deduplicator,
     )

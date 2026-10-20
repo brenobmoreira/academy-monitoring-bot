@@ -26,12 +26,18 @@ jobs:
           filters: |
             sheet:
               - 'apps/sheet/**'
+              - 'apps/sheet4/**'
+              - 'clients/**'
+              - 'tools/**'
               - 'package.json'
               - '.github/workflows/ci.yml'
             agent:
               - 'services/agent/**'
               - 'e2e/**'
-              - 'apps/sheet/src/**'
+              - 'apps/sheet4/src/**'
+              - 'apps/sheet4/test/harness.js'
+              - 'apps/sheet4/test/fakes.js'
+              - 'apps/sheet4/test/food_helpers.js'
               - '.github/workflows/ci.yml'
 
   sheet:

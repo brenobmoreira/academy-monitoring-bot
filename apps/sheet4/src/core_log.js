@@ -164,8 +164,13 @@ const ChangeLog = {
       try { if (Undo.applied_(p.change)) Undo.revert_(p.change); } catch (err) { console.error(err); }
     });
     const now = new Date();
+    const cleanAction = ChangeLog.current_ ? Undo.cleanLabel_(ChangeLog.current_.label) : null;
     pending.forEach((p) => {
-      try { Tabs.update('log', p.logRow, { undone: now }); } catch (err) { console.error(err); }
+      try {
+        const patch = { undone: now };
+        if (cleanAction) patch.action = cleanAction;
+        Tabs.update('log', p.logRow, patch);
+      } catch (err) { console.error(err); }
     });
   },
 
@@ -228,6 +233,13 @@ const ChangeLog = {
 };
 
 const Undo = {
+  /** Strips trailing API metadata JSON (` {"op":...}`) from a Log action label for user-facing messages. */
+  cleanLabel_(label) {
+    const s = String(label === null || label === undefined ? '' : label);
+    const i = s.indexOf(' {"op":');
+    return i > 0 ? s.slice(0, i) : s;
+  },
+
   /**
    * Undoes the latest action not yet undone.
    * @returns {{actionId: string, action: string, changes: number}}
@@ -247,7 +259,7 @@ const Undo = {
     const act = ChangeLog.actions().find((a) => a.id === actionId);
     if (!act) throw Undo.error_('not_found', `Ação ${actionId} não encontrada no Log.`);
     if (act.undone) throw Undo.error_('already_undone', `Ação ${actionId} já foi desfeita.`);
-    if (pending[0].id !== actionId) throw Undo.error_('not_latest', `Só a última alteração pode ser desfeita; desfaça antes "${pending[0].label}".`);
+    if (pending[0].id !== actionId) throw Undo.error_('not_latest', `Só a última alteração pode ser desfeita; desfaça antes "${Undo.cleanLabel_(pending[0].label)}".`);
     return Undo.apply_(act);
   },
 
@@ -273,7 +285,7 @@ const Undo = {
         Undo.cellKeys_(located).forEach((k) => later.add(k));
       });
       if (conflicts.length) {
-        throw Undo.error_('conflict', `Não foi possível desfazer "${act.label}": ${conflicts.join('; ')}. Nada foi alterado; corrija direto na planilha.`);
+        throw Undo.error_('conflict', `Não foi possível desfazer "${Undo.cleanLabel_(act.label)}": ${conflicts.join('; ')}. Nada foi alterado; corrija direto na planilha.`);
       }
       changes.slice().reverse().forEach((c) => Undo.revert_(c));
       const now = new Date();

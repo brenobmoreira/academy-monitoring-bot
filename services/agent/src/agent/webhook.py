@@ -14,12 +14,13 @@ from typing import Any
 
 import httpx
 
-from agent.handler import build_handler
+from agent.handler import UpdateDeduplicator, build_handler
 from agent.settings import Settings
 
 log = logging.getLogger(__name__)
 
 SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
+_DEDUPLICATOR = UpdateDeduplicator()
 
 
 @functools.cache
@@ -37,7 +38,7 @@ def is_authorized(settings: Settings, given: str | None) -> bool:
 
 async def handle_update(settings: Settings, update: dict[str, Any]) -> None:
     async with httpx.AsyncClient() as http:
-        await build_handler(settings, http).handle_update(update)
+        await build_handler(settings, http, deduplicator=_DEDUPLICATOR).handle_update(update)
 
 
 async def process(secret: str | None, body: Any) -> tuple[str, int]:

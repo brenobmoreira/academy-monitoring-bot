@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from agent.sheet_client import SheetClient
+from agent.sheet_client import SheetClient, request_id_scope
 
 pytestmark = pytest.mark.unit
 
@@ -149,3 +149,38 @@ async def test_day_reads_one_date():
     res = await client(handler).day("2026-09-21")
     assert seen["body"] == {"key": "k", "op": "day.get", "args": {"date": "2026-09-21"}}
     assert res["result"]["workout"] == []
+
+
+async def test_sends_request_id_from_argument_or_scope():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    c = client(handler)
+    await c.upsert_diary("2026-09-21", {"weightKg": 82.0}, request_id="explicit-1")
+    with request_id_scope("scoped-2"):
+        await c.add_food("2026-09-21", "Almoço", [{"food": "Arroz", "qty": 100}])
+    await c.catalog()
+    assert seen[0]["requestId"] == "explicit-1"
+    assert seen[1]["requestId"] == "scoped-2"
+    assert "requestId" not in seen[2]
+
+
+async def test_retries_without_request_id_when_older_sheet_rejects_envelope_field():
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        if "requestId" in body:
+            err = {"path": "requestId", "code": "unknown_field", "message": "campo desconhecido"}
+            return httpx.Response(200, json={"ok": False, "errors": [err]})
+        return httpx.Response(200, json={"ok": True, "result": {"row": 6}})
+
+    res = await client(handler).upsert_diary("2026-09-21", {"weightKg": 82.0}, request_id="req-legacy")
+    assert res == {"ok": True, "result": {"row": 6}}
+    assert len(seen) == 2
+    assert seen[0]["requestId"] == "req-legacy"
+    assert "requestId" not in seen[1]

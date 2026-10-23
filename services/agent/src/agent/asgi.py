@@ -8,16 +8,15 @@ GET /healthz answers liveness checks.
 
 from __future__ import annotations
 
-import logging
-
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
 from agent import reminder, webhook
+from agent.telegram import configure_logging
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 
 
 async def telegram(request: Request) -> PlainTextResponse:

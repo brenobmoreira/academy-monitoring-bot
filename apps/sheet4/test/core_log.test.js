@@ -20,6 +20,21 @@ const diaryRows = () => [
   { date: '2026-09-28', weightKg: 66.9 },
 ];
 
+test('a cells change bigger than one Log cell is logged in parts that each fit and keep every cell', () => {
+  const ctx = boot({ tabs: { diary: diaryRows() } });
+  const before = {};
+  const after = {};
+  for (let i = 1; i <= 2000; i++) { before[`K${i}`] = 'antes '.repeat(6); after[`K${i}`] = 'depois '.repeat(6); }
+  ctx.ChangeLog.run('Grande', () => ctx.ChangeLog.track({ kind: 'cells', tab: 'Diário', row: null, before, after }));
+  const rows = ctx.Tabs.read('log').filter((r) => r.action === 'Grande');
+  assert.ok(rows.length > 1, `split into ${rows.length} rows`);
+  rows.forEach((r) => assert.ok(String(r.before).length <= 50000 && String(r.after).length <= 50000));
+  const keys = new Set();
+  rows.forEach((r) => Object.keys(ctx.ChangeLog.decode(r.after)).forEach((k) => keys.add(k)));
+  assert.equal(keys.size, 2000);
+  assert.equal(new Set(rows.map((r) => r.actionId)).size, 1, 'one action');
+});
+
 test('writes outside an action are not logged', () => {
   const ctx = boot({ tabs: { diary: diaryRows() } });
   ctx.Tabs.update('diary', 6, { weightKg: 60 });

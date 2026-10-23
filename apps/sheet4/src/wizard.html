@@ -103,8 +103,12 @@
         if (v && v !== current.objective[k]) values.objective[k] = v;
       });
       document.getElementById('confirm').disabled = true;
-      document.getElementById('out').innerHTML = '<p class="note">Migrando…</p>';
-      google.script.run.withSuccessHandler(done).withFailureHandler(fail).wizardConfirm(values);
+      document.getElementById('out').innerHTML = '<p class="note">Convertendo tabelas…</p>';
+      // Tables first, in an execution of their own (Apps Script stops a run after 6 minutes).
+      google.script.run.withSuccessHandler(function (tables) {
+        document.getElementById('out').innerHTML = '<p class="note">' + (tables.length ? tables.length + ' tabela(s) convertida(s). ' : '') + 'Migrando…</p>';
+        google.script.run.withSuccessHandler(done).withFailureHandler(fail).wizardConfirm(values);
+      }).withFailureHandler(fail).wizardUnwrapTables();
     }
 
     function done(r) {
@@ -112,6 +116,32 @@
       if (r.open && r.open.length) html += '<p class="err">Ainda abertos:\n' + r.open.map(esc).join('\n') + '</p>';
       (r.postSteps || []).forEach(function (s) { html += '<p class="note">' + esc(s.step) + ': ' + esc(s.status) + (s.message ? ' — ' + esc(s.message) : '') + '</p>'; });
       document.getElementById('out').innerHTML = html;
+      runNext((r.next || []).slice());
+    }
+
+    // Each post step is its own server execution (Apps Script stops a run after 6 minutes); a step
+    // that returns `again` is called once more with that work left before the next one starts.
+    function runNext(ids, arg) {
+      if (!ids.length) {
+        var end = document.createElement('p');
+        end.className = 'ok';
+        end.textContent = 'Tudo pronto. Pode fechar esta janela.';
+        document.getElementById('out').appendChild(end);
+        return;
+      }
+      var out = document.getElementById('out');
+      var wait = document.createElement('p');
+      wait.className = 'note';
+      wait.textContent = 'Executando o próximo passo… não feche esta janela.';
+      out.appendChild(wait);
+      google.script.run.withSuccessHandler(function (s) {
+        wait.className = s.status === 'erro' ? 'err' : 'note';
+        wait.textContent = s.step + ': ' + s.status + (s.message ? ' — ' + s.message : '');
+        if (s.again) runNext(ids, s.again); else runNext(ids.slice(1));
+      }).withFailureHandler(function (err) {
+        wait.className = 'err';
+        wait.textContent = 'Falhou: ' + (err && err.message ? err.message : String(err)) + ' (me mande este texto e o registro em Execuções).';
+      }).wizardPostStep(ids[0], arg || null);
     }
 
     function fail(err) {
@@ -120,7 +150,13 @@
       document.getElementById('errors').textContent = err && err.message ? err.message : String(err);
     }
 
-    load();
+    // The client JSON shipped with this spreadsheet's script (client_data.js, pushed per client and
+    // kept out of the repository) fills the field, so nothing has to be pasted.
+    google.script.run.withSuccessHandler(function (text) {
+      var field = document.getElementById('json');
+      if (text && !field.value) field.value = text;
+      load();
+    }).withFailureHandler(function () { load(); }).wizardClientJson();
   </script>
 </body>
 </html>

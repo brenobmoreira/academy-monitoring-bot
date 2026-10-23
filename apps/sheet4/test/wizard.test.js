@@ -95,3 +95,40 @@ test('menu Sistema: the three actions; the dialog shows the proposal page', () =
   assert.equal(out.ok, true);
   assert.deepEqual(out.open, []);
 });
+
+test('the layout step resumes in new executions when its time budget runs out, until every tab is styled', () => {
+  const ctx = load({ fixture: 'zoio_3_0', now: NOW });
+  const out = plain(ctx.wizardConfirm({ json: clientText('zoio') }));
+  plain(ctx.wizardPostStep('weeks'));
+  ctx.Migrate.STEP_BUDGET_MS = -1; // every execution styles a single tab, then hands over the rest
+  let r = plain(ctx.wizardPostStep('styles', null));
+  let calls = 1;
+  const seen = [];
+  while (r.again) {
+    assert.ok(seen.length === 0 || r.again.length < seen[seen.length - 1], 'progress on every call');
+    seen.push(r.again.length);
+    r = plain(ctx.wizardPostStep('styles', r.again));
+    calls += 1;
+  }
+  assert.equal(r.status, 'ok');
+  assert.ok(calls > 5, `resumed ${calls} times`);
+  assert.equal(calls, ctx.Tabs.ids().length, 'one tab per execution');
+  assert.equal(ctx.SpreadsheetApp.getActive().getActiveSheet().getName(), ctx.Tabs.get(ctx.Hoje.TAB).name, 'finished with Hoje');
+  assert.ok(out.ok);
+});
+
+test('the dialog runs the post steps after the migration, one execution and one undoable action each', () => {
+  const ctx = load({ fixture: 'zoio_3_0', now: NOW });
+  const out = plain(ctx.wizardConfirm({ json: clientText('zoio') }));
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.postSteps, [], 'nothing heavy inside the migration run');
+  assert.deepEqual(out.next, ['weeks', 'styles', 'dashboard', 'audit']);
+  const steps = out.next.map((id) => plain(ctx.wizardPostStep(id)));
+  assert.deepEqual(steps.map((s) => [s.step, s.status]),
+    [['Recalcular semanas', 'ok'], ['Aplicar layout', 'ok'], ['Atualizar painel', 'ok'], ['Auditoria final', 'ok']]);
+  assert.match(steps[3].message, /erro|nenhum/);
+  const labels = [...new Set(ctx.ChangeLog.actions().map((a) => a.label))];
+  assert.ok(labels.some((l) => /Aplicar layout$/.test(l)), 'layout logged as its own action');
+  assert.ok(ctx.Tabs.read('audit').some((r) => r.state === 'Aberto' || r.state === 'Corrigido'), 'audit rows written');
+  assert.deepEqual(plain(ctx.wizardConfirm({ json: clientText('zoio') })).next, [], 'already migrated: nothing to chain');
+});

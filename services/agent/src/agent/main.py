@@ -7,14 +7,14 @@ Deployed with --function telegram_webhook (root main.py re-exports it). Locally:
 from __future__ import annotations
 
 import asyncio
-import logging
 
 import functions_framework
 from flask import Request
 
 from agent import reminder, webhook
+from agent.telegram import configure_logging
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 
 
 @functions_framework.http

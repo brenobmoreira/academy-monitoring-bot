@@ -23,7 +23,7 @@ import httpx
 from agent.format import bold, escape
 from agent.settings import Settings
 from agent.summary import confirmation
-from agent.telegram import TelegramClient
+from agent.telegram import TelegramClient, configure_logging
 from agent.undo import undo_last
 from agent.weekly import week_bounds, week_summary
 
@@ -381,6 +381,6 @@ async def publish(settings: Settings) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     asyncio.run(publish(Settings.load()))
     log.info("command menu set: %s", ", ".join(f"/{name}" for name, _ in menu()))

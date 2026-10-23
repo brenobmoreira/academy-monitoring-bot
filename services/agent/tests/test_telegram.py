@@ -174,3 +174,14 @@ async def test_download_errors_never_carry_the_token(handler):
         await client(handler).download_file("voice/x.oga")
     logged = "".join(traceback.format_exception(caught.value))  # what log.exception would print
     assert "bottok" not in logged
+
+
+def test_configure_logging_keeps_httpx_request_lines_and_their_token_out(caplog):
+    import logging
+
+    from agent.telegram import configure_logging
+
+    configure_logging()
+    with caplog.at_level(logging.INFO):
+        logging.getLogger("httpx").info("HTTP Request: POST https://api.telegram.org/botSECRET/sendMessage")
+    assert "SECRET" not in caplog.text

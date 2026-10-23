@@ -379,26 +379,48 @@ const Audit = {
     });
   },
 
-  /** [{tab, ref, cells: [{row, col}]}] grouped by sheet and reference. */
+  /**
+   * [{tab, ref, cells: [{row, col}]}] grouped by sheet and reference. Columns are walked top to
+   * bottom and a rule is resolved once per run of cells with the same criteria type, help text and
+   * allowInvalid (a validation is usually applied to a whole column): on a real spreadsheet each
+   * getCriteriaValues() of a range rule is slow, and it throws when the range no longer exists.
+   */
   brokenValidations_() {
     const ss = SpreadsheetApp.getActive();
     const groups = {};
     const order = [];
+    /** null when the rule points at a range that exists, else the reference to report. */
+    const brokenRef = (rule) => {
+      let target;
+      try {
+        target = rule.getCriteriaValues()[0];
+      } catch (err) {
+        return '(intervalo inexistente)';
+      }
+      if (target && typeof target !== 'string') return null;
+      const ref = target ? String(target) : '(vazio)';
+      if (target && /^[A-Za-z_][A-Za-z0-9_.]*$/.test(ref) && ss.getRangeByName(ref)) return null;
+      return ref;
+    };
     Audit.sheets_().forEach(({ sheet }) => {
       const rows = sheet.getMaxRows();
       const cols = sheet.getMaxColumns();
       if (!rows || !cols) return;
       const rules = sheet.getRange(1, 1, rows, cols).getDataValidations();
-      rules.forEach((line, i) => line.forEach((rule, j) => {
-        if (!rule || String(rule.getCriteriaType()) !== 'VALUE_IN_RANGE') return;
-        const target = rule.getCriteriaValues()[0];
-        if (target && typeof target !== 'string') return;
-        const ref = target ? String(target) : '(vazio)';
-        if (target && /^[A-Za-z_][A-Za-z0-9_.]*$/.test(ref) && ss.getRangeByName(ref)) return;
-        const k = `${sheet.getName()}\u0000${ref}`;
-        if (!groups[k]) { groups[k] = { tab: sheet.getName(), ref, cells: [] }; order.push(k); }
-        groups[k].cells.push({ row: i + 1, col: j + 1 });
-      }));
+      for (let j = 0; j < cols; j++) {
+        let runKey = null;
+        let runRef = null;
+        for (let i = 0; i < rows; i++) {
+          const rule = rules[i] && rules[i][j];
+          if (!rule || String(rule.getCriteriaType()) !== 'VALUE_IN_RANGE') { runKey = null; continue; }
+          const key = `${rule.getHelpText()}\u0000${rule.getAllowInvalid()}`;
+          if (key !== runKey) { runKey = key; runRef = brokenRef(rule); }
+          if (runRef === null) continue;
+          const k = `${sheet.getName()}\u0000${runRef}`;
+          if (!groups[k]) { groups[k] = { tab: sheet.getName(), ref: runRef, cells: [] }; order.push(k); }
+          groups[k].cells.push({ row: i + 1, col: j + 1 });
+        }
+      }
     });
     return order.map((k) => groups[k]);
   },

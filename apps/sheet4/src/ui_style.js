@@ -32,6 +32,11 @@
  * Only presentation lives here: no data reads, no client values.
  */
 const Style = {
+  /** A border style name ('SOLID'…) as the SpreadsheetApp.BorderStyle value setBorder requires. */
+  border(name) {
+    return typeof name === 'string' && SpreadsheetApp.BorderStyle ? SpreadsheetApp.BorderStyle[name] : name;
+  },
+
   FONT: 'Inter',
 
   SIZE: { title: 18, band: 14, section: 12, body: 10, small: 9 },
@@ -127,13 +132,13 @@ const Style = {
 
   section(range) {
     Style.base_(range, Style.SIZE.section).setFontWeight('bold').setFontColor(Style.C.primaryText).setBackground(Style.C.primarySoft);
-    return range.setBorder(null, null, true, null, null, null, Style.C.primaryBorder, 'SOLID');
+    return range.setBorder(null, null, true, null, null, null, Style.C.primaryBorder, Style.border('SOLID'));
   },
 
   /** White card with a light outer border. */
   card(range) {
     range.setBackground(Style.C.surface);
-    return range.setBorder(true, true, true, true, null, null, Style.C.border, 'SOLID');
+    return range.setBorder(true, true, true, true, null, null, Style.C.border, Style.border('SOLID'));
   },
 
   label(range) {
@@ -143,7 +148,7 @@ const Style = {
   /** Editable cell: light yellow fill, dark border on every side. */
   input(range) {
     Style.base_(range, Style.SIZE.body).setBackground(Style.C.input).setFontColor(Style.C.text).setFontStyle('normal');
-    return range.setBorder(true, true, true, true, true, true, Style.C.inputBorder, 'SOLID');
+    return range.setBorder(true, true, true, true, true, true, Style.C.inputBorder, Style.border('SOLID'));
   },
 
   /** Calculated cell: grey fill and grey text (not italic). */
@@ -160,7 +165,7 @@ const Style = {
     const l = Style.LAYER[layer] || Style.LAYER[3];
     Style.base_(range, Style.SIZE.body).setBackground(l.headerBg).setFontColor(l.headerText).setFontWeight('bold')
       .setHorizontalAlignment('center').setWrap(true);
-    return range.setBorder(null, null, true, null, null, null, l.headerLine, 'SOLID_MEDIUM');
+    return range.setBorder(null, null, true, null, null, null, l.headerLine, Style.border('SOLID_MEDIUM'));
   },
 
   link(range) {
@@ -230,7 +235,7 @@ const Style = {
   technicalDateRule(range, background) {
     const a1 = range.getA1Notation().split(':')[0];
     return SpreadsheetApp.newConditionalFormatRule()
-      .whenFormulaSatisfied(`=AND(ISNUMBER(${a1}),${a1}<DATE(2000,1,1))`)
+      .whenFormulaSatisfied(Tabs.formula(`=AND(ISNUMBER(${a1}),${a1}<DATE(2000,1,1))`))
       .setFontColor(background || Style.C.surface)
       .setRanges([range])
       .build();
@@ -439,8 +444,8 @@ const Style = {
         range.setNumberFormats(grid((c) => c.f.nf || 'General'));
         range.setWraps(grid((c) => Boolean(c.f.wrap)));
         merges.forEach(([r, c1, c2]) => sheet.getRange(r, c1, 1, c2 - c1 + 1).merge());
-        boxes.forEach(([r1, r2, c1, c2, color]) => sheet.getRange(r1, c1, r2 - r1 + 1, c2 - c1 + 1).setBorder(true, true, true, true, null, null, color, 'SOLID'));
-        lines.forEach(([r, c1, c2, color, style]) => sheet.getRange(r, c1, 1, c2 - c1 + 1).setBorder(null, null, true, null, null, null, color, style));
+        boxes.forEach(([r1, r2, c1, c2, color]) => sheet.getRange(r1, c1, r2 - r1 + 1, c2 - c1 + 1).setBorder(true, true, true, true, null, null, color, Style.border('SOLID')));
+        lines.forEach(([r, c1, c2, color, style]) => sheet.getRange(r, c1, 1, c2 - c1 + 1).setBorder(null, null, true, null, null, null, color, Style.border(style)));
         let i = 0;
         while (i < rows.length) {
           let j = i;

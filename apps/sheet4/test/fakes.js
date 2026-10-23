@@ -443,6 +443,8 @@ const FORMAT_PROPS = [
 ];
 
 const BORDER_STYLE = { DOTTED: 'DOTTED', DASHED: 'DASHED', SOLID: 'SOLID', SOLID_MEDIUM: 'SOLID_MEDIUM', SOLID_THICK: 'SOLID_THICK', DOUBLE: 'DOUBLE' };
+/** SpreadsheetApp.BorderStyle values are enum objects: setBorder refuses a plain string, like Apps Script. */
+const BORDER_ENUM = Object.freeze(Object.fromEntries(Object.keys(BORDER_STYLE).map((k) => [k, Object.freeze({ name: () => k, toString: () => k })])));
 
 function setFmt(cell, key, value, def) {
   if (value === null || value === undefined || value === def) {
@@ -729,6 +731,36 @@ class FakeEmbeddedChart {
 
 // ---------------------------------------------------------------- Range
 
+/**
+ * Apps Script rejects setValue/setValues of a non-empty value that a strict (allowInvalid=false)
+ * list or range validation does not accept, with the rule's help text as the message. Other
+ * criteria, and a range that cannot be resolved, are not checked.
+ */
+function checkStrictValidation(sheet, r, c, v) {
+  if (typeof v === 'string' && v.length > 50000) {
+    throw new Error('A entrada contém mais que o limite máximo de 50000 caracteres em uma única célula.');
+  }
+  const cell = sheet.cellAt_(r, c);
+  const dv = cell && cell.dv;
+  if (!dv || dv.rule_.allowInvalid !== false || isEmpty(v)) return;
+  const { criteria, values } = dv.rule_;
+  let allowed;
+  if (criteria === 'VALUE_IN_LIST') {
+    allowed = values;
+  } else if (criteria === 'VALUE_IN_RANGE') {
+    const t = values[0];
+    const range = t && t.sheet ? new FakeRange(t.sheet, t.rect) : (typeof t === 'string' ? sheet.ss_.getRangeByName(t) : null);
+    if (!range) return;
+    allowed = range.getValues().flat();
+  } else {
+    return;
+  }
+  const text = String(v instanceof Date ? v.toISOString() : v);
+  if (!allowed.some((a) => !isEmpty(a) && String(a) === text)) {
+    throw new Error(dv.getHelpText() || 'Os dados inseridos na célula violam as regras de validação de dados definidas para esta célula.');
+  }
+}
+
 class FakeRange {
   constructor(sheet, rect) {
     this.sheet_ = sheet;
@@ -784,10 +816,14 @@ class FakeRange {
   getValue() { return this.getValues()[0][0]; }
   setValues(values) {
     this.checkShape_(values, 'setValues');
+    this.each_((r, c, i, j) => checkStrictValidation(this.sheet_, r, c, values[i][j]));
     this.each_((r, c, i, j) => this.sheet_.write_(r, c, values[i][j]));
     return this;
   }
-  setValue(v) { return this.each_((r, c) => this.sheet_.write_(r, c, v)); }
+  setValue(v) {
+    this.each_((r, c) => checkStrictValidation(this.sheet_, r, c, v));
+    return this.each_((r, c) => this.sheet_.write_(r, c, v));
+  }
   isBlank() { return this.map_((cell) => cell).every((l) => l.every((cell) => !cell || (isEmpty(cell.v) && !cell.f))); }
   getDisplayValues() { return this.map_((cell, r, c) => this.sheet_.display_(cell, r, c)); }
   getDisplayValue() { return this.getDisplayValues()[0][0]; }
@@ -856,7 +892,10 @@ class FakeRange {
     return f.wrap ? 'WRAP' : f.wrapStrategy || 'OVERFLOW';
   }
   setBorder(top, left, bottom, right, vertical, horizontal, color, style) {
-    const spec = { style: style || 'SOLID', color: normColor(color) || '#000000' };
+    if (typeof style === 'string') {
+      throw new Error('Os parâmetros não correspondem à assinatura de método para SpreadsheetApp.Range.setBorder.');
+    }
+    const spec = { style: style ? String(style) : 'SOLID', color: normColor(color) || '#000000' };
     const { r1, c1, r2, c2 } = this.rect_;
     const apply = (cell, side, flag) => {
       if (flag === null || flag === undefined) return;
@@ -1762,7 +1801,7 @@ function createContext(options = {}) {
     DataValidationCriteria: enumOf(DV_CRITERIA),
     BooleanCriteria: enumOf(BOOLEAN_CRITERIA),
     ProtectionType: enumOf(['RANGE', 'SHEET']),
-    BorderStyle: Object.freeze({ ...BORDER_STYLE }),
+    BorderStyle: BORDER_ENUM,
     WrapStrategy: enumOf(['WRAP', 'OVERFLOW', 'CLIP']),
     Dimension: enumOf(['ROWS', 'COLUMNS']),
     SheetType: enumOf(['GRID', 'OBJECT', 'DATASOURCE']),

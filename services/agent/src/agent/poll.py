@@ -17,7 +17,7 @@ import httpx
 
 from agent.handler import build_handler
 from agent.settings import Settings
-from agent.telegram import TelegramClient
+from agent.telegram import TelegramClient, configure_logging
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ async def run(settings: Settings) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     settings = Settings.load()
     log.info("model %s, up to %s calls per message", settings.LLM_MODEL, settings.MAX_LLM_CALLS)
     asyncio.run(run(settings))

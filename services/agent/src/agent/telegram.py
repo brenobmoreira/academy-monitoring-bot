@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 # Update kinds the bot handles; scripts/set-webhook.sh registers the same list (a test checks).
 ALLOWED_UPDATES = ["message", "callback_query"]
+
+
+def configure_logging() -> None:
+    """INFO logs for the entry points, minus httpx's per-request lines: a Bot API URL carries the
+    bot token, and those lines would put it in the terminal and in Cloud Logging."""
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class TelegramError(RuntimeError):

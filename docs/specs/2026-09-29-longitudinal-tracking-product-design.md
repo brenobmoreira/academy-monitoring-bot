@@ -600,7 +600,7 @@ Files: `apps/sheet4/src/workout.js` (`Exercises`, `Workouts`, `TrainingScreen`/`
 
 ## As built (migration/audit)
 
-Files: `apps/sheet4/src/migrate.js` (`Migrate`), `audit.js` (`Audit`), `wizard.js` + `wizard.html`
+Files: `apps/sheet4/src/migrate.js` (`Migrate`), `audit.js` (`Audit`), `wizard_ui.js` + `wizard.html`
 (`Wizard`, menu Sistema → Configuração inicial · Migrar 3.0 → 4.0 · Auditoria), client data in
 `clients/breno.json` and `clients/zoio.json` (format `academy-client/1`: `config` keyed by Config
 keys, `otherClientNames`, `history.{objectives,goals,plans}` with ids and real dates, `review` flags),

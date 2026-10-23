@@ -15,6 +15,27 @@
  * Writes go through ChangeLog.track when an action is running, so Undo can restore them.
  */
 const Tabs = {
+  /**
+   * Formula text in the spreadsheet's own syntax: Apps Script parses a formula with the
+   * spreadsheet locale, so where the decimal mark is a comma (pt_BR…) arguments are separated by
+   * ';' (a ',' there makes #ERROR!). Commas inside "quoted text" are kept.
+   */
+  formula(text) {
+    if (Tabs.formulaSep_ === undefined) {
+      let locale = '';
+      try { locale = SpreadsheetApp.getActive().getSpreadsheetLocale() || ''; } catch (err) { locale = ''; }
+      Tabs.formulaSep_ = /^(pt|es|fr|de|it|nl|ru|pl|tr|sv|da|nb|no|fi|cs|sk|hu|ro|el|uk|id|vi|ca|hr|sl|bg|lt|lv|et)/i.test(locale) ? ';' : ',';
+    }
+    if (Tabs.formulaSep_ === ',') return text;
+    let out = '';
+    let quoted = false;
+    String(text).split('').forEach((ch) => {
+      if (ch === '"') quoted = !quoted;
+      out += !quoted && ch === ',' ? ';' : ch;
+    });
+    return out;
+  },
+
   TITLE_ROW: 2,
   HELP_ROW: 3,
   HEADER_ROW: 5,

@@ -53,10 +53,24 @@ const Core = {
     (Core.listeners_[event] = Core.listeners_[event] || []).push(fn);
   },
 
-  /** Calls every listener of the event with payload; returns the payload. */
+  /** Calls every listener of the event with payload (none while the event is muted); returns the payload. */
   emit(event, payload) {
+    if (Core.muted_[event]) return payload;
     (Core.listeners_[event] || []).forEach((fn) => fn(payload));
     return payload;
+  },
+
+  /** Events whose listeners do not run (see mute). */
+  muted_: {},
+
+  /**
+   * Runs fn with the listeners of these events silenced, e.g. the derived refreshes (Semanas,
+   * Painel) that a staged migration runs once, as steps of their own.
+   */
+  mute(events, fn) {
+    const before = Object.assign({}, Core.muted_);
+    events.forEach((e) => { Core.muted_[e] = true; });
+    try { return fn(); } finally { Core.muted_ = before; }
   },
 };
 
@@ -113,8 +127,41 @@ const ChangeLog = {
   /** Called by Tabs before each write; logs only while an action runs. */
   track(change) {
     if (!ChangeLog.current_) return;
-    const row = ChangeLog.write_(ChangeLog.current_, change);
-    ChangeLog.pending_.push({ change, logRow: row });
+    ChangeLog.split_(change).forEach((part) => {
+      const row = ChangeLog.write_(ChangeLog.current_, part);
+      ChangeLog.pending_.push({ change: part, logRow: row });
+    });
+  },
+
+  /** A Log cell holds at most 50 000 characters; a big 'cells' change is logged as several. */
+  MAX_JSON: 40000,
+
+  /** The change, or its cells in groups whose before/after JSON each fit in one Log cell. */
+  split_(change) {
+    if (change.kind !== 'cells' || !change.after) return [change];
+    const max = ChangeLog.MAX_JSON;
+    const size = (o) => (o ? ChangeLog.encode(o).length : 0);
+    if (size(change.before) <= max && size(change.after) <= max) return [change];
+    const parts = [];
+    let cur = null;
+    let nb = 0;
+    let na = 0;
+    Object.keys(change.after).forEach((k) => {
+      const hasBefore = !!change.before && k in change.before;
+      const lb = hasBefore ? size({ [k]: change.before[k] }) : 0;
+      const la = size({ [k]: change.after[k] });
+      if (!cur || nb + lb > max || na + la > max) {
+        cur = { before: {}, after: {} };
+        parts.push(cur);
+        nb = 0;
+        na = 0;
+      }
+      if (hasBefore) cur.before[k] = change.before[k];
+      cur.after[k] = change.after[k];
+      nb += lb;
+      na += la;
+    });
+    return parts.map((p) => Object.assign({}, change, { before: change.before ? p.before : null, after: p.after }));
   },
 
   /**
@@ -422,8 +469,28 @@ const Undo = {
   },
 
   setCell_(range, value) {
-    if (typeof value === 'string' && value.charAt(0) === '=') range.setFormula(value);
-    else range.setValue(value === null || value === undefined ? '' : value);
+    if (typeof value === 'string' && value.charAt(0) === '=') { range.setFormula(value); return; }
+    const v = value === null || value === undefined ? '' : value;
+    // The value being restored may predate a strict validation added later (the 4.0 layout after a
+    // migration). Apps Script would reject the write, and only at the next read, so drop that rule first.
+    if (Undo.rejects_(range.getDataValidation(), v)) range.clearDataValidations();
+    range.setValue(v);
+  },
+
+  /** True when a strict list or range validation would refuse v (other criteria are not checked). */
+  rejects_(rule, v) {
+    if (!rule || rule.getAllowInvalid() || v === '') return false;
+    const type = String(rule.getCriteriaType());
+    let allowed;
+    try {
+      if (type === 'VALUE_IN_LIST') allowed = rule.getCriteriaValues()[0];
+      else if (type === 'VALUE_IN_RANGE') allowed = [].concat(...rule.getCriteriaValues()[0].getValues());
+      else return false;
+    } catch (err) {
+      return false;
+    }
+    const text = String(v instanceof Date ? v.toISOString() : v);
+    return !allowed.some((a) => a !== '' && a !== null && String(a) === text);
   },
 
   same_(a, b) {

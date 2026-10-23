@@ -78,19 +78,31 @@ const Migrate = {
   /**
    * Runs the migration (or the initial setup of an empty spreadsheet).
    * @param {Object|string=} client client JSON
-   * @param {{postSteps?: boolean}=} opts postSteps=false skips Weeks.recomputeAll / Setup.apply
+   * @param {{postSteps?: boolean, staged?: boolean}=} opts postSteps=false skips Weeks.recomputeAll /
+   *   Setup.apply; staged=true (the dialog) also skips both audits and the derived refreshes of the
+   *   commit (Semanas, Painel), which then run as STAGED_STEPS, one Apps Script execution each:
+   *   a real spreadsheet does not fit all of it in one run's 6 minutes.
    */
   run(client, opts) {
-    const o = opts || {};
+    const o = Object.assign({}, opts || {});
+    if (o.staged) o.postSteps = false;
     if (Migrate.isMigrated()) {
-      return { ok: true, alreadyMigrated: true, changes: 0, report: [], postSteps: [], message: 'A planilha já está na versão 4.0; nada foi alterado.' };
+      return { ok: true, alreadyMigrated: true, changes: 0, report: [], postSteps: [], findingsAfter: [], message: 'A planilha já está na versão 4.0; nada foi alterado.' };
     }
     const parsed = Migrate.parseClient(client);
     if (parsed.errors.length) throw new Error(`Configuração do cliente inválida: ${parsed.errors.join(' ')}`);
     const cc = parsed.client;
-    const findingsBefore = Audit.findings({ otherNames: cc.otherClientNames });
+    Migrate.t0_ = Date.now();
+    Migrate.log_('início');
+    const tablesConverted = Core.withLock(() => Migrate.unwrapTables_());
+    Migrate.log_(`tabelas nativas: ${tablesConverted.length}`);
+    const findingsBefore = o.staged ? [] : Audit.findings({ otherNames: cc.otherClientNames });
+    if (!o.staged) Migrate.log_('auditoria inicial');
 
-    const result = Core.withLock(() => ChangeLog.run(Migrate.LABEL, () => Migrate.steps_(cc, o)));
+    const migrate = () => Core.withLock(() => ChangeLog.run(Migrate.LABEL, () => Migrate.steps_(cc, o)));
+    const result = o.staged ? Core.mute(Migrate.DERIVED_EVENTS, migrate) : migrate();
+    Migrate.log_('migração concluída');
+    result.tablesConverted = tablesConverted;
     result.findingsBefore = findingsBefore;
     result.ok = true;
     result.alreadyMigrated = false;
@@ -98,6 +110,56 @@ const Migrate = {
     result.message = `Migração concluída: ${result.changes} ${result.changes === 1 ? 'alteração' : 'alterações'} registradas na Auditoria`
       + `${open ? `; ${open} ${open === 1 ? 'erro continua aberto' : 'erros continuam abertos'}` : ''}. Desfazer última alteração reverte a migração.`;
     return result;
+  },
+
+  /** Events whose listeners re-analyse Semanas and re-render the Painel after a commit. */
+  DERIVED_EVENTS: ['action.committed', 'weeks.refreshed'],
+
+  /**
+   * Native Sheets tables ("Formatar como tabela") turned back into plain ranges before migrating:
+   * a table refuses an empty header cell, grows over cells written next to it and types its
+   * columns, and the 4.0 code writes plain ranges. Each table's values and formulas are read, the
+   * table is removed through the Sheets advanced service, and the cells are written back (removing
+   * a table may clear them). Not part of the undoable action: an undo of the migration restores the
+   * 3.0 values as plain ranges. Without the advanced service nothing is done.
+   * @returns {string[]} "Tab (table name)" of every table converted
+   */
+  /** Seconds since the run started and what was done, in the execution log (Apps Script → Execuções). */
+  log_(what) {
+    if (!Migrate.t0_) Migrate.t0_ = Date.now();
+    console.log(`[migração ${Math.round((Date.now() - Migrate.t0_) / 1000)}s] ${what}`);
+  },
+
+  unwrapTables_() {
+    if (typeof Sheets === 'undefined' || !Sheets || !Sheets.Spreadsheets) return [];
+    const ss = SpreadsheetApp.getActive();
+    const meta = Sheets.Spreadsheets.get(ss.getId(), { fields: 'sheets(properties(sheetId,title),tables(tableId,name,range))' });
+    const tables = [];
+    (meta.sheets || []).forEach((s) => (s.tables || []).forEach((t) => {
+      const sheet = ss.getSheetByName(s.properties.title);
+      const g = t.range || {};
+      const r1 = (g.startRowIndex || 0) + 1;
+      const c1 = (g.startColumnIndex || 0) + 1;
+      const r2 = g.endRowIndex || sheet.getMaxRows();
+      const c2 = g.endColumnIndex || sheet.getMaxColumns();
+      const range = sheet.getRange(r1, c1, r2 - r1 + 1, c2 - c1 + 1);
+      const values = range.getValues();
+      const formulas = range.getFormulas();
+      tables.push({ id: t.tableId, label: `${s.properties.title} (${t.name})`, range, cells: values.map((line, i) => line.map((v, j) => formulas[i][j] || v)) });
+    }));
+    // Removing a table clears its cells, and a read right after the API call can still return the
+    // cached old values, so every table is written back at once, whatever a read would say. Its
+    // validations go first (Setup.apply re-creates the 4.0 rules): a strict rule added after the
+    // data would refuse old values.
+    tables.forEach((t) => {
+      Sheets.Spreadsheets.batchUpdate({ requests: [{ deleteTable: { tableId: t.id } }] }, ss.getId());
+      t.range.clearDataValidations();
+      t.range.setValues(t.cells);
+      SpreadsheetApp.flush();
+      Migrate.log_(`tabela convertida: ${t.label}`);
+    });
+    Tabs.invalidate();
+    return tables.map((t) => t.label);
   },
 
   /**
@@ -255,15 +317,22 @@ const Migrate = {
     Migrate.writeConfig_(config, legacy, rep);
     Tabs.ids().forEach((id) => {
       const spec = Tabs.get(id);
-      if (spec.kind === 'table' && ['config', 'audit', 'log'].indexOf(id) < 0 && created.indexOf(id) < 0) Migrate.migrateTable_(id, rep);
+      if (spec.kind === 'table' && ['config', 'audit', 'log'].indexOf(id) < 0 && created.indexOf(id) < 0) {
+        Migrate.migrateTable_(id, rep);
+        Migrate.log_(`aba migrada: ${spec.name}`);
+      }
     });
     Migrate.fixVersions_(cc, legacy, rep);
+    Migrate.log_('versões (objetivos, metas, fichas)');
     Migrate.fixResidues_(cc.otherClientNames.length ? cc.otherClientNames : config['system.otherClientNames'].value || [], rep);
+    Migrate.log_('resíduos de outros clientes');
     Migrate.fixStaleTexts_(rep);
     Migrate.stampIds_(rep);
+    Migrate.log_('textos e IDs');
     Migrate.fixTechnicalDates_(rep);
     Migrate.fixNamedRanges_(rep);
     Migrate.clearLayoutFormulas_('dashboard', rep);
+    Migrate.log_('correções concluídas');
 
     Config.set('system.schemaVersion', Config.SCHEMA_VERSION);
     rep('Info', 'schema_version', Tabs.get('config').name, 'system.schemaVersion', `Versão do esquema gravada: ${Config.SCHEMA_VERSION}.`, 'Rodar a migração de novo não altera nada.', null);
@@ -277,7 +346,8 @@ const Migrate = {
 
     Tabs.invalidate();
     Config.invalidate();
-    const findingsAfter = Audit.findings({ otherNames: cc.otherClientNames });
+    // Staged: the final audit is a step of its own (finalAudit_), after the layout.
+    const findingsAfter = opts && opts.staged ? [] : Audit.findings({ otherNames: cc.otherClientNames });
     const at = new Date();
     const rows = report.map((f) => Audit.row(f, at, f.state))
       .concat(cc.review.map((r) => Audit.row({ severity: 'Aviso', code: 'review', tab: '', cell: r.area, finding: r.message, action: 'Confirmar com o revisor e ajustar em Config/Metas se preciso.' }, at, 'Revisar')))
@@ -292,26 +362,85 @@ const Migrate = {
    * stays in the action, so undoing the migration also removes it.
    */
   postSteps_() {
-    const steps = [
-      { step: 'Recalcular semanas', fn: () => (typeof Weeks !== 'undefined' && Weeks && typeof Weeks.recomputeAll === 'function' ? () => Weeks.recomputeAll() : null) },
-      { step: 'Aplicar layout', fn: () => (typeof Setup !== 'undefined' && Setup && typeof Setup.apply === 'function' ? () => Setup.apply() : null) },
-    ];
-    return steps.map((s) => {
-      const fn = s.fn();
-      if (!fn) return { step: s.step, status: 'ausente', message: 'Módulo ainda não instalado; rode depois pelo menu.' };
-      try {
-        Tabs.invalidate();
-        Config.invalidate();
-        fn();
-        Tabs.invalidate();
-        Config.invalidate();
-        return { step: s.step, status: 'ok', message: '' };
-      } catch (err) {
-        Tabs.invalidate();
-        Config.invalidate();
-        return { step: s.step, status: 'erro', message: err.message };
+    return ['weeks', 'layout'].map((id) => Migrate.postStep_(id));
+  },
+
+  /**
+   * The steps that follow the migration: id → {step, fn() → function or null}. Inside a single run
+   * (postSteps_) they are weeks and layout; a staged migration runs STAGED_STEPS, one execution each.
+   */
+  POST_STEPS: {
+    weeks: { step: 'Recalcular semanas', fn: () => (typeof Weeks !== 'undefined' && Weeks && typeof Weeks.recomputeAll === 'function' ? () => Weeks.recomputeAll() : null) },
+    layout: { step: 'Aplicar layout', fn: () => (typeof Setup !== 'undefined' && Setup && typeof Setup.apply === 'function' ? () => Setup.apply() : null) },
+    styles: {
+      step: 'Aplicar layout',
+      fn: () => (typeof Setup !== 'undefined' && Setup && typeof Setup.apply === 'function'
+        ? (tabs) => Setup.apply({ dashboard: false, deadline: Date.now() + Migrate.STEP_BUDGET_MS, tabs: Array.isArray(tabs) ? tabs : undefined })
+        : null),
+    },
+    dashboard: { step: 'Atualizar painel', fn: () => (typeof Dashboard !== 'undefined' && Dashboard && typeof Dashboard.render === 'function' ? () => Dashboard.render() : null) },
+    audit: { step: 'Auditoria final', fn: () => () => Migrate.finalAudit_() },
+  },
+
+  /** What the dialog runs after a staged migration, in order. */
+  STAGED_STEPS: ['weeks', 'styles', 'dashboard', 'audit'],
+
+  /** Work time a resumable step takes before handing the rest to the next execution (of 6 min). */
+  STEP_BUDGET_MS: 270000,
+
+  /**
+   * The audit of the migrated spreadsheet, its findings appended to Auditoria as open items.
+   * @returns {string} the step's message
+   */
+  finalAudit_() {
+    let otherNames = [];
+    try { otherNames = Config.get('system.otherClientNames') || []; } catch (err) { otherNames = []; }
+    const findings = Audit.findings({ otherNames: Array.isArray(otherNames) ? otherNames : [] });
+    const at = new Date();
+    if (findings.length) Tabs.appendMany('audit', findings.map((f) => Audit.row(f, at, 'Aberto')));
+    const open = findings.filter((f) => f.severity === 'Erro').length;
+    return open ? `${open} ${open === 1 ? 'erro em aberto' : 'erros em aberto'}; veja a aba Auditoria` : 'nenhum erro em aberto';
+  },
+
+  /**
+   * One post step, its error caught: {step, status: 'ok'|'erro'|'ausente', message, again?}. `again`
+   * (the work left, e.g. tab ids) asks for another call with it as `arg`, in a new execution.
+   */
+  postStep_(id, arg) {
+    const s = Migrate.POST_STEPS[id];
+    if (!s) return { step: String(id), status: 'erro', message: 'Passo desconhecido.' };
+    const fn = s.fn();
+    if (!fn) return { step: s.step, status: 'ausente', message: 'Módulo ainda não instalado; rode depois pelo menu.' };
+    try {
+      Tabs.invalidate();
+      Config.invalidate();
+      const out = fn(arg);
+      Tabs.invalidate();
+      Config.invalidate();
+      if (out && Array.isArray(out.pending) && out.pending.length) {
+        return { step: s.step, status: 'ok', message: `continua (${out.pending.length} abas)`, again: out.pending };
       }
-    });
+      return { step: s.step, status: 'ok', message: typeof out === 'string' ? out : '' };
+    } catch (err) {
+      Tabs.invalidate();
+      Config.invalidate();
+      return { step: s.step, status: 'erro', message: err.message };
+    }
+  },
+
+  /**
+   * A post step in an execution of its own (each Apps Script run has 6 minutes, and the layout
+   * alone takes most of them on a real spreadsheet), logged as its own undoable action.
+   */
+  runPostStep(id, arg) {
+    const s = Migrate.POST_STEPS[id];
+    const label = `${Migrate.LABEL} — ${s ? s.step : id}`;
+    Migrate.t0_ = Date.now();
+    Migrate.log_(`${s ? s.step : id}: início`);
+    // The derived refreshes would re-render the Painel inside every step; it has a step of its own.
+    const r = Core.mute(Migrate.DERIVED_EVENTS, () => Core.withLock(() => ChangeLog.run(label, () => Migrate.postStep_(id, arg))));
+    Migrate.log_(`${r.step}: ${r.status}${r.message ? ` (${r.message})` : ''}`);
+    return r;
   },
 
   /* Tabs, columns and cells --------------------------------------------------------------------- */
@@ -393,11 +522,22 @@ const Migrate = {
     const after = {};
     changed.forEach((x) => { const a1 = Audit.a1_(x.r, x.c); before[a1] = x.old; after[a1] = x.v; });
     ChangeLog.track({ kind: 'cells', tab: sheet.getName(), row: null, before, after });
-    changed.forEach((x) => {
-      const cell = sheet.getRange(x.r, x.c);
-      if (typeof x.v === 'string' && x.v.charAt(0) === '=') cell.setFormula(x.v);
-      else cell.setValue(x.v);
+    // One setValues per run of adjacent cells in a row (each call is a round trip on a real
+    // spreadsheet); formulas are set one by one so they are never written as text.
+    const isFormula = (x) => typeof x.v === 'string' && x.v.charAt(0) === '=';
+    changed.filter(isFormula).forEach((x) => sheet.getRange(x.r, x.c).setFormula(x.v));
+    const plainCells = changed.filter((x) => !isFormula(x)).sort((a, b) => a.r - b.r || a.c - b.c);
+    let run = [];
+    const flush = () => {
+      if (run.length) sheet.getRange(run[0].r, run[0].c, 1, run.length).setValues([run.map((x) => x.v)]);
+      run = [];
+    };
+    plainCells.forEach((x) => {
+      const last = run[run.length - 1];
+      if (last && (last.r !== x.r || last.c + 1 !== x.c)) flush();
+      run.push(x);
     });
+    flush();
     Tabs.invalidate(sheet.getName());
     return changed.length;
   },
@@ -496,6 +636,10 @@ const Migrate = {
         rep('Info', 'columns_added', name, `${Audit.col_(m.lastCol + 1)}${spec.headerRow}:${Audit.col_(m.lastCol + missing.length)}${spec.headerRow}`, `Colunas da 4.0 acrescentadas à direita: ${missing.map((c) => c.header).join(', ')}.`, 'Nenhuma coluna existente foi movida.', null);
       }
     }
+    // A 3.0 input cell on the header row (Progressão's exercise picker in B5) has a strict validation
+    // that rejects the header text; headers never carry one, and Setup.apply re-creates the 4.0 rules.
+    Object.keys(cells).map((k) => k.split(',').map(Number)).filter(([r]) => r === spec.headerRow)
+      .forEach(([r, c]) => { if (c <= sheet.getMaxColumns()) sheet.getRange(r, c).clearDataValidations(); });
     Migrate.write_(sheet, cells);
     Tabs.invalidate();
     if (!rebuild || hasData) Migrate.fixDateCells_(id, rep);

@@ -131,7 +131,9 @@ const Wizard = {
 
     const errors = Wizard.validate_(raw);
     if (errors.length) throw new Error(errors.join(' '));
-    return Migrate.run(raw);
+    // Staged: the audits, Semanas, layout and Painel run afterwards, one execution each
+    // (wizardPostStep), so each fits Apps Script's 6 minutes.
+    return Migrate.run(raw, { staged: true });
   },
 
   /** Values the migration needs before writing anything (sex is asked, never assumed). */
@@ -222,7 +224,29 @@ function wizardConfirm(values) {
     ok: r.ok, alreadyMigrated: r.alreadyMigrated, message: r.message, changes: r.changes,
     open: (r.findingsAfter || []).map((f) => `${f.severity}: ${f.tab} ${f.cell} — ${f.finding}`),
     postSteps: r.postSteps || [],
+    next: r.ok && !r.alreadyMigrated ? Migrate.STAGED_STEPS.slice() : [],
   };
+}
+
+/**
+ * The client JSON shipped with this spreadsheet's script, as text for the dialog's field, or ''.
+ * CLIENT_JSON comes from client_data.js, a file pushed only to that client's Apps Script project
+ * (generated from clients/<name>.json, never committed): the code itself holds no client data.
+ */
+function wizardClientJson() {
+  return typeof CLIENT_JSON !== 'undefined' && CLIENT_JSON ? JSON.stringify(CLIENT_JSON, null, 2) : '';
+}
+
+/** Native tables turned into plain ranges, in an execution of its own before wizardConfirm. */
+function wizardUnwrapTables() {
+  if (Migrate.isMigrated()) return [];
+  Migrate.t0_ = Date.now();
+  return Core.withLock(() => Migrate.unwrapTables_());
+}
+
+/** One post step of the migration, called by the dialog after wizardConfirm: {step, status, message}. */
+function wizardPostStep(id, arg) {
+  return Migrate.runPostStep(id, arg);
 }
 
 Actions.register({

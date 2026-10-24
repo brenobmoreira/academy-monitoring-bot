@@ -755,8 +755,10 @@ function checkStrictValidation(sheet, r, c, v) {
   } else {
     return;
   }
-  const text = String(v instanceof Date ? v.toISOString() : v);
-  if (!allowed.some((a) => !isEmpty(a) && String(a) === text)) {
+  // Like Sheets: a date matches by its instant, booleans as TRUE/FALSE, the rest as text.
+  const key = (x) => (isDate(x) ? `d:${x.getTime()}` : typeof x === 'boolean' ? (x ? 'TRUE' : 'FALSE') : String(x));
+  const text = key(typeof v === 'string' && v.startsWith("'") ? v.slice(1) : v);
+  if (!allowed.some((a) => !isEmpty(a) && key(a) === text)) {
     throw new Error(dv.getHelpText() || 'Os dados inseridos na célula violam as regras de validação de dados definidas para esta célula.');
   }
 }
@@ -817,12 +819,12 @@ class FakeRange {
   setValues(values) {
     this.checkShape_(values, 'setValues');
     this.each_((r, c, i, j) => checkStrictValidation(this.sheet_, r, c, values[i][j]));
-    this.each_((r, c, i, j) => this.sheet_.write_(r, c, values[i][j]));
+    this.each_((r, c, i, j) => this.sheet_.input_(r, c, values[i][j]));
     return this;
   }
   setValue(v) {
     this.each_((r, c) => checkStrictValidation(this.sheet_, r, c, v));
-    return this.each_((r, c) => this.sheet_.write_(r, c, v));
+    return this.each_((r, c) => this.sheet_.input_(r, c, v));
   }
   isBlank() { return this.map_((cell) => cell).every((l) => l.every((cell) => !cell || (isEmpty(cell.v) && !cell.f))); }
   getDisplayValues() { return this.map_((cell, r, c) => this.sheet_.display_(cell, r, c)); }
@@ -1063,6 +1065,20 @@ class FakeSheet {
     if (!cell && create) cell = line[c - 1] = { v: '', f: null, fmt: null, note: '', dv: null };
     return cell;
   }
+  /**
+   * A value set by setValue(s)/appendRow, as Sheets reads it: "=..." is a formula and a leading
+   * apostrophe stores the rest as literal text ("'=1+1" is the text "=1+1", getFormula '').
+   * Not modelled: Sheets also parses other text ("0123", "29/09/2026") into numbers and dates.
+   */
+  input_(r, c, v) {
+    if (typeof v === 'string' && v.startsWith("'")) {
+      const cell = this.cellAt_(r, c, true);
+      cell.v = v.slice(1);
+      cell.f = null; delete cell.cached; delete cell.computed;
+      return cell;
+    }
+    return this.write_(r, c, v);
+  }
   write_(r, c, v) {
     if (typeof v === 'string' && v.startsWith('=') && v.length > 1) return this.writeFormula_(r, c, v);
     const cell = this.cellAt_(r, c, true);
@@ -1167,7 +1183,7 @@ class FakeSheet {
     const r = this.getLastRow() + 1;
     if (r > this.maxRows_) this.maxRows_ = r;
     if (values.length > this.maxCols_) this.maxCols_ = values.length;
-    values.forEach((v, i) => this.write_(r, i + 1, v));
+    values.forEach((v, i) => this.input_(r, i + 1, v));
     return this;
   }
   // structure
@@ -1915,18 +1931,24 @@ function createContext(options = {}) {
     getDocumentProperties: () => makeProps(stores.document),
   };
 
+  // One lock of each kind for the whole spreadsheet, as in Apps Script: while one lock object
+  // holds it, another (a second execution, see harness.parallelExecution) waits and times out.
+  const holders = {};
+  // Test helper: Apps Script frees the locks of an execution it killed (6-minute limit).
+  ctx.__releaseLocks = () => { Object.keys(holders).forEach((k) => { holders[k] = null; }); };
   const makeLock = (kind) => {
-    let held = false;
-    return {
+    const self = {};
+    const busy = () => ctx.__lockBusy || (holders[kind] && holders[kind] !== self);
+    return Object.assign(self, {
       waitLock: (ms) => {
         ctx.__locks.push('wait');
-        if (ctx.__lockBusy) throw new Error(`Lock timeout: another process was holding the ${kind} lock for too long (${ms} ms).`);
-        held = true;
+        if (busy()) throw new Error(`Lock timeout: another process was holding the ${kind} lock for too long (${ms} ms).`);
+        holders[kind] = self;
       },
-      tryLock: () => { ctx.__locks.push('try'); if (ctx.__lockBusy) return false; held = true; return true; },
-      releaseLock: () => { ctx.__locks.push('release'); held = false; },
-      hasLock: () => held,
-    };
+      tryLock: () => { ctx.__locks.push('try'); if (busy()) return false; holders[kind] = self; return true; },
+      releaseLock: () => { ctx.__locks.push('release'); if (holders[kind] === self) holders[kind] = null; },
+      hasLock: () => holders[kind] === self,
+    });
   };
   ctx.LockService = { getScriptLock: () => makeLock('script'), getDocumentLock: () => makeLock('document'), getUserLock: () => makeLock('user') };
 

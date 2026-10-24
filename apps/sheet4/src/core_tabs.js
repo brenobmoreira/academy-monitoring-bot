@@ -36,6 +36,14 @@ const Tabs = {
     return out;
   },
 
+  /**
+   * A value for setValue(s) that Sheets stores as given: a leading apostrophe marks the rest as
+   * text, so text that itself starts with one ("'Aba'!B5") gets a second, or it would lose it.
+   */
+  input(v) {
+    return typeof v === 'string' && v.charAt(0) === "'" ? `'${v}` : v;
+  },
+
   TITLE_ROW: 2,
   HELP_ROW: 3,
   HEADER_ROW: 5,
@@ -359,7 +367,7 @@ const Tabs = {
     const rows = [];
     const values = lines.map((cells, i) => {
       const line = [];
-      for (let c = 1; c <= width; c++) line.push(c in cells ? cells[c] : '');
+      for (let c = 1; c <= width; c++) line.push(c in cells ? Tabs.input(cells[c]) : '');
       const after = {};
       Object.keys(cells).forEach((c) => { after[Tabs.cellName_(byCol, Number(c))] = cells[c]; });
       Tabs.track_(id, { kind: 'append', tab: spec.name, row: first + i, before: null, after });
@@ -396,7 +404,7 @@ const Tabs = {
     });
     if (!changed.length) return row;
     Tabs.track_(id, { kind: 'update', tab: spec.name, row, before, after });
-    changed.forEach((c) => sheet.getRange(row, c).setValue(cells[c]));
+    changed.forEach((c) => sheet.getRange(row, c).setValue(Tabs.input(cells[c])));
     return row;
   },
 
@@ -436,7 +444,7 @@ const Tabs = {
     Object.keys(after).forEach((a1) => {
       const v = after[a1];
       if (typeof v === 'string' && v.charAt(0) === '=') sheet.getRange(a1).setFormula(v);
-      else sheet.getRange(a1).setValue(v);
+      else sheet.getRange(a1).setValue(Tabs.input(v));
     });
   },
 

@@ -227,7 +227,7 @@ const Hoje = {
     const sheet = Hoje.sheet_();
     Object.keys(cells).forEach((a1) => {
       const v = cells[a1];
-      sheet.getRange(a1).setValue(v === null || v === undefined ? '' : v);
+      sheet.getRange(a1).setValue(v === null || v === undefined ? '' : Tabs.input(v));
     });
   },
 

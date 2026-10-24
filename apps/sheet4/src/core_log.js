@@ -92,13 +92,46 @@ const ChangeLog = {
   },
 
   /**
+   * Checks made before an outermost action starts: fn(label, opts) throws to refuse it (an open
+   * staged migration refuses other writes, see Migrate.guard_). Modules register their own.
+   */
+  GUARDS: [],
+
+  /**
+   * Why a write that does not go through ChangeLog.run (a trigger, a screen or menu action that
+   * logs nothing) must not run now, as the guards' error; null when it may. Callers refuse or
+   * postpone the write instead of changing cells an open operation still has to restore.
+   */
+  blockedReason(label) {
+    try {
+      ChangeLog.GUARDS.forEach((g) => g(label, {}));
+      return null;
+    } catch (err) {
+      return err;
+    }
+  },
+
+  /**
    * Runs fn as one undoable action. Nested calls join the outer action. When fn throws, the
    * changes it made are reverted (newest first), their Log rows marked undone, and the error
    * rethrown.
+   * opts.id = the id to give a new action, chosen (and saved) by the caller before it starts, so
+   *   a run stopped midway can be found in the Log; it must not be in the Log yet.
+   * opts.join = the id of an earlier action this run continues (a staged migration spread over
+   *   several executions), so one undo reverts them all. Only the latest action not undone can
+   *   be continued: joining anything older would put its changes out of order in the Log.
    */
-  run(label, fn) {
+  run(label, fn, opts) {
     if (ChangeLog.current_) return fn();
-    ChangeLog.current_ = { id: ChangeLog.newId_(), label };
+    const o = opts || {};
+    ChangeLog.GUARDS.forEach((g) => g(label, o));
+    if (o.join && Undo.pending().map((a) => a.id)[0] !== o.join) {
+      throw Undo.error_('join_refused', `A ação ${o.join} não é a última pendente do Log; não pode ser continuada.`);
+    }
+    if (o.id && ChangeLog.entries().some((e) => e.actionId === o.id)) {
+      throw Undo.error_('id_in_use', `A ação ${o.id} já existe no Log.`);
+    }
+    ChangeLog.current_ = { id: o.join || o.id || ChangeLog.newId_(), label };
     ChangeLog.pending_ = [];
     let result;
     let tabs;
@@ -181,6 +214,7 @@ const ChangeLog = {
    * @returns {string} action id
    */
   record(action, changes) {
+    if (!ChangeLog.current_) ChangeLog.GUARDS.forEach((g) => g(action, {}));
     const act = ChangeLog.current_ || { id: ChangeLog.newId_(), label: action };
     changes.forEach((c) => {
       const row = ChangeLog.write_(act, c);
@@ -341,8 +375,20 @@ const Undo = {
       if (typeof Config !== 'undefined') Config.invalidate();
       return { actionId: act.id, action: act.label, changes: changes.length, tabs: changes.map((c) => c.tab) };
     });
-    Core.emit('action.committed', { label: act.label, tabs: result.tabs.filter((t, i, all) => all.indexOf(t) === i), undo: true });
+    if (!Undo.quiet_(act.label)) Core.emit('action.committed', { label: act.label, tabs: result.tabs.filter((t, i, all) => all.indexOf(t) === i), undo: true });
     return result;
+  },
+
+  /**
+   * Label prefixes whose undo does not announce a commit: the derived refreshes (Semanas, Painel)
+   * would rewrite, outside the Log, cells that an older action of the same operation still has
+   * to restore (the staged migration and its steps, registered by Migrate).
+   */
+  QUIET_PREFIXES: [],
+
+  quiet_(label) {
+    const s = Undo.cleanLabel_(label);
+    return Undo.QUIET_PREFIXES.some((p) => s === p || s.indexOf(`${p} — `) === 0);
   },
 
   /**
@@ -474,7 +520,7 @@ const Undo = {
     // The value being restored may predate a strict validation added later (the 4.0 layout after a
     // migration). Apps Script would reject the write, and only at the next read, so drop that rule first.
     if (Undo.rejects_(range.getDataValidation(), v)) range.clearDataValidations();
-    range.setValue(v);
+    range.setValue(Tabs.input(v));
   },
 
   /** True when a strict list or range validation would refuse v (other criteria are not checked). */
@@ -489,8 +535,19 @@ const Undo = {
     } catch (err) {
       return false;
     }
-    const text = String(v instanceof Date ? v.toISOString() : v);
-    return !allowed.some((a) => a !== '' && a !== null && String(a) === text);
+    const key = Undo.ruleKey_(v);
+    return !allowed.some((a) => a !== '' && a !== null && Undo.ruleKey_(a) === key);
+  },
+
+  /**
+   * A value as a list/range validation compares it: dates by instant (a range holds Date objects,
+   * the value restored from the Log is a Date too), booleans as Sheets shows them, numbers and
+   * text as text (a list item "0" accepts the number 0).
+   */
+  ruleKey_(v) {
+    if (v instanceof Date) return `d:${v.getTime()}`;
+    if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+    return String(v);
   },
 
   same_(a, b) {

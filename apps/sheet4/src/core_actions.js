@@ -29,9 +29,11 @@ const Actions = {
 
   /**
    * @param {{id: string, label: string, group: string, run: function(Object=): *, quick?: boolean,
-   *   order?: number, logged?: boolean, locked?: boolean}} def
+   *   order?: number, logged?: boolean, locked?: boolean, duringMigration?: boolean}} def
    *   logged=false: writes are not recorded as an undoable action (e.g. Undo itself, Setup).
    *   locked=false: runs without the script lock (read-only actions).
+   *   duringMigration=true: still runs while a staged migration is open (its dialog, undo);
+   *   every other action is refused meanwhile (ChangeLog.blockedReason).
    */
   register(def) {
     if (!def || !/^[A-Za-z][A-Za-z0-9_]*$/.test(def.id || '')) throw new Error(`Invalid action id: ${def && def.id}`);
@@ -110,8 +112,18 @@ const Actions = {
   run(id, args) {
     const def = Actions.get(id);
     if (!def) return Actions.fail_(new Error(`Ação desconhecida: ${id}`));
+    // Logged or not, an action that writes waits for an open operation (the staged migration);
+    // only the ones flagged duringMigration (open the dialogs, undo) run meanwhile. This early
+    // check only answers fast: the decision is taken again in exec, under the lock, because
+    // another execution may start the migration while this one waits for it.
+    const blocked = def.duringMigration ? null : ChangeLog.blockedReason(def.label);
+    if (blocked) return Actions.fail_(blocked, def.label);
     try {
-      const exec = () => (def.logged ? ChangeLog.run(def.label, () => def.run(args)) : def.run(args));
+      const exec = () => {
+        const late = def.duringMigration ? null : ChangeLog.blockedReason(def.label);
+        if (late) throw late;
+        return def.logged ? ChangeLog.run(def.label, () => def.run(args)) : def.run(args);
+      };
       const result = def.locked ? Core.withLock(exec) : exec();
       const message = typeof result === 'string' ? result : (result && result.message);
       if (message) Actions.toast_(message, def.label);
@@ -150,7 +162,7 @@ function onOpen() {
 }
 
 Actions.register({
-  id: 'undoLast', label: 'Desfazer última alteração', group: 'undo', quick: true, logged: false,
+  id: 'undoLast', label: 'Desfazer última alteração', group: 'undo', quick: true, logged: false, duringMigration: true,
   run: () => {
     const r = Undo.last();
     return { message: `Desfeito: ${r.action} (${r.changes} ${r.changes === 1 ? 'alteração' : 'alterações'}).`, undo: r };

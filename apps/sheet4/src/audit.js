@@ -372,57 +372,168 @@ const Audit = {
 
   /* Validations ----------------------------------------------------------------------------- */
 
-  /** Data validations whose list range is a named range that does not exist. */
+  /**
+   * List validations whose source range is gone (broken), and those that could not be checked
+   * (inconclusive: a reference the audit cannot classify, or validations that could not be read).
+   * An inconclusive result is reported as an open error: it never reads as a clean audit.
+   */
   checkValidations_(out) {
-    Audit.brokenValidations_().forEach((b) => {
-      out.push({ severity: 'Erro', code: 'validation_named_range', tab: b.tab, cell: Audit.box_(b.cells), finding: `Validação usa o intervalo nomeado "${b.ref}", que não existe (lista suspensa vazia).`, action: 'A migração recria o intervalo nomeado quando ele é conhecido da 3.0; senão refaça a validação.', before: b.ref });
+    const scan = Audit.validationScan_();
+    scan.broken.forEach((b) => {
+      out.push({ severity: 'Erro', code: 'validation_named_range', tab: b.tab, cell: Audit.box_(b.cells), finding: `Validação usa o intervalo "${b.ref}", que não existe (lista suspensa vazia).`, action: 'A migração recria o intervalo nomeado quando ele é conhecido da 3.0; senão refaça a validação.', before: b.ref });
+    });
+    scan.inconclusive.forEach((b) => {
+      out.push({ severity: 'Erro', code: 'validation_inconclusive', tab: b.tab, cell: Audit.box_(b.cells), finding: `Não foi possível conferir a origem da lista desta validação (${b.ref}).`, action: 'Confira a validação na planilha (Dados → Validação de dados).', before: b.ref });
+    });
+    scan.unread.forEach((u) => {
+      out.push({ severity: 'Erro', code: 'validation_unread', tab: u.tab, cell: '', finding: `As validações desta aba não puderam ser lidas: ${u.message}`, action: 'Rode a auditoria de novo; se persistir, confira as validações à mão.', before: null });
     });
   },
 
-  /**
-   * [{tab, ref, cells: [{row, col}]}] grouped by sheet and reference. Columns are walked top to
-   * bottom and a rule is resolved once per run of cells with the same criteria type, help text and
-   * allowInvalid (a validation is usually applied to a whole column): on a real spreadsheet each
-   * getCriteriaValues() of a range rule is slow, and it throws when the range no longer exists.
-   */
+  /** Broken list validations only: [{tab, ref, cells: [{row, col}]}] (see validationScan_). */
   brokenValidations_() {
+    return Audit.validationScan_().broken;
+  },
+
+  /** Rows per Sheets API request when reading validations. */
+  VALIDATION_BLOCK_ROWS: 1000,
+
+  /**
+   * Every list-from-range validation of the audited tabs, each cell checked (no sampling):
+   * {broken: [{tab, ref, cells}], inconclusive: [{tab, ref, cells}], unread: [{tab, message}]}.
+   * With the Sheets advanced service the rules are read in blocks of rows, one request each
+   * (the definition of every cell, empty ones included); without it, cell by cell through
+   * SpreadsheetApp (exact too, but too slow for a large spreadsheet within the 6 minutes).
+   */
+  validationScan_() {
     const ss = SpreadsheetApp.getActive();
-    const groups = {};
-    const order = [];
-    /** null when the rule points at a range that exists, else the reference to report. */
-    const brokenRef = (rule) => {
-      let target;
-      try {
-        target = rule.getCriteriaValues()[0];
-      } catch (err) {
-        return '(intervalo inexistente)';
-      }
-      if (target && typeof target !== 'string') return null;
-      const ref = target ? String(target) : '(vazio)';
-      if (target && /^[A-Za-z_][A-Za-z0-9_.]*$/.test(ref) && ss.getRangeByName(ref)) return null;
-      return ref;
+    const out = { broken: [], inconclusive: [], unread: [] };
+    const groups = new Map();
+    const add = (kind, tab, ref, row, col) => {
+      const k = `${kind}\u0000${tab}\u0000${ref}`;
+      if (!groups.has(k)) { groups.set(k, { tab, ref, cells: [] }); out[kind].push(groups.get(k)); }
+      groups.get(k).cells.push({ row, col });
     };
+    // A Map, not {}: a name like "constructor" or "__proto__" must be looked up, not found on
+    // Object.prototype.
+    const named = new Map();
+    const nameExists = (name) => {
+      if (!named.has(name)) {
+        const range = ss.getRangeByName(name);
+        named.set(name, range !== null && range !== undefined);
+      }
+      return named.get(name) === true;
+    };
+    const api = typeof Sheets !== 'undefined' && Sheets && Sheets.Spreadsheets;
     Audit.sheets_().forEach(({ sheet }) => {
+      const tab = sheet.getName();
       const rows = sheet.getMaxRows();
       const cols = sheet.getMaxColumns();
       if (!rows || !cols) return;
-      const rules = sheet.getRange(1, 1, rows, cols).getDataValidations();
-      for (let j = 0; j < cols; j++) {
-        let runKey = null;
-        let runRef = null;
-        for (let i = 0; i < rows; i++) {
-          const rule = rules[i] && rules[i][j];
-          if (!rule || String(rule.getCriteriaType()) !== 'VALUE_IN_RANGE') { runKey = null; continue; }
-          const key = `${rule.getHelpText()}\u0000${rule.getAllowInvalid()}`;
-          if (key !== runKey) { runKey = key; runRef = brokenRef(rule); }
-          if (runRef === null) continue;
-          const k = `${sheet.getName()}\u0000${runRef}`;
-          if (!groups[k]) { groups[k] = { tab: sheet.getName(), ref: runRef, cells: [] }; order.push(k); }
-          groups[k].cells.push({ row: i + 1, col: j + 1 });
+      try {
+        if (api) {
+          Audit.scanSheetApi_(ss, sheet, rows, (row, col, ref) => {
+            const verdict = Audit.classifyRangeRef_(ss, ref, nameExists);
+            if (verdict) add(verdict.kind, tab, verdict.ref, row, col);
+          });
+        } else {
+          Audit.scanSheetCells_(sheet, rows, cols, (row, col, kind, ref) => add(kind, tab, ref, row, col), nameExists);
         }
+      } catch (err) {
+        out.unread.push({ tab, message: err && err.message ? err.message : String(err) });
       }
     });
-    return order.map((k) => groups[k]);
+    return out;
+  },
+
+  /**
+   * Reads a sheet's validations through the Sheets API (spreadsheets.get with ranges and a field
+   * mask), calling visit(row, col, refText) for each list-from-range rule (ONE_OF_RANGE). Cells
+   * are placed with each GridData's startRow/startColumn. A rule without its reference text is
+   * passed as null (inconclusive).
+   */
+  scanSheetApi_(ss, sheet, rows, visit) {
+    const title = `'${sheet.getName().replace(/'/g, "''")}'`;
+    for (let r1 = 1; r1 <= rows; r1 += Audit.VALIDATION_BLOCK_ROWS) {
+      const r2 = Math.min(rows, r1 + Audit.VALIDATION_BLOCK_ROWS - 1);
+      const res = Sheets.Spreadsheets.get(ss.getId(), {
+        ranges: [`${title}!${r1}:${r2}`],
+        fields: 'sheets(data(startRow,startColumn,rowData(values(dataValidation))))',
+      });
+      ((res && res.sheets) || []).forEach((s) => ((s && s.data) || []).forEach((g) => {
+        const row0 = g.startRow || 0;
+        const col0 = g.startColumn || 0;
+        (g.rowData || []).forEach((rd, i) => ((rd && rd.values) || []).forEach((cell, j) => {
+          const dv = cell && cell.dataValidation;
+          const cond = dv && dv.condition;
+          if (!cond || cond.type !== 'ONE_OF_RANGE') return;
+          const v = cond.values && cond.values[0];
+          visit(row0 + i + 1, col0 + j + 1, v && typeof v.userEnteredValue === 'string' ? v.userEnteredValue : null);
+        }));
+      }));
+    }
+  },
+
+  /**
+   * A list source as the Sheets API writes it ("=Aba!A1:A", "='Minha aba'!$B$2:$B", "=Nome") →
+   * null when it points at something that exists, {kind: 'broken', ref} when the reference is gone
+   * (#REF!, a missing sheet or named range), {kind: 'inconclusive', ref} when it cannot be read.
+   */
+  classifyRangeRef_(ss, text, nameExists) {
+    if (text === null || text === undefined) return { kind: 'inconclusive', ref: '(sem referência)' };
+    const t = String(text).trim().replace(/^=/, '').trim();
+    if (!t) return { kind: 'inconclusive', ref: '(vazio)' };
+    if (/#REF!/i.test(t)) return { kind: 'broken', ref: '(intervalo inexistente)' };
+    const m = /^'((?:[^']|'')+)'!(.+)$/.exec(t) || /^([^!'"=]+)!(.+)$/.exec(t);
+    if (m) {
+      const tab = m[1].replace(/''/g, "'");
+      if (!Audit.isA1_(m[2])) return { kind: 'inconclusive', ref: t };
+      return ss.getSheetByName(tab) ? null : { kind: 'broken', ref: t };
+    }
+    if (Audit.isA1_(t)) return null;
+    // Anything else that is a name is looked up (TMP, A0, Foo are names, not cells).
+    if (/^[A-Za-z_\\][A-Za-z0-9_.]*$/.test(t)) return nameExists(t) ? null : { kind: 'broken', ref: t };
+    return { kind: 'inconclusive', ref: t };
+  },
+
+  /**
+   * True for an A1 reference on one sheet: a cell (B5, $B$5), a range of cells (A1:C9), whole
+   * columns (A:A, $A:$C), whole rows (1:5) or an open range (A6:A, A:A6). Columns are 1–3
+   * letters, rows start at 1. "TMP", "A0", "A$" and "A1:" are not A1.
+   */
+  isA1_(text) {
+    const col = '\\$?[A-Za-z]{1,3}';
+    const row = '\\$?[1-9]\\d*';
+    const cell = `${col}${row}`;
+    const forms = [
+      `${cell}`, `${cell}:${cell}`, `${col}:${col}`, `${row}:${row}`, `${cell}:${col}`, `${col}:${cell}`,
+    ];
+    return new RegExp(`^(?:${forms.join('|')})$`).test(String(text));
+  },
+
+  /**
+   * Cell-by-cell reading through SpreadsheetApp (no Sheets API): every VALUE_IN_RANGE rule is
+   * resolved; Apps Script throws for a range that no longer exists.
+   */
+  scanSheetCells_(sheet, rows, cols, visit, nameExists) {
+    const rules = sheet.getRange(1, 1, rows, cols).getDataValidations();
+    for (let i = 0; i < rows; i++) {
+      for (let j = 0; j < cols; j++) {
+        const rule = rules[i] && rules[i][j];
+        if (!rule || String(rule.getCriteriaType()) !== 'VALUE_IN_RANGE') continue;
+        let target;
+        try {
+          target = rule.getCriteriaValues()[0];
+        } catch (err) {
+          visit(i + 1, j + 1, 'broken', '(intervalo inexistente)');
+          continue;
+        }
+        if (target && typeof target !== 'string') continue;
+        const ref = target ? String(target) : '(vazio)';
+        if (target && /^[A-Za-z_\\][A-Za-z0-9_.]*$/.test(ref) && nameExists(ref)) continue;
+        visit(i + 1, j + 1, 'broken', ref);
+      }
+    }
   },
 
   /* Entities and Config --------------------------------------------------------------------- */

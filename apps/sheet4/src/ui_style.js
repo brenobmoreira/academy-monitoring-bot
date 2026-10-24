@@ -355,7 +355,7 @@ const Style = {
         ChangeLog.track({ kind: 'cells', tab: sheet.getName(), row: null, before: b, after: a });
       }
     }
-    range.setValues(grid.map((line) => line.map((v) => (v === null || v === undefined ? '' : v))));
+    range.setValues(grid.map((line) => line.map((v) => (v === null || v === undefined ? '' : Tabs.input(v)))));
     return keys.length;
   },
 

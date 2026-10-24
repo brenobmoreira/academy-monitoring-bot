@@ -747,6 +747,13 @@ Actions.register({
 /** Time-driven trigger (installed by Setup): closes the weeks that ended and refreshes today's. */
 function dailyRefresh() {
   return Core.withLock(() => {
+    // Postponed while a staged migration is open: it would rewrite Semanas/Painel cells the
+    // migration's undo has to restore. The next run catches up.
+    const blocked = ChangeLog.blockedReason('Atualização diária');
+    if (blocked) {
+      console.log(`dailyRefresh adiado: ${blocked.message}`);
+      return { skipped: blocked.message };
+    }
     const closed = Weeks.closeFinished();
     const current = Weeks.refreshCurrent();
     return { closed: closed.written, current: current.written };

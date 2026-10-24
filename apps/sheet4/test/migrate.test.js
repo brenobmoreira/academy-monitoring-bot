@@ -360,14 +360,10 @@ test('a validation whose range is gone throws on a real spreadsheet: the audit r
     const findings = plain(ctx.Audit.findings({ otherNames: ['Zoio'] }));
     const broken = findings.filter((f) => f.code === 'validation_named_range');
     assert.ok(broken.some((f) => f.tab === 'Registro de treino' && f.before === '(intervalo inexistente)'));
-    let rangeCells = 0;
-    ctx.SpreadsheetApp.getActive().getSheets().forEach((s) => {
-      s.getRange(1, 1, s.getMaxRows(), s.getMaxColumns()).getDataValidations()
-        .forEach((line) => line.forEach((v) => { if (v && String(v.getCriteriaType()) === 'VALUE_IN_RANGE') rangeCells += 1; }));
-    });
-    calls = 0;
-    ctx.Audit.brokenValidations_();
-    assert.ok(calls < rangeCells, `rule resolved once per run of cells (${calls} calls for ${rangeCells} cells)`);
+    assert.ok(calls > 0);
+    // Every range rule is resolved (neighbours with the same help text can point elsewhere); the
+    // slow part on a real spreadsheet, the named range lookup, happens once per name
+    // (validation_rules.test.js).
 
     const r = plain(ctx.Migrate.run(client('breno')));
     assert.equal(r.ok, true);

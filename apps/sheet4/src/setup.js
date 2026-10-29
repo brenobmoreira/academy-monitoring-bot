@@ -438,8 +438,12 @@ const Setup = {
     });
   },
 
-  /** Apps Script's message for a protection that no longer exists (pt-BR and en accounts). */
-  GONE_PROTECTION: /intervalo protegido com o ID|protected range with (the )?ID/i,
+  /**
+   * Apps Script's message for a protection that no longer exists (pt-BR, as seen in a real
+   * execution log, and en), matched from the start: a message that only mentions the ID (a
+   * missing permission, for example) is a real error.
+   */
+  GONE_PROTECTION: /^(Exception: )?(Não existe um intervalo protegido com o ID|There is no protected range with (the )?ID)/i,
 
   protect_(range, text) {
     const p = range.protect();

@@ -88,6 +88,33 @@ def test_the_fallback_key_is_a_secret(env, monkeypatch):
     assert key is not None and key.get_secret_value() == "from-env"
 
 
+def test_a_fallback_of_another_provider_needs_its_own_key(env, monkeypatch):
+    env.write_text(
+        "LLM_MODEL: gemini/gemini-3.8-flash\nLLM_FALLBACK_MODEL: anthropic/claude-haiku-5-5\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="LLM_FALLBACK_API_KEY"):
+        Settings.load()
+    monkeypatch.setenv("LLM_FALLBACK_API_KEY", "k2")
+    assert Settings.load().LLM_FALLBACK_MODEL == "anthropic/claude-haiku-5-5"
+
+
+def test_a_fallback_of_the_same_provider_reuses_the_main_key(env):
+    env.write_text(
+        "LLM_MODEL: gemini/gemini-3.8-flash\nLLM_FALLBACK_MODEL: gemini/gemini-3.7-flash\n", encoding="utf-8"
+    )
+    assert Settings.load().LLM_FALLBACK_API_KEY is None
+
+
+def test_settings_register_their_secrets_for_log_redaction(env, monkeypatch):
+    from agent import logs
+
+    monkeypatch.setattr(logs, "_SECRETS", set())
+    monkeypatch.setenv("LLM_API_KEY", "llm-sentinel-123")
+    Settings.load()
+    assert {"tok", "k", "llm-sentinel-123"} <= logs._SECRETS
+
+
 def test_missing_required_values_are_listed_together(env, monkeypatch):
     monkeypatch.delenv("SHEET_API_URL")
     monkeypatch.delenv("SHEET_API_KEY")

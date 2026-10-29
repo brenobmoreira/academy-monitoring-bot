@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from agent import logs
+
 # Update kinds the bot handles; scripts/set-webhook.sh registers the same list (a test checks).
 ALLOWED_UPDATES = ["message", "callback_query"]
 
@@ -16,6 +18,7 @@ def configure_logging() -> None:
     bot token, and those lines would put it in the terminal and in Cloud Logging."""
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logs.install()
 
 
 class TelegramError(RuntimeError):

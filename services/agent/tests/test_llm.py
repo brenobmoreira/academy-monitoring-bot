@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any
 
@@ -6,7 +7,7 @@ import pytest
 from pydantic import SecretStr
 
 from agent.bot import MEDIA_UNREADABLE, MODEL_FAILED, MODEL_FAILED_NOTHING_WRITTEN, Bot, Media
-from agent.llm import build_model
+from agent.llm import RetryingClient, build_model
 from agent.settings import Settings
 
 from .fakes import OK_DIARY, FakeLiteLLMClient, FakeSheet, text_response, tool_call_response
@@ -194,6 +195,68 @@ async def test_a_fallback_of_another_provider_uses_its_own_key_and_not_the_prima
     )
     assert (fallback["model"], fallback["api_key"]) == ("anthropic/claude-haiku-5-5", "anthropic-key")
     assert "api_base" not in fallback
+
+
+async def test_the_sdk_does_not_retry_on_its_own():
+    client = FakeLiteLLMClient([text_response("ok")])
+    await run(build_model(settings(), client=client))
+    assert (client.requests[0]["num_retries"], client.requests[0]["max_retries"]) == (0, 0)
+
+
+class SlowClient(FakeLiteLLMClient):
+    async def acompletion(self, model: Any, messages: Any, tools: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(10)
+        return text_response("late")
+
+
+async def test_a_message_that_outlives_its_deadline_is_answered_with_the_model_failure():
+    bot = Bot(
+        FakeSheet(), build_model(settings(), client=SlowClient([])), "America/Sao_Paulo", deadline_s=0.2
+    )
+    started = asyncio.get_running_loop().time()
+    reply = await bot.reply("peso 82,4")
+    assert reply.text == MODEL_FAILED_NOTHING_WRITTEN
+    assert reply.failed
+    assert asyncio.get_running_loop().time() - started < 3
+
+
+class Stream:
+    """An async stream that raises `error` after yielding `chunks`."""
+
+    def __init__(self, chunks: list[Any], error: Exception | None = None) -> None:
+        self.chunks = list(chunks)
+        self.error = error
+
+    def __aiter__(self) -> "Stream":
+        return self
+
+    async def __anext__(self) -> Any:
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.error is not None:
+            error, self.error = self.error, None
+            raise error
+        raise StopAsyncIteration
+
+
+async def drain(stream: Any) -> list[Any]:
+    return [chunk async for chunk in stream]
+
+
+async def test_a_stream_that_fails_before_its_first_chunk_is_tried_again():
+    client = FakeLiteLLMClient([Stream([], overloaded()), Stream(["a", "b"])])
+    retrying = RetryingClient(client, retries=1, wait_s=0)
+    assert await drain(await retrying.acompletion("m", [], None, stream=True)) == ["a", "b"]
+    assert len(client.requests) == 2
+
+
+async def test_a_stream_that_fails_after_a_chunk_is_not_repeated():
+    client = FakeLiteLLMClient([Stream(["a"], overloaded()), Stream(["x"])])
+    retrying = RetryingClient(client, retries=2, wait_s=0, fallback_model="f")
+    stream = await retrying.acompletion("m", [], None, stream=True)
+    with pytest.raises(litellm.ServiceUnavailableError):
+        await drain(stream)
+    assert len(client.requests) == 1
 
 
 async def media_request(media: Media, caption: str = "") -> list:

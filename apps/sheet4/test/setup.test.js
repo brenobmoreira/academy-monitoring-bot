@@ -253,6 +253,15 @@ test('re-protecting a tab tolerates an old protection already gone, and still th
   const other = diary.getProtections(RANGE).find((p) => p !== gone);
   other.remove = () => { throw new Error('Service unavailable'); };
   assert.throws(() => ctx.Setup.protections_('diary'), /Service unavailable/);
+  // A message that only mentions the protection's ID (no permission, for example) is not "gone".
+  ['Você não tem permissão para editar o intervalo protegido com o ID "1954312258".',
+    'You do not have permission to edit the protected range with ID "1954312258".'].forEach((m) => {
+    other.remove = () => { throw new Error(m); };
+    assert.throws(() => ctx.Setup.protections_('diary'), (err) => err.message === m, m);
+  });
+  // English wording of the same "does not exist" error is skipped too.
+  other.remove = () => { throw new Error('Exception: There is no protected range with ID "1954312258".'); };
+  ctx.Setup.protections_('diary');
 });
 
 test('no client names in the code', () => {

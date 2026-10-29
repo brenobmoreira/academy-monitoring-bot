@@ -34,6 +34,11 @@ LLM_RETRY_WAIT_S: 2
 # (LiteLLM alone would wait 6000 s for a provider that hangs instead of answering 503.)
 LLM_TIMEOUT_S: 30
 
+# Seconds one Telegram message may take end to end (all model calls, retries and the fallback).
+# Keep it below the webhook's request timeout (Cloud Run: 120 s) so the person always gets
+# "O modelo não respondeu agora" instead of silence.
+MESSAGE_DEADLINE_S: 100
+
 # Resolves "hoje", "ontem" and weekdays in the agent instruction.
 TIMEZONE: America/Sao_Paulo
 

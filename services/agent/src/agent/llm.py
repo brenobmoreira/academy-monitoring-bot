@@ -4,15 +4,18 @@ ADK talks to the model through LiteLLM, so the provider is the prefix of LLM_MOD
 ("gemini/...", "anthropic/...", "openai/...", "vertex_ai/...", "ollama/...") and the same code runs
 against any of them. LLM_API_BASE points at a LiteLLM proxy or a self-hosted endpoint.
 
-Every call has a deadline (LLM_TIMEOUT_S). A provider that is momentarily overloaded or rate
-limited is tried again, then LLM_FALLBACK_MODEL is used; a call that times out goes straight to
-the fallback (a model that hangs keeps hanging). A rejected request goes back to the bot.
+Every call has a deadline (LLM_TIMEOUT_S) and the provider SDK does not retry on its own: the
+retries are all here. A provider that is momentarily overloaded or rate limited is tried again,
+then LLM_FALLBACK_MODEL is used; a call that times out goes straight to the fallback (a model that
+hangs keeps hanging). A rejected request goes back to the bot. A streamed reply is retried only
+until its first chunk: after that, repeating it could duplicate text or a tool call.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import litellm
@@ -24,6 +27,22 @@ log = logging.getLogger(__name__)
 
 # 503, 429 and 500: the same request can succeed a moment later.
 TRANSIENT = (litellm.ServiceUnavailableError, litellm.RateLimitError, litellm.InternalServerError)
+
+
+def provider(model: str) -> str:
+    """LiteLLM's provider prefix ("gemini" in "gemini/gemini-3.8-flash")."""
+    return model.split("/", 1)[0] if "/" in model else ""
+
+
+async def _replay(first: Any, rest: AsyncIterator[Any]) -> AsyncIterator[Any]:
+    yield first
+    async for chunk in rest:
+        yield chunk
+
+
+async def _empty() -> AsyncIterator[Any]:
+    return
+    yield
 
 
 class RetryingClient(LiteLLMClient):
@@ -52,7 +71,21 @@ class RetryingClient(LiteLLMClient):
         out["api_key"] = self.fallback_api_key
         return out
 
+    async def _call(self, model: Any, messages: Any, tools: Any, kwargs: dict[str, Any]) -> Any:
+        """One attempt. A stream is opened up to its first chunk, so that an error before any
+        output is handled like a failed call."""
+        response: Any = await self.inner.acompletion(model=model, messages=messages, tools=tools, **kwargs)
+        if not kwargs.get("stream") or not hasattr(response, "__aiter__"):
+            return response
+        stream: AsyncIterator[Any] = response.__aiter__()
+        try:
+            first = await stream.__anext__()
+        except StopAsyncIteration:
+            return _empty()
+        return _replay(first, stream)
+
     async def acompletion(self, model: Any, messages: Any, tools: Any, **kwargs: Any) -> Any:
+        kwargs = {**kwargs, "num_retries": 0, "max_retries": 0}
         calls = [(model, kwargs)]
         if self.fallback_model and self.fallback_model != model:
             calls.append((self.fallback_model, self.fallback_kwargs_(kwargs)))
@@ -60,9 +93,7 @@ class RetryingClient(LiteLLMClient):
         for current, call_kwargs in calls:
             for attempt in range(self.retries + 1):
                 try:
-                    return await self.inner.acompletion(
-                        model=current, messages=messages, tools=tools, **call_kwargs
-                    )
+                    return await self._call(current, messages, tools, call_kwargs)
                 except litellm.Timeout as err:
                     last = err
                     log.warning("model %s timed out, moving on", current)

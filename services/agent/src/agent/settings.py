@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Annotated, Any, ClassVar
 
 import yaml
-from pydantic import Field, SecretStr, ValidationError, field_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     NoDecode,
@@ -24,6 +24,8 @@ from pydantic_settings import (
     SettingsConfigDict,
     YamlConfigSettingsSource,
 )
+
+from agent import logs
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parents[2] / "settings.yaml"
 
@@ -79,6 +81,9 @@ class Settings(BaseSettings):
     # Seconds one model call may take. LiteLLM's own default is 6000, so a provider that hangs
     # instead of answering 503 froze the bot; a call that times out goes straight to the fallback.
     LLM_TIMEOUT_S: float = Field(30.0, ge=5, le=600)
+    # Seconds one Telegram message may take end to end (every model call, retry and fallback);
+    # below Cloud Run's 120 s request timeout, so the person always gets an answer.
+    MESSAGE_DEADLINE_S: float = Field(100.0, ge=10, le=3600)
     TIMEZONE: str = "America/Sao_Paulo"
 
     # --- Voice and photo messages -------------------------------------------------------------
@@ -95,6 +100,25 @@ class Settings(BaseSettings):
         if isinstance(value, int):
             return frozenset({value})
         return value
+
+    @model_validator(mode="after")
+    def _fallback_key_matches_provider(self) -> Settings:
+        """A fallback of another provider would otherwise receive the main model's key."""
+        fallback = self.LLM_FALLBACK_MODEL
+        if (
+            fallback
+            and self.LLM_FALLBACK_API_KEY is None
+            and _provider(fallback) != _provider(self.LLM_MODEL)
+        ):
+            main = _provider(self.LLM_MODEL) or "same-provider"
+            raise ValueError(
+                f"LLM_FALLBACK_MODEL {fallback} is not a {main} model: set LLM_FALLBACK_API_KEY for it"
+            )
+        return self
+
+    def secret_values(self) -> list[str]:
+        values = (getattr(self, name, None) for name in self.SECRETS)
+        return [v.get_secret_value() for v in values if isinstance(v, SecretStr)]
 
     @classmethod
     def settings_customise_sources(
@@ -114,10 +138,17 @@ class Settings(BaseSettings):
         path = settings_file()
         check_no_secrets(path)
         try:
-            return cls()
+            settings = cls()
         except ValidationError as err:
             problems = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in err.errors()]
             raise ConfigError(f"Invalid settings ({path}): " + "; ".join(problems)) from err
+        logs.register_secrets(settings.secret_values())
+        logs.install()
+        return settings
+
+
+def _provider(model: str) -> str:
+    return model.split("/", 1)[0] if "/" in model else ""
 
 
 def settings_file() -> Path:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -192,12 +193,14 @@ class Bot:
         timezone: str,
         clock: Callable[[], datetime] | None = None,
         max_llm_calls: int = 8,
+        deadline_s: float = 100.0,
     ) -> None:
         self._sheet = sheet
         self._model = model
         self._zone = ZoneInfo(timezone)
         self._clock = clock or (lambda: datetime.now(self._zone))
         self._max_llm_calls = max_llm_calls
+        self._deadline_s = deadline_s
 
     async def reply(
         self,
@@ -248,14 +251,21 @@ class Bot:
         final, note = "", ""
         model_failed = False
         try:
-            async for event in runner.run_async(
-                user_id=user_id,
-                session_id=session.id,
-                new_message=message,
-                run_config=RunConfig(max_llm_calls=self._max_llm_calls),
-            ):
-                if event.is_final_response() and event.content and event.content.parts:
-                    final = "".join(p.text or "" for p in event.content.parts if not p.thought)
+            # One deadline for the whole message (every model call, retry and fallback), so the
+            # person gets an answer before the webhook's own request timeout.
+            async with asyncio.timeout(self._deadline_s):
+                async for event in runner.run_async(
+                    user_id=user_id,
+                    session_id=session.id,
+                    new_message=message,
+                    run_config=RunConfig(max_llm_calls=self._max_llm_calls),
+                ):
+                    if event.is_final_response() and event.content and event.content.parts:
+                        final = "".join(p.text or "" for p in event.content.parts if not p.thought)
+        except TimeoutError:
+            log.warning("message deadline (%ss) reached for message %r", self._deadline_s, text)
+            note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
+            model_failed = True
         except LlmCallsLimitExceededError:
             log.warning("LLM call budget exhausted for message %r", text)
             note = "Parei no limite de tentativas; o que não aparece acima não foi gravado."

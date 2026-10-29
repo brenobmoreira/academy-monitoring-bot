@@ -372,7 +372,13 @@ def build_handler(
     deduplicator: UpdateDeduplicator | None = None,
 ) -> Handler:
     sheet = SheetClient(settings.SHEET_API_URL, settings.SHEET_API_KEY.get_secret_value(), http)
-    bot = Bot(sheet, build_model(settings), timezone=settings.TIMEZONE, max_llm_calls=settings.MAX_LLM_CALLS)
+    bot = Bot(
+        sheet,
+        build_model(settings),
+        timezone=settings.TIMEZONE,
+        max_llm_calls=settings.MAX_LLM_CALLS,
+        deadline_s=settings.MESSAGE_DEADLINE_S,
+    )
     telegram = TelegramClient(settings.TELEGRAM_BOT_TOKEN.get_secret_value(), http)
     return Handler(
         settings.ALLOWED_CHAT_IDS,

@@ -1,4 +1,5 @@
 import json
+import logging
 
 import httpx
 import pytest
@@ -145,6 +146,44 @@ async def test_key_never_reaches_the_caller_through_a_transport_error():
     assert result.structured_content is not None
     assert result.structured_content["errors"][0]["code"] == "unavailable"
     assert secret not in result.model_dump_json()
+
+
+class ExplodingSheet:
+    """Every read raises an unexpected (non-httpx) error whose text echoes the key."""
+
+    def __getattr__(self, op):
+        async def read(*args):
+            raise RuntimeError(f'unexpected failure sending {{"key": "{SECRET}", "op": "{op}"}}')
+
+        return read
+
+
+SECRET = "chave-super-secreta"
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("get_catalog", {}),
+        ("get_phase", {"date": "2026-09-21"}),
+        ("get_week", {"date": "2026-09-21"}),
+        ("get_diary_history", {"date_from": "2026-09-01", "date_to": "2026-09-21"}),
+        ("get_exercise_history", {"name": "Supino reto"}),
+        ("get_workout_history", {"date_from": "2026-09-01", "date_to": "2026-09-21"}),
+    ],
+)
+async def test_unexpected_errors_keep_the_key_out_of_results_and_logs(tool, args, caplog, capsys):
+    caplog.set_level(logging.DEBUG)
+    result = await call(ExplodingSheet(), tool, args)
+    body = result.structured_content
+    assert body is not None
+    assert body["ok"] is False
+    assert body["errors"][0]["code"] == "unavailable"
+    assert "RuntimeError" in body["errors"][0]["message"]
+    assert SECRET not in result.model_dump_json()
+    assert SECRET not in caplog.text
+    captured = capsys.readouterr()
+    assert SECRET not in captured.err + captured.out
 
 
 def test_credentials_come_from_env_file(tmp_path):

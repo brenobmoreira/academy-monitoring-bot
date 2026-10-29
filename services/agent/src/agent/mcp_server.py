@@ -18,7 +18,7 @@ import asyncio
 import logging
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -47,6 +47,19 @@ class ConfigError(RuntimeError):
     pass
 
 
+async def _read(call: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+    """Awaits a sheet read, folding an unexpected exception into the API's outage shape.
+    Only the exception type is kept, here and in the log: its text can echo the request, key
+    included, and the SDK would log the whole exception to stderr. Cancellation still propagates."""
+    try:
+        return await call
+    except Exception as err:
+        name = type(err).__name__
+        log.warning("leitura da planilha falhou (%s)", name)
+        message = f"falha inesperada ao ler a planilha ({name})"
+        return {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": message}]}
+
+
 def build_server(sheet: SheetReader) -> MCPServer:
     async def get_catalog() -> dict[str, Any]:
         """Lê o catálogo da planilha fitness: today; phase (objetivo, meta com alvos e ficha em
@@ -54,7 +67,7 @@ def build_server(sheet: SheetReader) -> MCPServer:
         lastWorkout; exercises (nomes exatos com grupo); plan (ficha vigente com séries, reps e
         RIR prescritos); foods e favorites; meals; recent: as gravações dos últimos 30 minutos.
         Chame antes de get_exercise_history para ter o nome exato do exercício."""
-        return await sheet.catalog()
+        return await _read(sheet.catalog())
 
     async def get_phase(date: str) -> dict[str, Any]:
         """Objetivo, meta (alvos de kcal e macros) e ficha em vigor numa data, e a última
@@ -64,7 +77,7 @@ def build_server(sheet: SheetReader) -> MCPServer:
         Args:
             date: dia, yyyy-MM-dd.
         """
-        return await sheet.phase(date)
+        return await _read(sheet.phase(date))
 
     async def get_week(date: str) -> dict[str, Any]:
         """Análise da semana (segunda a domingo) que contém a data: peso, cintura, alimentação,
@@ -73,7 +86,7 @@ def build_server(sheet: SheetReader) -> MCPServer:
         Args:
             date: qualquer dia da semana, yyyy-MM-dd.
         """
-        return await sheet.week(date)
+        return await _read(sheet.week(date))
 
     async def get_diary_history(date_from: str, date_to: str) -> dict[str, Any]:
         """Dados do Diário (peso, cintura, sono, passos, cardio, fome, cansaço, dor, notas) num
@@ -85,7 +98,7 @@ def build_server(sheet: SheetReader) -> MCPServer:
             date_from: primeiro dia, yyyy-MM-dd.
             date_to: último dia, yyyy-MM-dd; período de no máximo 92 dias contando as duas datas.
         """
-        return await sheet.diary_range(date_from, date_to)
+        return await _read(sheet.diary_range(date_from, date_to))
 
     async def get_exercise_history(name: str, limit: int | None = None) -> dict[str, Any]:
         """Sessões anteriores de um exercício (só work sets), da mais recente para a mais antiga.
@@ -94,7 +107,7 @@ def build_server(sheet: SheetReader) -> MCPServer:
             name: nome exato do exercício no catálogo (get_catalog, exercises).
             limit: quantas sessões (1 a 50, padrão 10).
         """
-        return await sheet.exercise_history(name, limit)
+        return await _read(sheet.exercise_history(name, limit))
 
     async def get_workout_history(date_from: str, date_to: str) -> dict[str, Any]:
         """Treinos registrados num período, do mais antigo ao mais recente: sessão, estado e
@@ -104,7 +117,7 @@ def build_server(sheet: SheetReader) -> MCPServer:
             date_from: primeiro dia, yyyy-MM-dd.
             date_to: último dia, yyyy-MM-dd; período de no máximo 92 dias contando as duas datas.
         """
-        return await sheet.workout_range(date_from, date_to)
+        return await _read(sheet.workout_range(date_from, date_to))
 
     server = MCPServer(
         name="academia-planilha",

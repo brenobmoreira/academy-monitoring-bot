@@ -81,9 +81,8 @@ class Settings(BaseSettings):
     # Seconds one model call may take. LiteLLM's own default is 6000, so a provider that hangs
     # instead of answering 503 froze the bot; a call that times out goes straight to the fallback.
     LLM_TIMEOUT_S: float = Field(30.0, ge=5, le=600)
-    # Seconds the agent may take on one Telegram message (every model call, retry and fallback);
-    # with the media download before it and the reply after it, the whole request stays below
-    # Cloud Run's 120 s timeout, so the person always gets an answer.
+    # Seconds one Telegram message may take from its arrival: the media download and every model
+    # call, retry and fallback. The reply goes out after it, within the rest of Cloud Run's 120 s.
     MESSAGE_DEADLINE_S: float = Field(90.0, ge=10, le=3600)
     TIMEZONE: str = "America/Sao_Paulo"
 
@@ -108,6 +107,22 @@ class Settings(BaseSettings):
         """An empty variable (LLM_FALLBACK_API_KEY=) is no key, for the check below and the client."""
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator(
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_WEBHOOK_SECRET",
+        "SHEET_API_KEY",
+        "LLM_API_KEY",
+        "LLM_FALLBACK_API_KEY",
+        "REMINDER_TOKEN",
+        mode="after",
+    )
+    @classmethod
+    def _secret_is_long_enough(cls, value: SecretStr | None) -> SecretStr | None:
+        """Log masking needs secrets that cannot be mistaken for ordinary text."""
+        if value is not None and len(value.get_secret_value().strip()) < logs.MIN_SECRET_LEN:
+            raise ValueError(f"must be at least {logs.MIN_SECRET_LEN} characters")
         return value
 
     @model_validator(mode="after")

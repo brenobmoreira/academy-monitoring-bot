@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from agent.bot import (
     MEDIA_UNREADABLE,
+    MESSAGE_DEADLINE_AT,
     MODEL_FAILED,
     MODEL_FAILED_NOTHING_WRITTEN,
     WRITE_UNCERTAIN,
@@ -241,6 +242,39 @@ async def test_a_deadline_during_a_write_says_it_may_have_been_saved_not_that_no
     reply = await bot.reply("peso 82,4")
     assert reply.text == WRITE_UNCERTAIN
     assert reply.failed
+
+
+class DownThenSlowSheet(FakeSheet):
+    async def catalog(self) -> dict[str, Any]:
+        return {"ok": False, "errors": [{"path": "op", "code": "unavailable", "message": "down"}]}
+
+    async def add_food(self, date: str, meal: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+        await asyncio.sleep(10)
+        return {"ok": True, "result": {}}
+
+
+async def test_an_interrupted_write_wins_over_an_earlier_sheet_outage():
+    food = {"date": "2026-09-21", "meal": "Almoço", "items": [{"description": "arroz"}]}
+    client = FakeLiteLLMClient(
+        [tool_call_response("get_catalog", {}, "c1"), tool_call_response("save_food", food, "c2")]
+    )
+    bot = Bot(
+        DownThenSlowSheet(), build_model(settings(), client=client), "America/Sao_Paulo", deadline_s=0.3
+    )
+    assert (await bot.reply("almoço: arroz")).text == WRITE_UNCERTAIN
+
+
+async def test_the_handlers_absolute_deadline_shortens_the_bots_own():
+    bot = Bot(FakeSheet(), build_model(settings(), client=SlowClient([])), "America/Sao_Paulo", deadline_s=30)
+    loop = asyncio.get_running_loop()
+    token = MESSAGE_DEADLINE_AT.set(loop.time() + 0.2)
+    try:
+        started = loop.time()
+        reply = await bot.reply("peso 82,4")
+    finally:
+        MESSAGE_DEADLINE_AT.reset(token)
+    assert reply.text == MODEL_FAILED_NOTHING_WRITTEN
+    assert loop.time() - started < 3
 
 
 class Stream:

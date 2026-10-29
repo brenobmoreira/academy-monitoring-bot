@@ -55,8 +55,61 @@ def test_uvicorn_access_lines_keep_their_arguments_and_lose_the_secret():
     assert stream.getvalue().strip() == f"POST /hook/{logs.MASK} HTTP/1.1 200 OK"
 
 
-def test_short_secrets_are_masked_too():
-    logs.register_secrets(["ab12cd"])
-    logger, stream = capture("test.redaction.short")
-    logger.info("sheet key ab12cd")
-    assert "ab12cd" not in stream.getvalue()
+SECRET = "sk-sentinel-deep"
+
+
+@pytest.mark.parametrize(
+    ("message", "args"),
+    [
+        ("erro: %s", (RuntimeError(f"bad key {SECRET}"),)),
+        ("erro: %r", (RuntimeError(f"bad key {SECRET}"),)),
+        ("lista: %s", ([1, {"key": SECRET}],)),
+        ("dict: %(payload)s", {"payload": {"nested": [SECRET]}}),
+    ],
+)
+def test_secrets_inside_objects_passed_as_arguments_are_masked(message, args):
+    logs.register_secrets([SECRET])
+    logger, stream = capture("test.redaction.objects")
+    if isinstance(args, tuple):
+        logger.info(message, *args)
+    else:
+        logger.info(message, args)
+    assert SECRET not in stream.getvalue()
+    assert logs.MASK in stream.getvalue()
+
+
+def test_a_message_that_is_not_a_string_is_masked():
+    logs.register_secrets([SECRET])
+    logger, stream = capture("test.redaction.dictmsg")
+    logger.info({"api_key": SECRET})
+    assert SECRET not in stream.getvalue() and logs.MASK in stream.getvalue()
+
+
+def test_the_template_is_not_touched_so_placeholders_keep_working():
+    logs.register_secrets(["payload-secret"])
+    logger, stream = capture("test.redaction.template")
+    logger.info("value %(payload)s and payload-secret", {"payload": "ok"})
+    assert stream.getvalue().strip() == f"test.redaction.template value ok and {logs.MASK}"
+
+
+def test_install_keeps_a_factory_set_before_and_survives_a_reinstall():
+    seen = []
+    original = logging.getLogRecordFactory()
+
+    def tagging(*args, **kwargs):
+        record = original(*args, **kwargs)
+        record.tag = "set-by-library"
+        seen.append(record)
+        return record
+
+    try:
+        logging.setLogRecordFactory(tagging)
+        logs.install()
+        logs.install()
+        logs.register_secrets([SECRET])
+        logger, stream = capture("test.redaction.chain")
+        logger.info("key %s", SECRET)
+        assert seen and seen[-1].tag == "set-by-library"
+        assert SECRET not in stream.getvalue()
+    finally:
+        logging.setLogRecordFactory(original)

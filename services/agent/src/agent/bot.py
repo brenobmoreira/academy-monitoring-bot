@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from typing import NamedTuple
@@ -24,6 +25,10 @@ from agent.summary import confirmation
 from agent.tools import Journal, SheetApi, build_tools
 
 log = logging.getLogger(__name__)
+
+# Event-loop time by which the whole Telegram message must be done (set by the handler when the
+# update arrives, so the media download and the agent share one budget); None = only deadline_s.
+MESSAGE_DEADLINE_AT: ContextVar[float | None] = ContextVar("message_deadline_at", default=None)
 
 APP_NAME = "fitness-log"
 WEEKDAYS = [
@@ -257,7 +262,11 @@ class Bot:
         try:
             # One deadline for the whole message (every model call, retry and fallback), so the
             # person gets an answer before the webhook's own request timeout.
-            async with asyncio.timeout(self._deadline_s):
+            deadline = self._deadline_s
+            deadline_at = MESSAGE_DEADLINE_AT.get()
+            if deadline_at is not None:
+                deadline = min(deadline, deadline_at - asyncio.get_running_loop().time())
+            async with asyncio.timeout(max(deadline, 0)):
                 async for event in runner.run_async(
                     user_id=user_id,
                     session_id=session.id,
@@ -287,7 +296,8 @@ class Bot:
                 log.exception("model call failed for message %r", text)
                 note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
                 model_failed = True
-        if journal.sheet_failed and not journal.writes:
+        # An interrupted write may have reached the sheet: "try again" would risk a duplicate.
+        if journal.sheet_failed and not journal.writes and not journal.interrupted:
             log.warning("sheet unavailable for message %r: %s", text, journal.error_codes)
             return Answer(SHEET_FAILED, failed=True)
         return Answer(

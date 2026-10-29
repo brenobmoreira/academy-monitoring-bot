@@ -5,10 +5,10 @@ from agent.settings import ConfigError, Settings
 pytestmark = pytest.mark.unit
 
 REQUIRED = {
-    "TELEGRAM_BOT_TOKEN": "tok",
+    "TELEGRAM_BOT_TOKEN": "tok-12345678",
     "ALLOWED_CHAT_IDS": " 42, 7 ,",
     "SHEET_API_URL": "https://script.google.com/macros/s/x/exec",
-    "SHEET_API_KEY": "k",
+    "SHEET_API_KEY": "sheet-key-1234",
 }
 ALL_KEYS = [
     *REQUIRED,
@@ -46,7 +46,7 @@ def test_yaml_fills_what_the_environment_does_not(env):
     assert s.MAX_LLM_CALLS == 5
     assert s.TIMEZONE == "America/Sao_Paulo"
     assert s.ALLOWED_CHAT_IDS == frozenset({42, 7})
-    assert s.TELEGRAM_BOT_TOKEN.get_secret_value() == "tok"
+    assert s.TELEGRAM_BOT_TOKEN.get_secret_value() == "tok-12345678"
     assert s.TELEGRAM_WEBHOOK_SECRET is None
     assert s.REMINDER_TOKEN is None
 
@@ -95,8 +95,14 @@ def test_a_fallback_of_another_provider_needs_its_own_key(env, monkeypatch):
     )
     with pytest.raises(ConfigError, match="LLM_FALLBACK_API_KEY"):
         Settings.load()
-    monkeypatch.setenv("LLM_FALLBACK_API_KEY", "k2")
+    monkeypatch.setenv("LLM_FALLBACK_API_KEY", "fallback-key-12")
     assert Settings.load().LLM_FALLBACK_MODEL == "anthropic/claude-haiku-5-5"
+
+
+def test_a_secret_shorter_than_eight_characters_is_refused(env, monkeypatch):
+    monkeypatch.setenv("SHEET_API_KEY", "abc1234")
+    with pytest.raises(ConfigError, match="SHEET_API_KEY"):
+        Settings.load()
 
 
 def test_an_empty_fallback_key_counts_as_missing(env, monkeypatch):
@@ -131,7 +137,7 @@ def test_settings_register_their_secrets_for_log_redaction(env, monkeypatch):
     monkeypatch.setattr(logs, "_SECRETS", set())
     monkeypatch.setenv("LLM_API_KEY", "llm-sentinel-123")
     Settings.load()
-    assert {"tok", "k", "llm-sentinel-123"} <= logs._SECRETS
+    assert {"tok-12345678", "sheet-key-1234", "llm-sentinel-123"} <= logs._SECRETS
 
 
 def test_missing_required_values_are_listed_together(env, monkeypatch):

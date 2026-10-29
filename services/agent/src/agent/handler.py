@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from agent import buttons
-from agent.bot import MEDIA_UNREADABLE, Answer, Bot, Media
+from agent.bot import MEDIA_UNREADABLE, MESSAGE_DEADLINE_AT, Answer, Bot, Media
 from agent.commands import COMMANDS, CommandSheet, Context, Reply, parse_command
 from agent.format import escape, split
 from agent.llm import build_model
@@ -166,6 +166,7 @@ class Handler:
         media_enabled: bool = True,
         media_max_bytes: int = MEDIA_MAX_BYTES,
         deduplicator: UpdateDeduplicator | None = None,
+        message_deadline_s: float | None = None,
     ) -> None:
         self._allowed = allowed_chat_ids
         self._bot = bot
@@ -177,6 +178,7 @@ class Handler:
         self._media_enabled = media_enabled
         self._media_max_bytes = media_max_bytes
         self._deduplicator = deduplicator if deduplicator is not None else UpdateDeduplicator()
+        self._message_deadline_s = message_deadline_s
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         """Never raises: a webhook that errors makes Telegram resend the same update."""
@@ -185,9 +187,16 @@ class Handler:
             log.info("ignoring duplicate Telegram update %s", update_id)
             return
         completed = False
+        # One budget from the arrival of the update: the media download and the agent share it,
+        # and the reply goes out after it.
+        token = None
+        if self._message_deadline_s is not None:
+            token = MESSAGE_DEADLINE_AT.set(asyncio.get_running_loop().time() + self._message_deadline_s)
         try:
             completed = await self._process_update(update, update_id)
         finally:
+            if token is not None:
+                MESSAGE_DEADLINE_AT.reset(token)
             if update_id is not None:
                 self._deduplicator.finish(update_id, completed=completed)
 
@@ -256,7 +265,9 @@ class Handler:
         caption = message.get("caption")
         caption = caption if isinstance(caption, str) else ""
         try:
-            data = await self._download(ref)
+            deadline_at = MESSAGE_DEADLINE_AT.get()
+            async with asyncio.timeout_at(deadline_at):
+                data = await self._download(ref)
         except TooLarge:
             return Reply(too_large(self._media_max_bytes))
         except Exception:
@@ -388,5 +399,6 @@ def build_handler(
         timezone=settings.TIMEZONE,
         media_enabled=settings.MEDIA_ENABLED,
         media_max_bytes=settings.MEDIA_MAX_BYTES,
+        message_deadline_s=settings.MESSAGE_DEADLINE_S,
         deduplicator=deduplicator,
     )

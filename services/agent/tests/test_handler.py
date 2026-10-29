@@ -112,6 +112,50 @@ def refused(code, message="m"):
     return {"ok": False, "errors": [{"path": "args.writeId", "code": code, "message": message}]}
 
 
+class DeadlineBot(FakeBot):
+    """Records how much of the message deadline is left when the bot starts."""
+
+    async def reply(self, text, user_id="telegram", *, context=None, media=None):
+        from agent.bot import MESSAGE_DEADLINE_AT
+
+        at = MESSAGE_DEADLINE_AT.get()
+        self.left = None if at is None else at - asyncio.get_running_loop().time()
+        return await super().reply(text, user_id, context=context, media=media)
+
+
+class SlowDownloadTelegram(FakeTelegram):
+    def __init__(self, seconds, **kwargs):
+        super().__init__(**kwargs)
+        self._seconds = seconds
+
+    async def download_file(self, file_path):
+        await asyncio.sleep(self._seconds)
+        return await super().download_file(file_path)
+
+
+VOICE = {"file_id": "v1", "file_unique_id": "u1", "duration": 3, "mime_type": "audio/ogg", "file_size": 10}
+
+
+def voice_update():
+    return {"update_id": 7, "message": {"chat": {"id": 42}, "voice": VOICE}}
+
+
+async def test_the_message_deadline_counts_from_receipt_and_the_download_uses_part_of_it():
+    tg = SlowDownloadTelegram(0.2, files={"v1": ({"file_path": "voice/1.oga", "file_size": 10}, b"ogg")})
+    bot = DeadlineBot()
+    await Handler({42}, bot, tg, message_deadline_s=1.0).handle_update(voice_update())
+    assert bot.left is not None and bot.left < 0.85
+    assert tg.sent
+
+
+async def test_a_download_that_outlives_the_deadline_gets_the_download_failure_reply():
+    tg = SlowDownloadTelegram(5, files={"v1": ({"file_path": "voice/1.oga", "file_size": 10}, b"ogg")})
+    started = asyncio.get_running_loop().time()
+    await Handler({42}, FakeBot(), tg, message_deadline_s=0.2).handle_update(voice_update())
+    assert tg.sent == [(42, DOWNLOAD_FAILED)]
+    assert asyncio.get_running_loop().time() - started < 3
+
+
 async def test_runs_the_bot_and_replies_in_the_same_chat():
     bot, tg = FakeBot("21/09 · Peso kg 82"), FakeTelegram()
     await Handler({42}, bot, tg).handle_update(update())

@@ -5,14 +5,14 @@
     "client.startDate = 2026-10-28, the day the spreadsheet is created (no earlier records are migrated).",
     "The plan is the same Push A → Legs B used in Zoio's F002 (Luan wrote it from his own training): 1 aquecimento + 1 reconhecimento (feeder) + 2 work sets of 6–10 reps at 0–1 RIR; only the work sets count.",
     "Objective 'deficit' (cutting leve): target −0.25 to −0.75 %/week instead of the rule default −0.5 to −1.0, to preserve lean mass on the way to ~12% body fat.",
-    "TMB Mifflin = 10·85.3 + 6.25·182 − 5·age + 5 = 1995.5 − 5·age kcal; with activityFactor 1.6 the TDEE is ~2950–3020 kcal for ages 22–30, so 2500 kcal is a ~15–17% deficit.",
+    "TMB Mifflin = 10·85.3 + 6.25·182 − 5·26 + 5 = 1865.5 kcal; with activityFactor 1.6 the TDEE is ~2985 kcal, so 2500 kcal is a ~16% deficit.",
     "Carbohydrate = (2500 − 4·185 − 9·70) / 4 = 282.5 g, recomputed by the script.",
     "routine.cardioPerWeek = 3 (minimum stated; duration not defined yet). stepsPerDay = 10000 ≈ 8 km/day walking at a ~0.76 m stride."
   ],
   "config": {
     "client.name": "Luan",
     "client.sex": "M",
-    "client.age": null,
+    "client.age": 26,
     "client.heightCm": 182,
     "client.startWeightKg": 85.3,
     "client.startDate": "2026-10-28",
@@ -65,7 +65,6 @@
     "plans": []
   },
   "review": [
-    { "area": "Perfil", "message": "Idade não informada: preencher client.age (o TMB muda 5 kcal por ano)." },
     { "area": "Energia", "message": "Fator de atividade 1,6 é uma estimativa (5 treinos + 3 cardios + ~8 km/dia de caminhada); revisar com 2–3 semanas de peso e ingestão." }
   ]
 }

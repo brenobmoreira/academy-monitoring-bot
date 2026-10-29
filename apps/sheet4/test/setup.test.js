@@ -202,6 +202,40 @@ test('inside the migration: layout applied, audit clean, one undo returns the 3.
   assert.equal(values(), original);
 });
 
+test('a 4.0 spreadsheet from before waterL: Reaplicar layout adds Água L, keeps data, draws a full-height Hoje row', () => {
+  const ctx = load({ sheets: [{ name: 'Sheet1', rows: [] }], now: '2026-10-29T15:00:00-03:00' });
+  const client = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', '..', 'clients', 'luan.json'), 'utf8'));
+  assert.equal(plain(ctx.Migrate.run(client)).ok, true);
+  const api = (op, args) => plain(ctx.SheetApi.run(op, args));
+  // Roll the layout back to the one deployed before the field: no Diário column, no Hoje row.
+  const diary = sheet(ctx, 'Diário');
+  const hoje = sheet(ctx, 'Hoje');
+  diary.deleteColumn(ctx.Tabs.headerMap('diary').waterL);
+  hoje.getRange('A22:B22').setValue('');
+  hoje.setRowHeight(22, ctx.Style.ROW.spacer);
+  ctx.Tabs.invalidate();
+  assert.equal(api('diary.upsert', { date: '2026-10-29', fields: { weightKg: 85.3, sleepH: 7 } }).ok, true);
+  const refused = api('diary.upsert', { date: '2026-10-29', fields: { weightKg: 85.1, waterL: 2 } });
+  assert.equal(refused.ok, false);
+  assert.match(JSON.stringify(refused.errors), /Reaplicar layout/);
+  assert.equal(ctx.Days.get('2026-10-29').weightKg, 85.3, 'a refused request writes nothing');
+
+  const r = plain(ctx.Setup.apply());
+  assert.deepEqual(r.columnsAdded, { 'Diário': ['Água L'] });
+  assert.equal(hoje.getRange('A22').getValue(), 'Água L');
+  assert.equal(hoje.getRowHeight(22), ctx.Style.ROW.field, 'the water row is not the spacer above Alimentação');
+  const day = ctx.Days.get('2026-10-29');
+  assert.deepEqual([day.weightKg, day.sleepH, day.objective, day.goal], [85.3, 7, 'O001', 'M001']);
+
+  assert.equal(api('diary.upsert', { date: '2026-10-29', fields: { waterL: 2.5 } }).ok, true);
+  assert.equal(api('diary.upsert', { date: '2026-10-29', fields: { waterL: 3 } }).ok, true);
+  ctx.Undo.last();
+  assert.equal(ctx.Days.get('2026-10-29').waterL, 2.5, 'undo restores the previous water value');
+  assert.equal(api('diary.upsert', { date: '2026-10-29', fields: { waterL: null } }).ok, true);
+  assert.equal(ctx.Days.get('2026-10-29').waterL, null);
+  assert.deepEqual(plain(api('diary.range', { from: '2026-10-29', to: '2026-10-29' }).result.days.map((d) => d.weightKg)), [85.3]);
+});
+
 test('no client names in the code', () => {
   const src = path.join(__dirname, '..', 'src');
   const hits = [];

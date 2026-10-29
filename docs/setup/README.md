@@ -58,6 +58,12 @@ curl -sL -H 'Content-Type: application/json' \
 Later code changes: `clasp push` (or `make push-sheet` from the repo root) then `clasp deploy -i <deploymentId> -d "note"`. A plain push
 does not change what the URL serves. When a change touches the Sheet API contract, deploy the updated Apps Script (`clasp push` + `clasp deploy -i`) on each client spreadsheet before merging agent changes to `main`.
 
+When a change adds a column or a Hoje field (for example `waterL`, **Água L** in `Diário`), also run
+**Acompanhamento → Sistema → Reaplicar layout** on each client spreadsheet after the deploy: it appends the
+missing column and redraws Hoje. Running the migration again does not do it (the sheet is already 4.0).
+Until then the API refuses the whole request that carries the new field, other fields included, with
+"Rode Projeto → Sistema → Reaplicar layout". Check the new column and the Hoje row before releasing the agent.
+
 Legacy 3.0 reference: [`apps/sheet/docs/setup.md`](../../apps/sheet/docs/setup.md).
 
 ## 2. Telegram bot

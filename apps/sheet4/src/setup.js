@@ -619,6 +619,9 @@ const Setup = {
       R(f.cell).setNumberFormat(nf || 'General');
     };
 
+    // Rows holding a field: the spacer above a section title must not shrink one of them.
+    const fieldRows = {};
+    layout.sections.forEach((s) => s.fields.forEach((f) => { fieldRows[Hoje.rc_(f.cell)[0]] = true; }));
     layout.sections.forEach((s) => {
       const width = s.table ? s.table.columns.length : 2;
       const rows = s.fields.map((f) => Hoje.rc_(f.cell)[0]);
@@ -630,7 +633,7 @@ const Setup = {
       if (s.titleCell) {
         Style.section(sheet.getRange(top, 1, 1, width));
         sheet.setRowHeight(top, Style.ROW.section);
-        if (top > 1) sheet.setRowHeight(top - 1, Style.ROW.spacer);
+        if (top > 1 && !fieldRows[top - 1]) sheet.setRowHeight(top - 1, Style.ROW.spacer);
       }
       s.fields.forEach(drawField);
       Object.keys(s.hints || {}).forEach((a1) => {

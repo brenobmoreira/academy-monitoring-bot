@@ -8,6 +8,7 @@ every rejected call, reads included, are kept there too, so the bot can tell a s
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Iterator
@@ -146,6 +147,17 @@ class Journal:
     _issued_counts: dict[str, int] = field(default_factory=dict)
     _reusable_seqs: dict[str, list[int]] = field(default_factory=dict)
     _unresolved_outages: set[str] = field(default_factory=set)
+    # A write cancelled after it left (the message deadline): the sheet may or may not have
+    # applied it, so the reply cannot say that nothing was saved.
+    interrupted: bool = False
+
+    @contextmanager
+    def writing(self) -> Iterator[None]:
+        try:
+            yield
+        except asyncio.CancelledError:
+            self.interrupted = True
+            raise
 
     def request_id_for(self, op: str, args: dict[str, Any]) -> tuple[str | None, RequestToken | None]:
         """Deterministic idempotency key for a write tool call within a Telegram update.
@@ -251,7 +263,7 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         for key in clear or []:
             values[key] = None
         req_id, token = journal.request_id_for("diary.upsert", {"date": date, "fields": values})
-        with request_id_scope(req_id):
+        with request_id_scope(req_id), journal.writing():
             response = await sheet.upsert_diary(date, values)
         return journal.record("diary.upsert", response, token)
 
@@ -275,7 +287,7 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         if done is not None:
             args["complete"] = done
         req_id, token = journal.request_id_for("workout.upsert", args)
-        with request_id_scope(req_id):
+        with request_id_scope(req_id), journal.writing():
             response = await sheet.upsert_workout(date, session, plain_ex, done)
         return journal.record("workout.upsert", response, token)
 
@@ -291,7 +303,7 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         """
         plain_items = _plain(items)
         req_id, token = journal.request_id_for("food.add", {"date": date, "meal": meal, "items": plain_items})
-        with request_id_scope(req_id):
+        with request_id_scope(req_id), journal.writing():
             response = await sheet.add_food(date, meal, plain_items)
         return journal.record("food.add", response, token)
 

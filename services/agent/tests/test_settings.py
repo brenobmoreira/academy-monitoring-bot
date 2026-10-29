@@ -99,6 +99,25 @@ def test_a_fallback_of_another_provider_needs_its_own_key(env, monkeypatch):
     assert Settings.load().LLM_FALLBACK_MODEL == "anthropic/claude-haiku-5-5"
 
 
+def test_an_empty_fallback_key_counts_as_missing(env, monkeypatch):
+    env.write_text(
+        "LLM_MODEL: gemini/gemini-3.8-flash\nLLM_FALLBACK_MODEL: anthropic/claude-haiku-5-5\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LLM_FALLBACK_API_KEY", "  ")
+    with pytest.raises(ConfigError, match="LLM_FALLBACK_API_KEY"):
+        Settings.load()
+
+
+def test_provider_keys_read_by_the_sdks_are_masked_too(env, monkeypatch):
+    from agent import logs
+
+    monkeypatch.setattr(logs, "_SECRETS", set())
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-native-sentinel")
+    Settings.load()
+    assert "gemini-native-sentinel" in logs._SECRETS
+
+
 def test_a_fallback_of_the_same_provider_reuses_the_main_key(env):
     env.write_text(
         "LLM_MODEL: gemini/gemini-3.8-flash\nLLM_FALLBACK_MODEL: gemini/gemini-3.7-flash\n", encoding="utf-8"

@@ -6,7 +6,14 @@ import litellm
 import pytest
 from pydantic import SecretStr
 
-from agent.bot import MEDIA_UNREADABLE, MODEL_FAILED, MODEL_FAILED_NOTHING_WRITTEN, Bot, Media
+from agent.bot import (
+    MEDIA_UNREADABLE,
+    MODEL_FAILED,
+    MODEL_FAILED_NOTHING_WRITTEN,
+    WRITE_UNCERTAIN,
+    Bot,
+    Media,
+)
 from agent.llm import RetryingClient, build_model
 from agent.settings import Settings
 
@@ -218,6 +225,22 @@ async def test_a_message_that_outlives_its_deadline_is_answered_with_the_model_f
     assert reply.text == MODEL_FAILED_NOTHING_WRITTEN
     assert reply.failed
     assert asyncio.get_running_loop().time() - started < 3
+
+
+class SlowWriteSheet(FakeSheet):
+    async def upsert_diary(self, date: str, fields: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(10)
+        return OK_DIARY
+
+
+async def test_a_deadline_during_a_write_says_it_may_have_been_saved_not_that_nothing_was():
+    client = FakeLiteLLMClient(
+        [tool_call_response("save_diary", {"date": "2026-09-21", "fields": {"weightKg": 82.4}})]
+    )
+    bot = Bot(SlowWriteSheet(), build_model(settings(), client=client), "America/Sao_Paulo", deadline_s=0.3)
+    reply = await bot.reply("peso 82,4")
+    assert reply.text == WRITE_UNCERTAIN
+    assert reply.failed
 
 
 class Stream:

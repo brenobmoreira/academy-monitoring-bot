@@ -39,6 +39,10 @@ WEEKDAYS = [
 # What the user sees when the run cannot finish normally (see Bot.reply).
 MODEL_FAILED = "⚠ O modelo não respondeu agora. Nada novo foi gravado além do que aparece acima."
 MODEL_FAILED_NOTHING_WRITTEN = "⚠ O modelo não respondeu agora. Nada foi gravado."
+WRITE_UNCERTAIN = (
+    "⚠ O tempo acabou durante uma gravação: ela pode ter entrado na planilha. "
+    "Confira com /hoje antes de reenviar."
+)
 SHEET_FAILED = "⚠ A planilha não respondeu. Tente de novo em alguns minutos."
 MEDIA_UNREADABLE = "Não consegui ler o áudio/foto com o modelo configurado; envie em texto."
 
@@ -193,7 +197,7 @@ class Bot:
         timezone: str,
         clock: Callable[[], datetime] | None = None,
         max_llm_calls: int = 8,
-        deadline_s: float = 100.0,
+        deadline_s: float = 90.0,
     ) -> None:
         self._sheet = sheet
         self._model = model
@@ -264,7 +268,11 @@ class Bot:
                         final = "".join(p.text or "" for p in event.content.parts if not p.thought)
         except TimeoutError:
             log.warning("message deadline (%ss) reached for message %r", self._deadline_s, text)
-            note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
+            if journal.interrupted:
+                # A write was cancelled after it left: the sheet may have applied it.
+                note = WRITE_UNCERTAIN
+            else:
+                note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
             model_failed = True
         except LlmCallsLimitExceededError:
             log.warning("LLM call budget exhausted for message %r", text)

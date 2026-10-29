@@ -81,9 +81,10 @@ class Settings(BaseSettings):
     # Seconds one model call may take. LiteLLM's own default is 6000, so a provider that hangs
     # instead of answering 503 froze the bot; a call that times out goes straight to the fallback.
     LLM_TIMEOUT_S: float = Field(30.0, ge=5, le=600)
-    # Seconds one Telegram message may take end to end (every model call, retry and fallback);
-    # below Cloud Run's 120 s request timeout, so the person always gets an answer.
-    MESSAGE_DEADLINE_S: float = Field(100.0, ge=10, le=3600)
+    # Seconds the agent may take on one Telegram message (every model call, retry and fallback);
+    # with the media download before it and the reply after it, the whole request stays below
+    # Cloud Run's 120 s timeout, so the person always gets an answer.
+    MESSAGE_DEADLINE_S: float = Field(90.0, ge=10, le=3600)
     TIMEZONE: str = "America/Sao_Paulo"
 
     # --- Voice and photo messages -------------------------------------------------------------
@@ -99,6 +100,14 @@ class Settings(BaseSettings):
             return frozenset(int(part) for part in value.split(",") if part.strip())
         if isinstance(value, int):
             return frozenset({value})
+        return value
+
+    @field_validator("LLM_API_KEY", "LLM_FALLBACK_API_KEY", mode="before")
+    @classmethod
+    def _blank_key_is_missing(cls, value: Any) -> Any:
+        """An empty variable (LLM_FALLBACK_API_KEY=) is no key, for the check below and the client."""
+        if isinstance(value, str) and not value.strip():
+            return None
         return value
 
     @model_validator(mode="after")
@@ -143,8 +152,21 @@ class Settings(BaseSettings):
             problems = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in err.errors()]
             raise ConfigError(f"Invalid settings ({path}): " + "; ".join(problems)) from err
         logs.register_secrets(settings.secret_values())
+        # Keys a provider SDK reads from the environment on its own, without LLM_API_KEY.
+        logs.register_secrets(os.environ.get(name) for name in PROVIDER_KEY_VARIABLES)
         logs.install()
         return settings
+
+
+PROVIDER_KEY_VARIABLES = (
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "MISTRAL_API_KEY",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+)
 
 
 def _provider(model: str) -> str:

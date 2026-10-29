@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     LLM_RETRIES: int = Field(2, ge=0, le=5)
     LLM_RETRY_WAIT_S: float = Field(2.0, ge=0, le=30)
     LLM_FALLBACK_MODEL: str | None = None
+    # Seconds one model call may take. LiteLLM's own default is 6000, so a provider that hangs
+    # instead of answering 503 froze the bot; a call that times out goes straight to the fallback.
+    LLM_TIMEOUT_S: float = Field(30.0, ge=5, le=600)
     TIMEZONE: str = "America/Sao_Paulo"
 
     # --- Voice and photo messages -------------------------------------------------------------

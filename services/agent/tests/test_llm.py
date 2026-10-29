@@ -151,6 +151,26 @@ async def test_a_request_the_provider_rejects_is_not_repeated():
     assert len(client.requests) == 1
 
 
+async def test_every_model_call_carries_the_configured_timeout():
+    client = FakeLiteLLMClient([text_response("ok")])
+    await run(build_model(settings(LLM_TIMEOUT_S=30), client=client))
+    assert client.requests[0]["timeout"] == 30
+
+
+async def test_a_model_that_times_out_is_not_repeated_the_fallback_answers_at_once():
+    hung = litellm.Timeout("timed out", model="gemini-3.8-flash", llm_provider="gemini")
+    client = FakeLiteLLMClient([hung, text_response("ok")])
+    model = build_model(
+        settings(LLM_RETRIES=2, LLM_RETRY_WAIT_S=0, LLM_FALLBACK_MODEL="anthropic/claude-haiku-5-5"),
+        client=client,
+    )
+    assert await run(model) == "ok"
+    assert [r["model"] for r in client.requests] == [
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-haiku-5-5",
+    ]
+
+
 async def media_request(media: Media, caption: str = "") -> list:
     client = FakeLiteLLMClient([text_response("ok")])
     bot = Bot(FakeSheet(), build_model(settings(LLM_MODEL="gemini/gemini-3.8-flash"), client=client), "UTC")

@@ -4,8 +4,9 @@ ADK talks to the model through LiteLLM, so the provider is the prefix of LLM_MOD
 ("gemini/...", "anthropic/...", "openai/...", "vertex_ai/...", "ollama/...") and the same code runs
 against any of them. LLM_API_BASE points at a LiteLLM proxy or a self-hosted endpoint.
 
-A provider that is momentarily overloaded or rate limited is tried again, then LLM_FALLBACK_MODEL
-is used; any other error (a rejected request, a timeout) goes straight back to the bot.
+Every call has a deadline (LLM_TIMEOUT_S). A provider that is momentarily overloaded or rate
+limited is tried again, then LLM_FALLBACK_MODEL is used; a call that times out goes straight to
+the fallback (a model that hangs keeps hanging). A rejected request goes back to the bot.
 """
 
 from __future__ import annotations
@@ -51,6 +52,10 @@ class RetryingClient(LiteLLMClient):
                     return await self.inner.acompletion(
                         model=current, messages=messages, tools=tools, **kwargs
                     )
+                except litellm.Timeout as err:
+                    last = err
+                    log.warning("model %s timed out, moving on", current)
+                    break
                 except TRANSIENT as err:
                     last = err
                     log.warning(
@@ -72,6 +77,7 @@ def build_model(settings: Settings, client: LiteLLMClient | None = None) -> Lite
         kwargs["api_key"] = settings.LLM_API_KEY.get_secret_value()
     if settings.LLM_API_BASE:
         kwargs["api_base"] = settings.LLM_API_BASE
+    kwargs["timeout"] = settings.LLM_TIMEOUT_S
     kwargs["llm_client"] = RetryingClient(
         client,
         retries=settings.LLM_RETRIES,

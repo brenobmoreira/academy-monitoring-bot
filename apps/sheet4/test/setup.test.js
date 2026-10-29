@@ -236,6 +236,25 @@ test('a 4.0 spreadsheet from before waterL: Reaplicar layout adds Água L, keeps
   assert.deepEqual(plain(api('diary.range', { from: '2026-10-29', to: '2026-10-29' }).result.days.map((d) => d.weightKg)), [85.3]);
 });
 
+test('re-protecting a tab tolerates an old protection already gone, and still throws any other error', () => {
+  const ctx = empty();
+  ctx.Setup.apply();
+  const diary = sheet(ctx, 'Diário');
+  const RANGE = ctx.SpreadsheetApp.ProtectionType.RANGE;
+  const before = diary.getProtections(RANGE);
+  assert.ok(before.length >= 2, 'header and calculated runs');
+  // What Apps Script throws when a listed protection vanished in the meantime (real execution log).
+  const gone = before[0];
+  gone.remove = () => { throw new Error('Não existe um intervalo protegido com o ID "1954312258".'); };
+  ctx.Setup.protections_('diary');
+  const fresh = diary.getProtections(RANGE).filter((p) => p !== gone).map((p) => p.getRange().getA1Notation());
+  assert.ok(fresh.includes('A5:Z5') && fresh.includes('O6:Z1000'), JSON.stringify(fresh));
+
+  const other = diary.getProtections(RANGE).find((p) => p !== gone);
+  other.remove = () => { throw new Error('Service unavailable'); };
+  assert.throws(() => ctx.Setup.protections_('diary'), /Service unavailable/);
+});
+
 test('no client names in the code', () => {
   const src = path.join(__dirname, '..', 'src');
   const hits = [];

@@ -421,12 +421,25 @@ const Setup = {
     });
   },
 
-  /** Removes the protections Setup created before (by description prefix). */
+  /**
+   * Removes the protections Setup created before (by description prefix). A listed protection can
+   * vanish before its remove() (seen with the person editing during a long Setup run); it is
+   * already gone, which is the goal, so only that error is skipped.
+   */
   dropProtections_(sheet) {
     sheet.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach((p) => {
-      if (String(p.getDescription()).indexOf(Setup.PROTECT_PREFIX) === 0) p.remove();
+      if (String(p.getDescription()).indexOf(Setup.PROTECT_PREFIX) !== 0) return;
+      try {
+        p.remove();
+      } catch (err) {
+        if (!Setup.GONE_PROTECTION.test(String(err && err.message))) throw err;
+        console.log(`proteção já removida em ${sheet.getName()}: ${err.message}`);
+      }
     });
   },
+
+  /** Apps Script's message for a protection that no longer exists (pt-BR and en accounts). */
+  GONE_PROTECTION: /intervalo protegido com o ID|protected range with (the )?ID/i,
 
   protect_(range, text) {
     const p = range.protect();

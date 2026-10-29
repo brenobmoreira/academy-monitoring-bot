@@ -161,7 +161,7 @@
         return;
       }
       if (st.state !== 'running' && st.state !== 'failed') return;
-      var wait = line('note', 'Executando o próximo passo… não feche esta janela.');
+      var wait = line('note', 'Executando o próximo passo… não feche esta janela nem edite a planilha até terminar.');
       google.script.run.withSuccessHandler(function (r) {
         if (r.stale) { wait.remove(); follow(r.state, retry); return; }
         wait.className = r.status === 'erro' ? 'err' : 'note';

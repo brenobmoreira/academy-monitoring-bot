@@ -35,22 +35,33 @@ class RetryingClient(LiteLLMClient):
         retries: int = 2,
         wait_s: float = 2.0,
         fallback_model: str | None = None,
+        fallback_api_key: str | None = None,
     ) -> None:
         self.inner = inner or LiteLLMClient()
         self.retries = retries
         self.wait_s = wait_s
         self.fallback_model = fallback_model
+        self.fallback_api_key = fallback_api_key
+
+    def fallback_kwargs_(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """The main model's call arguments for the fallback: with its own key (another provider),
+        the main key and the main api_base are not sent along."""
+        if not self.fallback_api_key:
+            return kwargs
+        out = {k: v for k, v in kwargs.items() if k != "api_base"}
+        out["api_key"] = self.fallback_api_key
+        return out
 
     async def acompletion(self, model: Any, messages: Any, tools: Any, **kwargs: Any) -> Any:
-        models = [model]
+        calls = [(model, kwargs)]
         if self.fallback_model and self.fallback_model != model:
-            models.append(self.fallback_model)
+            calls.append((self.fallback_model, self.fallback_kwargs_(kwargs)))
         last: Exception | None = None
-        for current in models:
+        for current, call_kwargs in calls:
             for attempt in range(self.retries + 1):
                 try:
                     return await self.inner.acompletion(
-                        model=current, messages=messages, tools=tools, **kwargs
+                        model=current, messages=messages, tools=tools, **call_kwargs
                     )
                 except litellm.Timeout as err:
                     last = err
@@ -83,5 +94,8 @@ def build_model(settings: Settings, client: LiteLLMClient | None = None) -> Lite
         retries=settings.LLM_RETRIES,
         wait_s=settings.LLM_RETRY_WAIT_S,
         fallback_model=settings.LLM_FALLBACK_MODEL,
+        fallback_api_key=(
+            settings.LLM_FALLBACK_API_KEY.get_secret_value() if settings.LLM_FALLBACK_API_KEY else None
+        ),
     )
     return LiteLlm(model=settings.LLM_MODEL, **kwargs)

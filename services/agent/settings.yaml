@@ -21,11 +21,14 @@ MAX_LLM_CALLS: 8
 
 # A provider that answers "overloaded" (503), "rate limited" (429) or 500 is tried again
 # LLM_RETRIES times, waiting LLM_RETRY_WAIT_S seconds, then twice that, and so on. After that,
-# LLM_FALLBACK_MODEL (same provider: it uses the same LLM_API_KEY) gets the same treatment.
+# LLM_FALLBACK_MODEL gets the same treatment. It uses LLM_API_KEY (same provider) unless
+# LLM_FALLBACK_API_KEY is set in the environment, which allows another provider: a Gemini
+# incident then does not take the fallback down with it.
 # Unset fallback = the person gets "O modelo não respondeu agora" after the retries.
 LLM_RETRIES: 2
 LLM_RETRY_WAIT_S: 2
-# LLM_FALLBACK_MODEL: gemini/gemini-3.7-flash
+# LLM_FALLBACK_MODEL: gemini/gemini-3.7-flash        (same key)
+# LLM_FALLBACK_MODEL: anthropic/claude-haiku-5-5     (needs LLM_FALLBACK_API_KEY)
 
 # Seconds one model call may take; a call that times out goes straight to LLM_FALLBACK_MODEL.
 # (LiteLLM alone would wait 6000 s for a provider that hangs instead of answering 503.)

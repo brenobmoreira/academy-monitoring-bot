@@ -17,6 +17,8 @@ ALL_KEYS = [
     "LLM_MODEL",
     "LLM_API_KEY",
     "LLM_API_BASE",
+    "LLM_FALLBACK_MODEL",
+    "LLM_FALLBACK_API_KEY",
     "MAX_LLM_CALLS",
     "TIMEZONE",
     "MEDIA_ENABLED",
@@ -74,6 +76,16 @@ def test_the_reminder_token_is_a_secret(env, monkeypatch):
     monkeypatch.setenv("REMINDER_TOKEN", "from-env")
     token = Settings.load().REMINDER_TOKEN
     assert token is not None and token.get_secret_value() == "from-env"
+
+
+def test_the_fallback_key_is_a_secret(env, monkeypatch):
+    env.write_text("LLM_FALLBACK_API_KEY: leaked\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="LLM_FALLBACK_API_KEY"):
+        Settings.load()
+    env.write_text("LLM_FALLBACK_MODEL: anthropic/claude-haiku-5-5\n", encoding="utf-8")
+    monkeypatch.setenv("LLM_FALLBACK_API_KEY", "from-env")
+    key = Settings.load().LLM_FALLBACK_API_KEY
+    assert key is not None and key.get_secret_value() == "from-env"
 
 
 def test_missing_required_values_are_listed_together(env, monkeypatch):

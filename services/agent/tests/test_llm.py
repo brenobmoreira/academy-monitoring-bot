@@ -171,6 +171,31 @@ async def test_a_model_that_times_out_is_not_repeated_the_fallback_answers_at_on
     ]
 
 
+async def test_a_fallback_of_another_provider_uses_its_own_key_and_not_the_primary_base():
+    client = FakeLiteLLMClient([overloaded(), text_response("ok")])
+    model = build_model(
+        settings(
+            LLM_MODEL="gemini/gemini-3.8-flash",
+            LLM_API_KEY=SecretStr("gemini-key"),
+            LLM_API_BASE="http://proxy:4000",
+            LLM_RETRIES=0,
+            LLM_RETRY_WAIT_S=0,
+            LLM_FALLBACK_MODEL="anthropic/claude-haiku-5-5",
+            LLM_FALLBACK_API_KEY=SecretStr("anthropic-key"),
+        ),
+        client=client,
+    )
+    assert await run(model) == "ok"
+    primary, fallback = client.requests
+    assert (primary["model"], primary["api_key"], primary["api_base"]) == (
+        "gemini/gemini-3.8-flash",
+        "gemini-key",
+        "http://proxy:4000",
+    )
+    assert (fallback["model"], fallback["api_key"]) == ("anthropic/claude-haiku-5-5", "anthropic-key")
+    assert "api_base" not in fallback
+
+
 async def media_request(media: Media, caption: str = "") -> list:
     client = FakeLiteLLMClient([text_response("ok")])
     bot = Bot(FakeSheet(), build_model(settings(LLM_MODEL="gemini/gemini-3.8-flash"), client=client), "UTC")

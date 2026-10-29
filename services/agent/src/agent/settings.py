@@ -36,7 +36,14 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     SECRETS: ClassVar[frozenset[str]] = frozenset(
-        {"TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "SHEET_API_KEY", "LLM_API_KEY", "REMINDER_TOKEN"}
+        {
+            "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_WEBHOOK_SECRET",
+            "SHEET_API_KEY",
+            "LLM_API_KEY",
+            "LLM_FALLBACK_API_KEY",
+            "REMINDER_TOKEN",
+        }
     )
 
     # --- Telegram -----------------------------------------------------------------------------
@@ -62,10 +69,13 @@ class Settings(BaseSettings):
     MAX_LLM_CALLS: int = Field(8, ge=1, le=30)
     # Transient provider errors (overloaded 503, rate limit 429, 500) are tried again this many
     # times, waiting LLM_RETRY_WAIT_S, then 2x, 4x...; then LLM_FALLBACK_MODEL gets the same
-    # treatment. The fallback uses LLM_API_KEY too, so it must be a model of the same provider.
+    # treatment. Without LLM_FALLBACK_API_KEY the fallback uses LLM_API_KEY (same provider); with
+    # it, the fallback can be another provider (e.g. anthropic/claude-haiku-5-5), and LLM_API_BASE,
+    # which belongs to the main model, is not sent to it.
     LLM_RETRIES: int = Field(2, ge=0, le=5)
     LLM_RETRY_WAIT_S: float = Field(2.0, ge=0, le=30)
     LLM_FALLBACK_MODEL: str | None = None
+    LLM_FALLBACK_API_KEY: SecretStr | None = None
     # Seconds one model call may take. LiteLLM's own default is 6000, so a provider that hangs
     # instead of answering 503 froze the bot; a call that times out goes straight to the fallback.
     LLM_TIMEOUT_S: float = Field(30.0, ge=5, le=600)

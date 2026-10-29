@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     # A LiteLLM proxy or self-hosted endpoint; empty = the provider's public API.
     LLM_API_BASE: str | None = None
     MAX_LLM_CALLS: int = Field(8, ge=1, le=30)
+    # Transient provider errors (overloaded 503, rate limit 429, 500) are tried again this many
+    # times, waiting LLM_RETRY_WAIT_S, then 2x, 4x...; then LLM_FALLBACK_MODEL gets the same
+    # treatment. The fallback uses LLM_API_KEY too, so it must be a model of the same provider.
+    LLM_RETRIES: int = Field(2, ge=0, le=5)
+    LLM_RETRY_WAIT_S: float = Field(2.0, ge=0, le=30)
+    LLM_FALLBACK_MODEL: str | None = None
     TIMEZONE: str = "America/Sao_Paulo"
 
     # --- Voice and photo messages -------------------------------------------------------------

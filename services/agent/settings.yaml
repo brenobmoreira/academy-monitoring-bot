@@ -19,6 +19,14 @@ LLM_MODEL: gemini/gemini-3.8-flash
 # Maximum model calls per Telegram message (tool calls and corrections included).
 MAX_LLM_CALLS: 8
 
+# A provider that answers "overloaded" (503), "rate limited" (429) or 500 is tried again
+# LLM_RETRIES times, waiting LLM_RETRY_WAIT_S seconds, then twice that, and so on. After that,
+# LLM_FALLBACK_MODEL (same provider: it uses the same LLM_API_KEY) gets the same treatment.
+# Unset fallback = the person gets "O modelo não respondeu agora" after the retries.
+LLM_RETRIES: 2
+LLM_RETRY_WAIT_S: 2
+# LLM_FALLBACK_MODEL: gemini/gemini-3.7-flash
+
 # Resolves "hoje", "ontem" and weekdays in the agent instruction.
 TIMEZONE: America/Sao_Paulo
 

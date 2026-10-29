@@ -5,7 +5,7 @@ import litellm
 import pytest
 from pydantic import SecretStr
 
-from agent.bot import MEDIA_UNREADABLE, MODEL_FAILED, Bot, Media
+from agent.bot import MEDIA_UNREADABLE, MODEL_FAILED, MODEL_FAILED_NOTHING_WRITTEN, Bot, Media
 from agent.llm import build_model
 from agent.settings import Settings
 
@@ -103,6 +103,52 @@ async def test_a_litellm_timeout_is_reported_after_what_was_written():
     assert (
         await run(build_model(settings(), client=client)) == f"<b>21/09</b> · Peso kg 82,4\n\n{MODEL_FAILED}"
     )
+
+
+def overloaded() -> Exception:
+    return litellm.ServiceUnavailableError(
+        "This model is currently experiencing high demand.", llm_provider="gemini", model="gemini-3.8-flash"
+    )
+
+
+async def test_an_overloaded_model_is_tried_again_and_the_reply_arrives():
+    client = FakeLiteLLMClient([overloaded(), overloaded(), text_response("ok")])
+    model = build_model(settings(LLM_RETRIES=2, LLM_RETRY_WAIT_S=0), client=client)
+    assert await run(model) == "ok"
+    assert [r["model"] for r in client.requests] == ["anthropic/claude-sonnet-5"] * 3
+
+
+async def test_after_the_retries_the_fallback_model_answers():
+    client = FakeLiteLLMClient([overloaded(), overloaded(), text_response("ok")])
+    model = build_model(
+        settings(LLM_RETRIES=1, LLM_RETRY_WAIT_S=0, LLM_FALLBACK_MODEL="anthropic/claude-haiku-5-5"),
+        client=client,
+    )
+    assert await run(model) == "ok"
+    assert [r["model"] for r in client.requests] == [
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-haiku-5-5",
+    ]
+
+
+async def test_a_rate_limit_is_transient_too_but_without_a_fallback_the_failure_is_reported():
+    limited = litellm.RateLimitError("quota", llm_provider="gemini", model="gemini-3.8-flash")
+    client = FakeLiteLLMClient([limited, overloaded()])
+    model = build_model(settings(LLM_RETRIES=1, LLM_RETRY_WAIT_S=0, LLM_FALLBACK_MODEL=None), client=client)
+    assert await run(model) == MODEL_FAILED_NOTHING_WRITTEN
+    assert len(client.requests) == 2
+
+
+async def test_a_request_the_provider_rejects_is_not_repeated():
+    bad = litellm.BadRequestError("invalid schema", model="gemini-3.8-flash", llm_provider="gemini")
+    client = FakeLiteLLMClient([bad])
+    model = build_model(
+        settings(LLM_RETRIES=2, LLM_RETRY_WAIT_S=0, LLM_FALLBACK_MODEL="anthropic/claude-haiku-5-5"),
+        client=client,
+    )
+    assert await run(model) == MODEL_FAILED_NOTHING_WRITTEN
+    assert len(client.requests) == 1
 
 
 async def media_request(media: Media, caption: str = "") -> list:

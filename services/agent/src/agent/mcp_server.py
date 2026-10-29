@@ -83,7 +83,7 @@ def build_server(sheet: SheetReader) -> MCPServer:
 
         Args:
             date_from: primeiro dia, yyyy-MM-dd.
-            date_to: último dia, yyyy-MM-dd; no máximo 92 dias depois de date_from.
+            date_to: último dia, yyyy-MM-dd; período de no máximo 92 dias contando as duas datas.
         """
         return await sheet.diary_range(date_from, date_to)
 
@@ -102,7 +102,7 @@ def build_server(sheet: SheetReader) -> MCPServer:
 
         Args:
             date_from: primeiro dia, yyyy-MM-dd.
-            date_to: último dia, yyyy-MM-dd; no máximo 92 dias depois de date_from.
+            date_to: último dia, yyyy-MM-dd; período de no máximo 92 dias contando as duas datas.
         """
         return await sheet.workout_range(date_from, date_to)
 

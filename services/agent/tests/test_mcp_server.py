@@ -133,6 +133,20 @@ async def test_key_goes_to_the_api_but_never_back_to_the_caller():
     assert secret not in result.model_dump_json()
 
 
+async def test_key_never_reaches_the_caller_through_a_transport_error():
+    secret = "chave-super-secreta"
+
+    def handler(request):
+        raise httpx.RemoteProtocolError(f"malformed response to {request.content.decode()}", request=request)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    sheet = SheetClient("https://script.google.com/macros/s/x/exec", secret, http)
+    result = await call(sheet, "get_catalog")
+    assert result.structured_content is not None
+    assert result.structured_content["errors"][0]["code"] == "unavailable"
+    assert secret not in result.model_dump_json()
+
+
 def test_credentials_come_from_env_file(tmp_path):
     env_file = tmp_path / "sheet.env"
     env_file.write_text("SHEET_API_URL=https://example/exec\nSHEET_API_KEY=k1\nOTHER=x\n", encoding="utf-8")

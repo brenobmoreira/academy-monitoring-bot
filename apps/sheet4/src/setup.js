@@ -702,7 +702,7 @@ const Setup = {
 
   /** Number format of a Hoje field by key. */
   hojeFormat_(key) {
-    if (['weightKg', 'waistCm', 'sleepH', 'qty', 'portions'].indexOf(key) >= 0) return '0.0';
+    if (['weightKg', 'waistCm', 'sleepH', 'waterL', 'qty', 'portions'].indexOf(key) >= 0) return '0.0';
     if (['steps'].indexOf(key) >= 0) return '#,##0';
     if (['cardioMin', 'activityMin', 'hunger', 'fatigue', 'pain'].indexOf(key) >= 0) return '0';
     return null;

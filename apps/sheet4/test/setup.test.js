@@ -80,8 +80,8 @@ test('empty spreadsheet: formats, input vs calculated fills, validations and war
   // Protections: header row + calculated runs, warning only.
   const prot = diary.getProtections('RANGE').map((p) => ({ a1: p.getRange().getA1Notation(), warn: p.isWarningOnly(), d: p.getDescription() }));
   assert.ok(prot.every((p) => p.warn && p.d.startsWith('[Setup] ')));
-  assert.ok(prot.some((p) => p.a1 === 'A5:Y5'), 'header');
-  assert.ok(prot.some((p) => p.a1 === 'N6:Y1000' && /kcal/.test(p.d)), JSON.stringify(prot));
+  assert.ok(prot.some((p) => p.a1 === 'A5:Z5'), 'header');
+  assert.ok(prot.some((p) => p.a1 === 'O6:Z1000' && /kcal/.test(p.d)), JSON.stringify(prot));
   // Conditional formats: technical dates hidden, statuses coloured.
   const cf = sheet(ctx, 'Semanas').getConditionalFormatRules().map((r) => r.getBooleanCondition());
   assert.ok(cf.some((c) => c.getCriteriaType() === 'CUSTOM_FORMULA' && /DATE\(2000;1;1\)/.test(c.getCriteriaValues()[0])));

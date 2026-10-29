@@ -15,7 +15,7 @@ test('layout: the documented cell map, no cell used twice, texts for every label
   assert.deepEqual(cells('diary'), [
     ['weightKg', 'B10'], ['waistCm', 'B11'], ['sleepH', 'B12'], ['steps', 'B13'], ['cardioMin', 'B14'],
     ['activityMin', 'B15'], ['activity', 'B16'], ['hunger', 'B17'], ['fatigue', 'B18'], ['pain', 'B19'],
-    ['foodLog', 'B20'], ['notes', 'B21'],
+    ['foodLog', 'B20'], ['notes', 'B21'], ['waterL', 'B22'],
   ]);
   assert.deepEqual(cells('food'), [
     ['meal', 'B24'], ['food', 'B25'], ['qty', 'B26'], ['unit', 'B27'], ['measure', 'B28'], ['favorite', 'B29'],

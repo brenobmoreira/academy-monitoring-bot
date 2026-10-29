@@ -46,7 +46,7 @@ test('4.0 headers of the entity, daily and log tabs follow spec §3.1/§3.3', ()
     'Cardio/sem', 'Atividades/sem', 'Passos/dia', 'TMB kcal', 'Método TMB', 'Fator de atividade', 'Gasto estimado kcal',
     'Motivo', 'Revisor']);
   eq(T.headers('diary'), ['Data', 'Peso kg', 'Cintura cm', 'Sono h', 'Passos', 'Cardio min', 'Atividade min',
-    'Atividade', 'Fome 1–5', 'Cansaço 1–5', 'Dor 0–10', 'Registro alimentar', 'Observações', 'Objetivo', 'Meta', 'Ficha',
+    'Atividade', 'Fome 1–5', 'Cansaço 1–5', 'Dor 0–10', 'Registro alimentar', 'Observações', 'Água L', 'Objetivo', 'Meta', 'Ficha',
     'kcal', 'Proteína g', 'Carboidrato g', 'Gordura g', 'Fibra g', 'Itens sem cálculo', 'Itens estimados', 'Treinos',
     'Estado do dia']);
   eq(T.headers('reviews'), ['Data', 'Área', 'Observação / motivo', 'Alteração', 'Revisor', 'Status',

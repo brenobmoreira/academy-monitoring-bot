@@ -65,6 +65,7 @@ DiaryKey = Literal[
     "pain",
     "foodLog",
     "notes",
+    "waterL",
 ]
 
 
@@ -83,6 +84,9 @@ class DiaryFields(BaseModel):
         None, description="registro alimentar do dia, só quando a pessoa declarar"
     )
     notes: str | None = Field(None, description="observações livres, até 500 caracteres")
+    waterL: float | None = Field(
+        None, description="água ingerida no dia em litros: 2,5 L = 2.5; 2500 ml = 2.5"
+    )
 
 
 class LoadSet(BaseModel):

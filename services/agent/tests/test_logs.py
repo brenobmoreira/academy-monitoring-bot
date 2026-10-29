@@ -1,3 +1,4 @@
+import functools
 import io
 import logging
 
@@ -7,6 +8,8 @@ from uvicorn.logging import AccessFormatter
 from agent import logs
 
 pytestmark = pytest.mark.unit
+
+SECRET = "sk-sentinel-deep"
 
 
 def capture(name: str, formatter: logging.Formatter | None = None) -> tuple[logging.Logger, io.StringIO]:
@@ -28,16 +31,15 @@ def secrets(monkeypatch):
 
 def test_secrets_are_masked_in_messages_arguments_and_tracebacks():
     logger, stream = capture("test.redaction.a")
-    logs.register_secrets(["sk-sentinel-abc", "", None])
-    logger.warning("key %s in args", "sk-sentinel-abc")
+    logs.register_secrets([SECRET, "", None])
+    logger.warning("key %s in args", SECRET)
     try:
-        raise RuntimeError("provider said: bad key sk-sentinel-abc")
+        raise RuntimeError(f"provider said: bad key {SECRET}")
     except RuntimeError:
         logger.exception("call failed for %r", "peso 82,4")
     out = stream.getvalue()
-    assert "sk-sentinel-abc" not in out
-    # The argument, the exception message and the traceback's source line.
-    assert out.count(logs.MASK) == 3
+    assert SECRET not in out
+    assert out.count(logs.MASK) == 2  # the argument and the exception message in the traceback
     assert "call failed for 'peso 82,4'" in out and "RuntimeError" in out
 
 
@@ -53,9 +55,6 @@ def test_uvicorn_access_lines_keep_their_arguments_and_lose_the_secret():
     logger, stream = capture("test.redaction.access", AccessFormatter("%(request_line)s %(status_code)s"))
     logger.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "POST", "/hook/tok-in-a-url-123", "1.1", 200)
     assert stream.getvalue().strip() == f"POST /hook/{logs.MASK} HTTP/1.1 200 OK"
-
-
-SECRET = "sk-sentinel-deep"
 
 
 @pytest.mark.parametrize(
@@ -85,31 +84,92 @@ def test_a_message_that_is_not_a_string_is_masked():
     assert SECRET not in stream.getvalue() and logs.MASK in stream.getvalue()
 
 
-def test_the_template_is_not_touched_so_placeholders_keep_working():
-    logs.register_secrets(["payload-secret"])
-    logger, stream = capture("test.redaction.template")
-    logger.info("value %(payload)s and payload-secret", {"payload": "ok"})
-    assert stream.getvalue().strip() == f"test.redaction.template value ok and {logs.MASK}"
+def test_a_secret_named_like_a_placeholder_does_not_break_the_line():
+    logs.register_secrets(["password1"])
+    logger, stream = capture("test.redaction.placeholder")
+    logger.info("login with %(password1)s", {"password1": "hunter2-not-secret"})
+    assert stream.getvalue().strip() == "test.redaction.placeholder login with hunter2-not-secret"
 
 
-def test_install_keeps_a_factory_set_before_and_survives_a_reinstall():
-    seen = []
+class Amount:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __int__(self) -> int:
+        return 42
+
+    def __float__(self) -> float:
+        return 4.2
+
+    def __str__(self) -> str:
+        return f"amount for {SECRET}"
+
+
+def test_numeric_formats_of_an_object_holding_a_secret_still_work():
+    logs.register_secrets([SECRET])
+    logger, stream = capture("test.redaction.numbers")
+    logger.info("n=%d f=%.2f s=%s", Amount(), Amount(), Amount())
+    assert stream.getvalue().strip() == f"test.redaction.numbers n=42 f=4.20 s=amount for {logs.MASK}"
+
+
+class Exploding:
+    def __str__(self) -> str:
+        raise ValueError("no text")
+
+    def __repr__(self) -> str:
+        return f"Exploding({SECRET})"
+
+
+def test_a_formatting_error_does_not_print_the_secret_on_stderr(capsys):
+    logs.register_secrets([SECRET])
+    logger, stream = capture("test.redaction.exploding")
+    logger.info("value %s", Exploding())
+    err = capsys.readouterr().err
+    assert "Logging error" in err
+    assert SECRET not in err and SECRET not in stream.getvalue()
+
+
+class Shifting:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __str__(self) -> str:
+        self.calls += 1
+        return "clean" if self.calls == 1 else f"now {SECRET}"
+
+
+def test_an_argument_whose_text_changes_between_calls_is_masked():
+    logs.register_secrets([SECRET])
+    logger, stream = capture("test.redaction.shifting")
+    value = Shifting()
+    str(value)  # the first call is clean
+    logger.info("value %s", value)
+    assert SECRET not in stream.getvalue()
+
+
+def test_a_wrapped_record_factory_that_adds_a_secret_is_still_masked():
     original = logging.getLogRecordFactory()
 
-    def tagging(*args, **kwargs):
+    @functools.wraps(original)
+    def adding(*args, **kwargs):
         record = original(*args, **kwargs)
-        record.tag = "set-by-library"
-        seen.append(record)
+        record.msg = f"{record.msg} {SECRET}"
         return record
 
     try:
-        logging.setLogRecordFactory(tagging)
-        logs.install()
+        logging.setLogRecordFactory(adding)
         logs.install()
         logs.register_secrets([SECRET])
-        logger, stream = capture("test.redaction.chain")
-        logger.info("key %s", SECRET)
-        assert seen and seen[-1].tag == "set-by-library"
-        assert SECRET not in stream.getvalue()
+        logger, stream = capture("test.redaction.wraps")
+        logger.info("hello")
+        assert stream.getvalue().strip() == f"test.redaction.wraps hello {logs.MASK}"
     finally:
         logging.setLogRecordFactory(original)
+
+
+def test_install_twice_masks_once():
+    logs.install()
+    logs.register_secrets([SECRET])
+    logger, stream = capture("test.redaction.twice")
+    logger.info("key %s", SECRET)
+    assert stream.getvalue().strip() == f"test.redaction.twice key {logs.MASK}"

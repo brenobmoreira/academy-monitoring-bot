@@ -156,6 +156,38 @@ async def test_a_download_that_outlives_the_deadline_gets_the_download_failure_r
     assert asyncio.get_running_loop().time() - started < 3
 
 
+class SlowSheet(FakeSheet):
+    """/hoje's sheet call takes 5 s."""
+
+    async def day(self, date):
+        await asyncio.sleep(5)
+        return await super().day(date)
+
+
+class SlowSendTelegram(FakeTelegram):
+    async def send_message(self, chat_id, text, *, html=False, reply_markup=None, reply_to=None):
+        await asyncio.sleep(5)
+        return await super().send_message(
+            chat_id, text, html=html, reply_markup=reply_markup, reply_to=reply_to
+        )
+
+
+async def test_a_slow_command_is_cut_at_the_deadline_plus_the_send_reserve():
+    handler = Handler(
+        {42}, FakeBot(), FakeTelegram(), sheet=SlowSheet(), message_deadline_s=0.05, send_reserve_s=0.1
+    )
+    started = asyncio.get_running_loop().time()
+    await handler.handle_update(update("/hoje"))
+    assert asyncio.get_running_loop().time() - started < 2
+
+
+async def test_a_slow_reply_is_cut_at_the_deadline_plus_the_send_reserve():
+    handler = Handler({42}, FakeBot(), SlowSendTelegram(), message_deadline_s=0.05, send_reserve_s=0.1)
+    started = asyncio.get_running_loop().time()
+    await handler.handle_update(update("peso 82"))
+    assert asyncio.get_running_loop().time() - started < 2
+
+
 async def test_runs_the_bot_and_replies_in_the_same_chat():
     bot, tg = FakeBot("21/09 · Peso kg 82"), FakeTelegram()
     await Handler({42}, bot, tg).handle_update(update())

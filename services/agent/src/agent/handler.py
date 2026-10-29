@@ -30,6 +30,9 @@ log = logging.getLogger(__name__)
 FAILURE = "⚠ Não consegui processar agora. Confira a planilha antes de reenviar."
 TYPING_EVERY = 4.0  # seconds; Telegram clears the "typing…" status after about 5 s
 MEDIA_MAX_BYTES = 5_000_000
+# Seconds left after MESSAGE_DEADLINE_S to send the reply: with the default 90 s, an update ends
+# within 115 s, below Cloud Run's 120 s request timeout.
+SEND_RESERVE_S = 25.0
 DOWNLOAD_FAILED = "⚠ Não consegui baixar o arquivo do Telegram. Tente de novo ou envie em texto."
 
 
@@ -167,6 +170,7 @@ class Handler:
         media_max_bytes: int = MEDIA_MAX_BYTES,
         deduplicator: UpdateDeduplicator | None = None,
         message_deadline_s: float | None = None,
+        send_reserve_s: float = SEND_RESERVE_S,
     ) -> None:
         self._allowed = allowed_chat_ids
         self._bot = bot
@@ -179,6 +183,7 @@ class Handler:
         self._media_max_bytes = media_max_bytes
         self._deduplicator = deduplicator if deduplicator is not None else UpdateDeduplicator()
         self._message_deadline_s = message_deadline_s
+        self._send_reserve_s = send_reserve_s
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         """Never raises: a webhook that errors makes Telegram resend the same update."""
@@ -189,11 +194,17 @@ class Handler:
         completed = False
         # One budget from the arrival of the update: the media download and the agent share it,
         # and the reply goes out after it.
-        token = None
+        token, hard_limit = None, None
         if self._message_deadline_s is not None:
-            token = MESSAGE_DEADLINE_AT.set(asyncio.get_running_loop().time() + self._message_deadline_s)
+            deadline_at = asyncio.get_running_loop().time() + self._message_deadline_s
+            token = MESSAGE_DEADLINE_AT.set(deadline_at)
+            # Commands, button taps and a reply sent in several parts stop here at the latest.
+            hard_limit = deadline_at + self._send_reserve_s
         try:
-            completed = await self._process_update(update, update_id)
+            async with asyncio.timeout_at(hard_limit):
+                completed = await self._process_update(update, update_id)
+        except TimeoutError:
+            log.warning("update %s cut at the message's hard time limit", update_id)
         finally:
             if token is not None:
                 MESSAGE_DEADLINE_AT.reset(token)

@@ -1,0 +1,71 @@
+{
+  "format": "academy-client/1",
+  "_about": "Client data for Projeto Luan (not code). Pasted into Projeto → Sistema → Configuração inicial on an empty spreadsheet. Keys of `config` are the Config keys of spec §3.2; dates are yyyy-mm-dd. The plan (Push/Pull/Legs A/B) is not in this file: paste clients/luan_exercicios.tsv into Exercícios and clients/luan_ficha.tsv into Ficha de treino, then Salvar nova ficha.",
+  "_decisions": [
+    "client.startDate = 2026-10-28, the day the spreadsheet is created (no earlier records are migrated).",
+    "The plan is the same Push A → Legs B used in Zoio's F002 (Luan wrote it from his own training): 1 aquecimento + 1 reconhecimento (feeder) + 2 work sets of 6–10 reps at 0–1 RIR; only the work sets count.",
+    "Objective 'deficit' (cutting leve): target −0.25 to −0.75 %/week instead of the rule default −0.5 to −1.0, to preserve lean mass on the way to ~12% body fat.",
+    "TMB Mifflin = 10·85.3 + 6.25·182 − 5·age + 5 = 1995.5 − 5·age kcal; with activityFactor 1.6 the TDEE is ~2950–3020 kcal for ages 22–30, so 2500 kcal is a ~15–17% deficit.",
+    "Carbohydrate = (2500 − 4·185 − 9·70) / 4 = 282.5 g, recomputed by the script.",
+    "routine.cardioPerWeek = 3 (minimum stated; duration not defined yet). stepsPerDay = 10000 ≈ 8 km/day walking at a ~0.76 m stride."
+  ],
+  "config": {
+    "client.name": "Luan",
+    "client.sex": "M",
+    "client.age": null,
+    "client.heightCm": 182,
+    "client.startWeightKg": 85.3,
+    "client.startDate": "2026-10-28",
+    "client.reviewer": "Luan",
+    "client.notes": "Método: 1 aquecimento + 1 série de reconhecimento + 2 work sets (só as work sets contam no volume). Caminhada ~8 km/dia em ladeiras (ida e volta da faculdade, Florianópolis). Cardio ≥3x/semana, duração a definir. Acompanhamento de BF por fotos. Almoço e jantar no RU.",
+    "routine.strengthPerWeek": 5,
+    "routine.cardioPerWeek": 3,
+    "routine.activities": "Caminhada (ida e volta da faculdade)",
+    "routine.activitiesPerWeek": 0,
+    "routine.sessionRotation": "Push A, Pull A, Legs A, Push B, Pull B, Legs B",
+    "routine.rotationMode": "continuous",
+    "energy.bmrMethod": "mifflin",
+    "energy.activityFactor": 1.6,
+    "analysis.kcalTolerance": 0.05,
+    "analysis.fatTolerance": 0.15
+  },
+  "otherClientNames": ["Breno", "Zoio"],
+  "history": {
+    "objectives": [
+      {
+        "id": "O001",
+        "name": "Cutting leve",
+        "analysisType": "deficit",
+        "start": "2026-10-28",
+        "startWeightKg": 85.3,
+        "weightRateMinPct": -0.75,
+        "weightRateMaxPct": -0.25,
+        "expectation": "Preservar o máximo de massa magra e chegar a ~12% de gordura corporal, acompanhando fotos, cintura e desempenho",
+        "reason": "Objetivo inicial (planilha nova)"
+      }
+    ],
+    "goals": [
+      {
+        "id": "M001",
+        "start": "2026-10-28",
+        "kcal": 2500,
+        "protein": 185,
+        "proteinMin": 175,
+        "proteinMax": 195,
+        "fat": 70,
+        "kcalTolerance": 0.05,
+        "fatTolerance": 0.15,
+        "strengthPerWeek": 5,
+        "cardioPerWeek": 3,
+        "activitiesPerWeek": 0,
+        "stepsPerDay": 10000,
+        "reason": "Cutting leve: ~15% abaixo do gasto estimado; proteína ~2,2 g/kg para preservar massa magra."
+      }
+    ],
+    "plans": []
+  },
+  "review": [
+    { "area": "Perfil", "message": "Idade não informada: preencher client.age (o TMB muda 5 kcal por ano)." },
+    { "area": "Energia", "message": "Fator de atividade 1,6 é uma estimativa (5 treinos + 3 cardios + ~8 km/dia de caminhada); revisar com 2–3 semanas de peso e ingestão." }
+  ]
+}

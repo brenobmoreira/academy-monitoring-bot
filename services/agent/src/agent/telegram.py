@@ -22,7 +22,9 @@ def configure_logging() -> None:
 
 
 class TelegramError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class TelegramClient:
@@ -39,7 +41,8 @@ class TelegramClient:
             body = {}
         if response.status_code != 200 or not body.get("ok"):
             raise TelegramError(
-                f"{method}: HTTP {response.status_code} {body.get('description', '')}".strip()
+                f"{method}: HTTP {response.status_code} {body.get('description', '')}".strip(),
+                response.status_code,
             )
         return body["result"]
 

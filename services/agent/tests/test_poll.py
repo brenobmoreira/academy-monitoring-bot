@@ -93,3 +93,30 @@ async def test_a_programming_error_still_stops_the_loop():
 
     with pytest.raises(KeyError):
         await poll_forever(tg, FakeHandler(), sleep=sleep, rounds=1)
+
+
+@pytest.mark.parametrize(
+    ("status", "hint"),
+    [(401, "TELEGRAM_BOT_TOKEN"), (404, "TELEGRAM_BOT_TOKEN"), (409, "set-webhook.sh delete")],
+)
+async def test_an_error_that_needs_action_stops_with_what_to_do(status, hint, caplog):
+    error = TelegramError(f"getUpdates: HTTP {status} Conflict or Unauthorized", status)
+    tg = FlakyTelegram([error])
+
+    async def sleep(seconds):
+        raise AssertionError("must not wait")
+
+    with pytest.raises(TelegramError):
+        await poll_forever(tg, FakeHandler(), sleep=sleep, rounds=3)
+    assert f"HTTP {status}" in caplog.text
+    assert hint in caplog.text
+
+
+async def test_a_transient_error_is_logged_with_its_reason(caplog):
+    tg = FlakyTelegram([TelegramError("getUpdates: HTTP 502 Bad Gateway", 502), []])
+
+    async def sleep(seconds):
+        pass
+
+    await poll_forever(tg, FakeHandler(), sleep=sleep, rounds=2)
+    assert "HTTP 502 Bad Gateway" in caplog.text

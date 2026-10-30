@@ -129,22 +129,46 @@ def test_a_formatting_error_does_not_print_the_secret_on_stderr(capsys):
     assert SECRET not in err and SECRET not in stream.getvalue()
 
 
+def test_the_formatting_error_report_keeps_the_call_stack_and_masks_it(capsys):
+    logs.register_secrets([SECRET])
+    logger, _ = capture("test.redaction.stack")
+    logger.info("value %s", Exploding())
+    err = capsys.readouterr().err
+    assert "ValueError: no text" in err
+    assert "Call stack:" in err and "test_the_formatting_error_report_keeps_the_call_stack" in err
+    assert f"Exploding({logs.MASK})" in err and SECRET not in err
+
+
+def test_the_report_is_silent_when_logging_exceptions_are_off(capsys, monkeypatch):
+    monkeypatch.setattr(logging, "raiseExceptions", False)
+    logger, _ = capture("test.redaction.silent")
+    logger.info("value %s", Exploding())
+    assert capsys.readouterr().err == ""
+
+
 class Shifting:
-    def __init__(self) -> None:
+    """Clean for the first `clean` conversions to text, then carries the secret."""
+
+    def __init__(self, clean: int) -> None:
+        self.clean = clean
         self.calls = 0
 
     def __str__(self) -> str:
         self.calls += 1
-        return "clean" if self.calls == 1 else f"now {SECRET}"
+        return "clean" if self.calls <= self.clean else f"now {SECRET}"
 
 
-def test_an_argument_whose_text_changes_between_calls_is_masked():
+@pytest.mark.parametrize("clean", [0, 1, 2, 3])
+def test_an_argument_whose_text_changes_between_calls_is_masked(clean):
+    """Whichever conversion ends up in the line, the line is the masked text of that conversion
+    (the per-argument masking leaked when the third conversion was the first with the secret)."""
     logs.register_secrets([SECRET])
     logger, stream = capture("test.redaction.shifting")
-    value = Shifting()
-    str(value)  # the first call is clean
-    logger.info("value %s", value)
-    assert SECRET not in stream.getvalue()
+    logger.info("value %s", Shifting(clean))
+    line = stream.getvalue().strip()
+    assert line in {"test.redaction.shifting value clean", f"test.redaction.shifting value now {logs.MASK}"}
+    if clean == 0:
+        assert line.endswith(logs.MASK)
 
 
 def test_a_wrapped_record_factory_that_adds_a_secret_is_still_masked():

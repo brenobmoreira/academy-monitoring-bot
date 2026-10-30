@@ -3,6 +3,7 @@ from datetime import datetime
 
 import pytest
 
+from agent import handler as handler_module
 from agent.bot import (
     MEDIA_UNREADABLE,
     MODEL_FAILED,
@@ -13,7 +14,7 @@ from agent.bot import (
 )
 from agent.buttons import FIX_PLACEHOLDER, FIX_PROMPT, keyboard
 from agent.commands import Reply, help_text
-from agent.handler import DOWNLOAD_FAILED, FAILURE, Handler, UpdateDeduplicator, media_ref, too_large
+from agent.handler import CUT, DOWNLOAD_FAILED, FAILURE, Handler, UpdateDeduplicator, media_ref, too_large
 from agent.undo import ALREADY, SHEET_DOWN
 
 from .fakes import FakeSheet
@@ -172,20 +173,51 @@ class SlowSendTelegram(FakeTelegram):
         )
 
 
-async def test_a_slow_command_is_cut_at_the_deadline_plus_the_send_reserve():
-    handler = Handler(
-        {42}, FakeBot(), FakeTelegram(), sheet=SlowSheet(), message_deadline_s=0.05, send_reserve_s=0.1
-    )
+class SlowUndoSheet(FakeSheet):
+    """Each undo is applied, then the answer takes 5 s."""
+
+    async def undo(self, write_id=None):
+        response = await super().undo(write_id)
+        await asyncio.sleep(5)
+        return response
+
+
+async def test_a_slow_command_is_cut_and_the_person_is_told():
+    tg = FakeTelegram()
+    handler = Handler({42}, FakeBot(), tg, sheet=SlowSheet(), message_deadline_s=0.05, send_reserve_s=0.1)
     started = asyncio.get_running_loop().time()
     await handler.handle_update(update("/hoje"))
     assert asyncio.get_running_loop().time() - started < 2
+    assert tg.sent == [(42, CUT)]
 
 
-async def test_a_slow_reply_is_cut_at_the_deadline_plus_the_send_reserve():
+async def test_a_cut_undo_is_never_run_again():
+    sheet = SlowUndoSheet(**{"write.undo": [undone()]})
+    tg = FakeTelegram()
+    handler = Handler({42}, FakeBot(), tg, sheet=sheet, message_deadline_s=0.05, send_reserve_s=0.1)
+    await handler.handle_update(update("/desfazer", update_id=30))
+    await handler.handle_update(update("/desfazer", update_id=30))  # the same update delivered again
+    assert [op for op, _ in sheet.calls] == ["write.undo"]
+    assert tg.sent == [(42, CUT)]
+
+
+async def test_a_cut_button_tap_stops_the_spinner_with_the_notice():
+    sheet = SlowUndoSheet(**{"write.undo": [undone()]})
+    tg = FakeTelegram()
+    handler = Handler({42}, FakeBot(), tg, sheet=sheet, message_deadline_s=0.05, send_reserve_s=0.1)
+    await handler.handle_update(tap("undo:w1"))
+    await handler.handle_update(tap("undo:w1"))
+    assert [op for op, _ in sheet.calls] == ["write.undo"]
+    assert tg.answered == [("cb1", CUT)]
+    assert tg.sent == [(42, CUT)]
+
+
+async def test_a_reply_cut_while_sending_ends_within_the_notice_time(monkeypatch):
+    monkeypatch.setattr(handler_module, "CUT_NOTICE_S", 0.1)
     handler = Handler({42}, FakeBot(), SlowSendTelegram(), message_deadline_s=0.05, send_reserve_s=0.1)
     started = asyncio.get_running_loop().time()
     await handler.handle_update(update("peso 82"))
-    assert asyncio.get_running_loop().time() - started < 2
+    assert asyncio.get_running_loop().time() - started < 1
 
 
 async def test_runs_the_bot_and_replies_in_the_same_chat():

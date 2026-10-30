@@ -30,9 +30,13 @@ log = logging.getLogger(__name__)
 FAILURE = "⚠ Não consegui processar agora. Confira a planilha antes de reenviar."
 TYPING_EVERY = 4.0  # seconds; Telegram clears the "typing…" status after about 5 s
 MEDIA_MAX_BYTES = 5_000_000
-# Seconds left after MESSAGE_DEADLINE_S to send the reply: with the default 90 s, an update ends
-# within 115 s, below Cloud Run's 120 s request timeout.
-SEND_RESERVE_S = 25.0
+# Seconds left after MESSAGE_DEADLINE_S to send the reply, then at most CUT_NOTICE_S to say an
+# update was cut: with the default 90 s, an update ends within 115 s, below Cloud Run's 120 s.
+SEND_RESERVE_S = 20.0
+CUT_NOTICE_S = 5.0
+CUT = (
+    "⚠ Demorou demais e parei no meio: pode ter gravado ou desfeito algo. Confira com /hoje antes de repetir."
+)
 DOWNLOAD_FAILED = "⚠ Não consegui baixar o arquivo do Telegram. Tente de novo ou envie em texto."
 
 
@@ -43,7 +47,8 @@ class UpdateDeduplicator:
     Once an update finishes without a transient failure (`reply.transient` is False), its update_id
     is kept in a bounded FIFO cache so late webhook retries are also ignored. If an update fails
     transiently (sheet/model/download/send error), it is released without marking completed so a
-    retry can complete the work.
+    retry can complete the work. An update cut at the hard time limit counts as completed: what it
+    did is unknown, and running it again could undo a second write (/desfazer).
     """
 
     def __init__(self, max_size: int = 1024) -> None:
@@ -205,11 +210,31 @@ class Handler:
                 completed = await self._process_update(update, update_id)
         except TimeoutError:
             log.warning("update %s cut at the message's hard time limit", update_id)
+            completed = True
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(CUT_NOTICE_S):
+                    await self._notify_cut(update)
         finally:
             if token is not None:
                 MESSAGE_DEADLINE_AT.reset(token)
             if update_id is not None:
                 self._deduplicator.finish(update_id, completed=completed)
+
+    async def _notify_cut(self, update: dict[str, Any]) -> None:
+        """Tells the person an update was cut (and stops a button's spinner); best effort."""
+        query = update.get("callback_query")
+        message = (query.get("message") if query else update.get("message")) or {}
+        if query:
+            try:
+                await self._telegram.answer_callback_query(str(query.get("id", "")), CUT)
+            except Exception as error:
+                log.warning("could not answer callback query %s: %s", query.get("id"), error)
+        chat_id = (message.get("chat") or {}).get("id")
+        if chat_id in self._allowed:
+            try:
+                await self._send(chat_id, Reply(CUT))
+            except Exception as error:
+                log.warning("could not tell chat %s the update was cut: %s", chat_id, error)
 
     async def _process_update(self, update: dict[str, Any], update_id: int | None) -> bool:
         if "callback_query" in update:

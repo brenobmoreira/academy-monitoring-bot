@@ -253,6 +253,34 @@ uv run pytest            # unit tests, no network: fake sheet API, scripted mode
 
 End to end without Telegram or Google: [`e2e/`](../../e2e).
 
+## OpenMausBot / MCP
+
+`agent-mcp` ([`mcp_server.py`](src/agent/mcp_server.py)) is a read-only MCP server (stdio) over
+the same sheet API, so an agent outside the bot can read the training and diet data. Tools:
+`get_catalog`, `get_phase`, `get_week`, `get_diary_history` and `get_workout_history`
+(`date_from`/`date_to`, up to 92 days), `get_exercise_history`. Each one returns the API body
+unchanged, `{"ok": false, "errors": [...]}` included. There are no write tools: the Telegram bot
+stays the only writer.
+
+`SHEET_API_URL` and `SHEET_API_KEY` come from the environment or from the .env file named by
+`ENV_FILE` (the environment wins); never pass them as arguments. A file with only those two lines
+is enough; keep it outside the repo.
+
+In OpenMausBot, add the server to `mcpServers` in the profile's `config.json` (for the
+"Minha equipe" shortcut: `%USERPROFILE%\OpenMausBot-Equipe\perfil\data\config.json`), then add
+its name to the `mcpServers` list of the agent that should use it:
+
+```json
+"academia-planilha": {
+  "command": "uv",
+  "args": ["run", "--directory", "C:\\path\\to\\academy-monitoring-bot\\services\\agent", "agent-mcp"],
+  "env": { "ENV_FILE": "C:\\Users\\<you>\\.secrets\\academia-sheet.env" },
+  "enabled": true
+}
+```
+
+Use the absolute path to `uv.exe` as `command` if OpenMausBot does not see it on its `PATH`.
+
 ## Deploy (Cloud Run functions)
 
 Each client has a dedicated Cloud Run service (`SERVICE=fitness-agent-<client>`, e.g.

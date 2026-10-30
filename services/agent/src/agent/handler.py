@@ -221,20 +221,28 @@ class Handler:
                 self._deduplicator.finish(update_id, completed=completed)
 
     async def _notify_cut(self, update: dict[str, Any]) -> None:
-        """Tells the person an update was cut (and stops a button's spinner); best effort."""
+        """Tells the person an update was cut and stops a button's spinner, both at once so a
+        hanging one does not hold back the other; best effort."""
         query = update.get("callback_query")
         message = (query.get("message") if query else update.get("message")) or {}
-        if query:
+        chat_id = (message.get("chat") or {}).get("id")
+
+        async def answer(query: dict[str, Any]) -> None:
             try:
                 await self._telegram.answer_callback_query(str(query.get("id", "")), CUT)
             except Exception as error:
                 log.warning("could not answer callback query %s: %s", query.get("id"), error)
-        chat_id = (message.get("chat") or {}).get("id")
-        if chat_id in self._allowed:
+
+        async def tell(chat_id: int) -> None:
             try:
                 await self._send(chat_id, Reply(CUT))
             except Exception as error:
                 log.warning("could not tell chat %s the update was cut: %s", chat_id, error)
+
+        notices = [answer(query)] if query else []
+        if chat_id in self._allowed:
+            notices.append(tell(chat_id))
+        await asyncio.gather(*notices)
 
     async def _process_update(self, update: dict[str, Any], update_id: int | None) -> bool:
         if "callback_query" in update:

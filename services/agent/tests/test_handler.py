@@ -212,6 +212,24 @@ async def test_a_cut_button_tap_stops_the_spinner_with_the_notice():
     assert tg.sent == [(42, CUT)]
 
 
+class HangingAnswerTelegram(FakeTelegram):
+    """answerCallbackQuery never returns."""
+
+    async def answer_callback_query(self, callback_query_id, text=None):
+        await asyncio.sleep(60)
+
+
+async def test_a_hanging_button_answer_does_not_hold_back_the_notice(monkeypatch):
+    monkeypatch.setattr(handler_module, "CUT_NOTICE_S", 0.3)
+    sheet = SlowUndoSheet(**{"write.undo": [undone()]})
+    tg = HangingAnswerTelegram()
+    handler = Handler({42}, FakeBot(), tg, sheet=sheet, message_deadline_s=0.05, send_reserve_s=0.1)
+    started = asyncio.get_running_loop().time()
+    await handler.handle_update(tap("undo:w1"))
+    assert asyncio.get_running_loop().time() - started < 2
+    assert tg.sent == [(42, CUT)]
+
+
 async def test_a_reply_cut_while_sending_ends_within_the_notice_time(monkeypatch):
     monkeypatch.setattr(handler_module, "CUT_NOTICE_S", 0.1)
     handler = Handler({42}, FakeBot(), SlowSendTelegram(), message_deadline_s=0.05, send_reserve_s=0.1)

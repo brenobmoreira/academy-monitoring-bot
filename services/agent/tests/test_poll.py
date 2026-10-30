@@ -1,8 +1,11 @@
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
+from agent import poll
 from agent.poll import poll_forever, poll_once
-from agent.telegram import TelegramError
+from agent.telegram import TelegramClient, TelegramError
 
 pytestmark = pytest.mark.unit
 
@@ -96,11 +99,11 @@ async def test_a_programming_error_still_stops_the_loop():
 
 
 @pytest.mark.parametrize(
-    ("status", "hint"),
+    ("code", "hint"),
     [(401, "TELEGRAM_BOT_TOKEN"), (404, "TELEGRAM_BOT_TOKEN"), (409, "set-webhook.sh delete")],
 )
-async def test_an_error_that_needs_action_stops_with_what_to_do(status, hint, caplog):
-    error = TelegramError(f"getUpdates: HTTP {status} Conflict or Unauthorized", status)
+async def test_an_error_that_needs_action_stops_with_what_to_do(code, hint, caplog):
+    error = TelegramError(f"getUpdates: HTTP {code} Conflict or Unauthorized", code)
     tg = FlakyTelegram([error])
 
     async def sleep(seconds):
@@ -108,7 +111,7 @@ async def test_an_error_that_needs_action_stops_with_what_to_do(status, hint, ca
 
     with pytest.raises(TelegramError):
         await poll_forever(tg, FakeHandler(), sleep=sleep, rounds=3)
-    assert f"HTTP {status}" in caplog.text
+    assert f"HTTP {code}" in caplog.text
     assert hint in caplog.text
 
 
@@ -120,3 +123,67 @@ async def test_a_transient_error_is_logged_with_its_reason(caplog):
 
     await poll_forever(tg, FakeHandler(), sleep=sleep, rounds=2)
     assert "HTTP 502 Bad Gateway" in caplog.text
+
+
+def telegram_answering(*responses):
+    """A real TelegramClient over a transport that answers each request from `responses`."""
+    queue = list(responses)
+
+    def answer(request):
+        return queue.pop(0)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    return TelegramClient("123:token-for-tests", http)
+
+
+async def test_a_404_that_is_not_telegrams_answer_is_retried():
+    tg = telegram_answering(
+        httpx.Response(404, text="<html>Not Found</html>"),
+        httpx.Response(200, json={"ok": True, "result": [{"update_id": 5}]}),
+    )
+    handler, waits = FakeHandler(), []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    await poll_forever(tg, handler, sleep=sleep, rounds=2)
+    assert waits == [1]
+    assert handler.seen == [5]
+
+
+async def test_telegrams_own_404_stops_with_the_token_hint(caplog):
+    tg = telegram_answering(
+        httpx.Response(404, json={"ok": False, "error_code": 404, "description": "Not Found"})
+    )
+
+    async def sleep(seconds):
+        raise AssertionError("must not wait")
+
+    with pytest.raises(TelegramError):
+        await poll_forever(tg, FakeHandler(), sleep=sleep, rounds=2)
+    assert "TELEGRAM_BOT_TOKEN" in caplog.text
+
+
+def run_main_raising(monkeypatch, error):
+    async def run(settings):
+        raise error
+
+    monkeypatch.setattr(poll, "configure_logging", lambda: None)
+    monkeypatch.setattr(
+        poll.Settings, "load", classmethod(lambda cls: SimpleNamespace(LLM_MODEL="m", MAX_LLM_CALLS=1))
+    )
+    monkeypatch.setattr(poll, "run", run)
+    poll.main()
+
+
+def test_main_exits_with_1_when_telegram_needs_action(monkeypatch):
+    with pytest.raises(SystemExit) as stopped:
+        run_main_raising(monkeypatch, TelegramError("getUpdates: HTTP 409 Conflict", 409))
+    assert stopped.value.code == 1
+
+
+def test_main_lets_other_errors_through(monkeypatch):
+    with pytest.raises(TelegramError):
+        run_main_raising(monkeypatch, TelegramError("getUpdates: HTTP 502 Bad Gateway", 502))
+    with pytest.raises(KeyError):
+        run_main_raising(monkeypatch, KeyError("bug"))

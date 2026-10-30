@@ -22,9 +22,12 @@ def configure_logging() -> None:
 
 
 class TelegramError(RuntimeError):
-    def __init__(self, message: str, status: int | None = None) -> None:
+    """`error_code` is the one in Telegram's own JSON answer; None when the answer was not
+    Telegram's (an HTML error page from a proxy, a network failure)."""
+
+    def __init__(self, message: str, error_code: int | None = None) -> None:
         super().__init__(message)
-        self.status = status
+        self.error_code = error_code
 
 
 class TelegramClient:
@@ -39,10 +42,13 @@ class TelegramClient:
             body = response.json()
         except ValueError:
             body = {}
+        if not isinstance(body, dict):
+            body = {}
         if response.status_code != 200 or not body.get("ok"):
+            code = body.get("error_code")
             raise TelegramError(
                 f"{method}: HTTP {response.status_code} {body.get('description', '')}".strip(),
-                response.status_code,
+                code if isinstance(code, int) and not isinstance(code, bool) else None,
             )
         return body["result"]
 

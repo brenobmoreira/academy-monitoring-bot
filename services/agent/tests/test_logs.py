@@ -197,3 +197,24 @@ def test_install_twice_masks_once():
     logger, stream = capture("test.redaction.twice")
     logger.info("key %s", SECRET)
     assert stream.getvalue().strip() == f"test.redaction.twice key {logs.MASK}"
+
+
+class BrokenStderr:
+    def __init__(self, error):
+        self.error = error
+
+    def write(self, text):
+        raise self.error
+
+
+def test_a_report_that_cannot_be_written_is_dropped(monkeypatch):
+    monkeypatch.setattr("sys.stderr", BrokenStderr(OSError("closed pipe")))
+    logger, _ = capture("test.redaction.broken")
+    logger.info("value %s", Exploding())  # must not raise
+
+
+def test_an_unexpected_error_writing_the_report_is_not_hidden(monkeypatch):
+    monkeypatch.setattr("sys.stderr", BrokenStderr(ValueError("bad stream")))
+    logger, _ = capture("test.redaction.unexpected")
+    with pytest.raises(ValueError, match="bad stream"):
+        logger.info("value %s", Exploding())

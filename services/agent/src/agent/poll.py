@@ -22,8 +22,9 @@ from agent.telegram import TelegramClient, TelegramError, configure_logging
 
 log = logging.getLogger(__name__)
 
-# Telegram answers that waiting will not fix: the token was refused (401, or 404 for a malformed
-# one), or a webhook is set or another agent-poll is running (409).
+# Telegram answers that waiting will not fix, by the error_code in Telegram's own JSON answer (an
+# HTML 404 from a proxy is retried like any outage): the token was refused (401, or 404 for a
+# malformed one), or a webhook is set or another agent-poll is running (409).
 NEEDS_ACTION = {
     401: "the bot token was refused: check TELEGRAM_BOT_TOKEN",
     404: "the bot token was refused: check TELEGRAM_BOT_TOKEN",
@@ -66,7 +67,7 @@ async def poll_forever(
         try:
             offset = await poll_once(telegram, handler, offset)
         except (httpx.TransportError, TelegramError) as err:
-            action = NEEDS_ACTION.get(getattr(err, "status", None) or 0)
+            action = NEEDS_ACTION.get(getattr(err, "error_code", None) or 0)
             if action:
                 log.error("Telegram refused polling (%s): %s", err, action)
                 raise
@@ -94,6 +95,6 @@ def main() -> None:
     try:
         asyncio.run(run(settings))
     except TelegramError as err:
-        if getattr(err, "status", None) not in NEEDS_ACTION:
+        if getattr(err, "error_code", None) not in NEEDS_ACTION:
             raise
         raise SystemExit(1) from None  # already logged with what to do

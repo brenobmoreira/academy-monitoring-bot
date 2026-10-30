@@ -41,6 +41,8 @@ const Diary = {
     pain: { label: 'Dor 0–10', type: 'integer', min: 0, max: 10 },
     foodLog: { label: 'Registro alimentar', type: 'enum', enum: Tabs.ENUMS.FOOD_LOG },
     notes: { label: 'Observações', type: 'text' },
+    // Last on purpose: Hoje draws one row per field in this order, so existing screens keep theirs.
+    waterL: { label: 'Água L', type: 'number', min: 0, max: 20 },
   },
 
   STATES: {

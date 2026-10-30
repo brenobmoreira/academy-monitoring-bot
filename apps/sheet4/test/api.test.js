@@ -149,6 +149,31 @@ test('diary.upsert validation: all errors at once, strict types, nothing written
   assert.deepEqual(codes(ctx.api('diary.upsert', { date: '1900-01-01', fields: { sleepH: 7 } })), ['args.date:invalid_date']);
 });
 
+test('diary.upsert waterL: litres in 0–20; a Diário without the column refuses until Reaplicar layout adds it', () => {
+  const ctx = setup();
+  const r = ok(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterL: 2.5 } }));
+  assert.deepEqual(r.fields, { waterL: 2.5 });
+  assert.equal(ctx.Days.get('2026-10-19').waterL, 2.5);
+  assert.deepEqual(codes(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterL: 25 } })), ['args.fields.waterL:out_of_range']);
+
+  // A spreadsheet set up before the column existed: empty header cell, as an older deployment left it.
+  const old = setup();
+  const sheet = old.Tabs.sheet('diary');
+  const spec = old.Tabs.get('diary');
+  sheet.getRange(spec.headerRow, old.Tabs.headerMap('diary').waterL).setValue('');
+  old.Tabs.invalidate();
+  ok(old.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 82 } }));
+  const refused = old.api('diary.upsert', { date: '2026-10-19', fields: { waterL: 2 } });
+  assert.equal(refused.ok, false);
+  assert.match(JSON.stringify(refused.errors), /Reaplicar layout/);
+  const report = { columnsAdded: {} };
+  old.Setup.addMissingColumns_('diary', report);
+  assert.deepEqual(plain(report.columnsAdded), { 'Diário': ['Água L'] });
+  ok(old.api('diary.upsert', { date: '2026-10-19', fields: { waterL: 2 } }));
+  assert.equal(old.Days.get('2026-10-19').waterL, 2);
+  assert.equal(old.Days.get('2026-10-19').weightKg, 82);
+});
+
 /* workout.upsert --------------------------------------------------------------------------------- */
 
 test('workout.upsert: warm-up/feeder apart, work sets with RIR, Parcial, then complete; previous and comparison', () => {

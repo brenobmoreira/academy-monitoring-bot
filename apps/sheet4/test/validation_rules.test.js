@@ -174,6 +174,25 @@ test('varied rule sequences over several columns and block edges: the API scan e
   assert.equal(api.calls, expectedCalls, 'one request per block of rows of each audited tab');
 });
 
+test('default blocks: no request spans more than 200 rows, and the last row of a 1000-row tab is still read', () => {
+  const ctx = boot();
+  const ss = withRefs(ctx);
+  const sheet = ss.getSheetByName('Página1');
+  if (sheet.getMaxRows() < 1000) sheet.insertRowsAfter(sheet.getMaxRows(), 1000 - sheet.getMaxRows());
+  sheet.getRange(1000, 2).setDataValidation(rangeRule(ctx, 'Sumiu'));
+  const api = validationsApi(ctx);
+  const spans = [];
+  const get = api.Spreadsheets.get;
+  api.Spreadsheets.get = (id, opts) => {
+    const m = /!(\d+):(\d+)$/.exec(opts.ranges[0]);
+    spans.push(Number(m[2]) - Number(m[1]) + 1);
+    return get(id, opts);
+  };
+  const s = scan(ctx);
+  assert.ok(spans.length && Math.max(...spans) <= 200, JSON.stringify(spans));
+  assert.deepEqual(cellsOf(s.broken)['Página1!1000,2'], 'Sumiu');
+});
+
 test('a rule the audit cannot classify is inconclusive, and the audit is not clean', () => {
   const ctx = boot();
   withRefs(ctx);

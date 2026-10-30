@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any
 
@@ -5,8 +6,16 @@ import litellm
 import pytest
 from pydantic import SecretStr
 
-from agent.bot import MEDIA_UNREADABLE, MODEL_FAILED, Bot, Media
-from agent.llm import build_model
+from agent.bot import (
+    MEDIA_UNREADABLE,
+    MESSAGE_DEADLINE_AT,
+    MODEL_FAILED,
+    MODEL_FAILED_NOTHING_WRITTEN,
+    WRITE_UNCERTAIN,
+    Bot,
+    Media,
+)
+from agent.llm import RetryingClient, build_model
 from agent.settings import Settings
 
 from .fakes import OK_DIARY, FakeLiteLLMClient, FakeSheet, text_response, tool_call_response
@@ -103,6 +112,208 @@ async def test_a_litellm_timeout_is_reported_after_what_was_written():
     assert (
         await run(build_model(settings(), client=client)) == f"<b>21/09</b> · Peso kg 82,4\n\n{MODEL_FAILED}"
     )
+
+
+def overloaded() -> Exception:
+    return litellm.ServiceUnavailableError(
+        "This model is currently experiencing high demand.", llm_provider="gemini", model="gemini-3.8-flash"
+    )
+
+
+async def test_an_overloaded_model_is_tried_again_and_the_reply_arrives():
+    client = FakeLiteLLMClient([overloaded(), overloaded(), text_response("ok")])
+    model = build_model(settings(LLM_RETRIES=2, LLM_RETRY_WAIT_S=0), client=client)
+    assert await run(model) == "ok"
+    assert [r["model"] for r in client.requests] == ["anthropic/claude-sonnet-5"] * 3
+
+
+async def test_after_the_retries_the_fallback_model_answers():
+    client = FakeLiteLLMClient([overloaded(), overloaded(), text_response("ok")])
+    model = build_model(
+        settings(LLM_RETRIES=1, LLM_RETRY_WAIT_S=0, LLM_FALLBACK_MODEL="anthropic/claude-haiku-5-5"),
+        client=client,
+    )
+    assert await run(model) == "ok"
+    assert [r["model"] for r in client.requests] == [
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-haiku-5-5",
+    ]
+
+
+async def test_a_rate_limit_is_transient_too_but_without_a_fallback_the_failure_is_reported():
+    limited = litellm.RateLimitError("quota", llm_provider="gemini", model="gemini-3.8-flash")
+    client = FakeLiteLLMClient([limited, overloaded()])
+    model = build_model(settings(LLM_RETRIES=1, LLM_RETRY_WAIT_S=0, LLM_FALLBACK_MODEL=None), client=client)
+    assert await run(model) == MODEL_FAILED_NOTHING_WRITTEN
+    assert len(client.requests) == 2
+
+
+async def test_a_request_the_provider_rejects_is_not_repeated():
+    bad = litellm.BadRequestError("invalid schema", model="gemini-3.8-flash", llm_provider="gemini")
+    client = FakeLiteLLMClient([bad])
+    model = build_model(
+        settings(LLM_RETRIES=2, LLM_RETRY_WAIT_S=0, LLM_FALLBACK_MODEL="anthropic/claude-haiku-5-5"),
+        client=client,
+    )
+    assert await run(model) == MODEL_FAILED_NOTHING_WRITTEN
+    assert len(client.requests) == 1
+
+
+async def test_every_model_call_carries_the_configured_timeout():
+    client = FakeLiteLLMClient([text_response("ok")])
+    await run(build_model(settings(LLM_TIMEOUT_S=30), client=client))
+    assert client.requests[0]["timeout"] == 30
+
+
+async def test_a_model_that_times_out_is_not_repeated_the_fallback_answers_at_once():
+    hung = litellm.Timeout("timed out", model="gemini-3.8-flash", llm_provider="gemini")
+    client = FakeLiteLLMClient([hung, text_response("ok")])
+    model = build_model(
+        settings(LLM_RETRIES=2, LLM_RETRY_WAIT_S=0, LLM_FALLBACK_MODEL="anthropic/claude-haiku-5-5"),
+        client=client,
+    )
+    assert await run(model) == "ok"
+    assert [r["model"] for r in client.requests] == [
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-haiku-5-5",
+    ]
+
+
+async def test_a_fallback_of_another_provider_uses_its_own_key_and_not_the_primary_base():
+    client = FakeLiteLLMClient([overloaded(), text_response("ok")])
+    model = build_model(
+        settings(
+            LLM_MODEL="gemini/gemini-3.8-flash",
+            LLM_API_KEY=SecretStr("gemini-key"),
+            LLM_API_BASE="http://proxy:4000",
+            LLM_RETRIES=0,
+            LLM_RETRY_WAIT_S=0,
+            LLM_FALLBACK_MODEL="anthropic/claude-haiku-5-5",
+            LLM_FALLBACK_API_KEY=SecretStr("anthropic-key"),
+        ),
+        client=client,
+    )
+    assert await run(model) == "ok"
+    primary, fallback = client.requests
+    assert (primary["model"], primary["api_key"], primary["api_base"]) == (
+        "gemini/gemini-3.8-flash",
+        "gemini-key",
+        "http://proxy:4000",
+    )
+    assert (fallback["model"], fallback["api_key"]) == ("anthropic/claude-haiku-5-5", "anthropic-key")
+    assert "api_base" not in fallback
+
+
+async def test_the_sdk_does_not_retry_on_its_own():
+    client = FakeLiteLLMClient([text_response("ok")])
+    await run(build_model(settings(), client=client))
+    assert (client.requests[0]["num_retries"], client.requests[0]["max_retries"]) == (0, 0)
+
+
+class SlowClient(FakeLiteLLMClient):
+    async def acompletion(self, model: Any, messages: Any, tools: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(10)
+        return text_response("late")
+
+
+async def test_a_message_that_outlives_its_deadline_is_answered_with_the_model_failure():
+    bot = Bot(
+        FakeSheet(), build_model(settings(), client=SlowClient([])), "America/Sao_Paulo", deadline_s=0.2
+    )
+    started = asyncio.get_running_loop().time()
+    reply = await bot.reply("peso 82,4")
+    assert reply.text == MODEL_FAILED_NOTHING_WRITTEN
+    assert reply.failed
+    assert asyncio.get_running_loop().time() - started < 3
+
+
+class SlowWriteSheet(FakeSheet):
+    async def upsert_diary(self, date: str, fields: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(10)
+        return OK_DIARY
+
+
+async def test_a_deadline_during_a_write_says_it_may_have_been_saved_not_that_nothing_was():
+    client = FakeLiteLLMClient(
+        [tool_call_response("save_diary", {"date": "2026-09-21", "fields": {"weightKg": 82.4}})]
+    )
+    bot = Bot(SlowWriteSheet(), build_model(settings(), client=client), "America/Sao_Paulo", deadline_s=0.3)
+    reply = await bot.reply("peso 82,4")
+    assert reply.text == WRITE_UNCERTAIN
+    assert reply.failed
+
+
+class DownThenSlowSheet(FakeSheet):
+    async def catalog(self) -> dict[str, Any]:
+        return {"ok": False, "errors": [{"path": "op", "code": "unavailable", "message": "down"}]}
+
+    async def add_food(self, date: str, meal: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+        await asyncio.sleep(10)
+        return {"ok": True, "result": {}}
+
+
+async def test_an_interrupted_write_wins_over_an_earlier_sheet_outage():
+    food = {"date": "2026-09-21", "meal": "Almoço", "items": [{"description": "arroz"}]}
+    client = FakeLiteLLMClient(
+        [tool_call_response("get_catalog", {}, "c1"), tool_call_response("save_food", food, "c2")]
+    )
+    bot = Bot(
+        DownThenSlowSheet(), build_model(settings(), client=client), "America/Sao_Paulo", deadline_s=0.3
+    )
+    assert (await bot.reply("almoço: arroz")).text == WRITE_UNCERTAIN
+
+
+async def test_the_handlers_absolute_deadline_shortens_the_bots_own():
+    bot = Bot(FakeSheet(), build_model(settings(), client=SlowClient([])), "America/Sao_Paulo", deadline_s=30)
+    loop = asyncio.get_running_loop()
+    token = MESSAGE_DEADLINE_AT.set(loop.time() + 0.2)
+    try:
+        started = loop.time()
+        reply = await bot.reply("peso 82,4")
+    finally:
+        MESSAGE_DEADLINE_AT.reset(token)
+    assert reply.text == MODEL_FAILED_NOTHING_WRITTEN
+    assert loop.time() - started < 3
+
+
+class Stream:
+    """An async stream that raises `error` after yielding `chunks`."""
+
+    def __init__(self, chunks: list[Any], error: Exception | None = None) -> None:
+        self.chunks = list(chunks)
+        self.error = error
+
+    def __aiter__(self) -> "Stream":
+        return self
+
+    async def __anext__(self) -> Any:
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.error is not None:
+            error, self.error = self.error, None
+            raise error
+        raise StopAsyncIteration
+
+
+async def drain(stream: Any) -> list[Any]:
+    return [chunk async for chunk in stream]
+
+
+async def test_a_stream_that_fails_before_its_first_chunk_is_tried_again():
+    client = FakeLiteLLMClient([Stream([], overloaded()), Stream(["a", "b"])])
+    retrying = RetryingClient(client, retries=1, wait_s=0)
+    assert await drain(await retrying.acompletion("m", [], None, stream=True)) == ["a", "b"]
+    assert len(client.requests) == 2
+
+
+async def test_a_stream_that_fails_after_a_chunk_is_not_repeated():
+    client = FakeLiteLLMClient([Stream(["a"], overloaded()), Stream(["x"])])
+    retrying = RetryingClient(client, retries=2, wait_s=0, fallback_model="f")
+    stream = await retrying.acompletion("m", [], None, stream=True)
+    with pytest.raises(litellm.ServiceUnavailableError):
+        await drain(stream)
+    assert len(client.requests) == 1
 
 
 async def media_request(media: Media, caption: str = "") -> list:

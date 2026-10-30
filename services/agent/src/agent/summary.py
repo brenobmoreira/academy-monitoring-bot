@@ -27,6 +27,7 @@ LABELS = {
     "pain": "Dor",
     "foodLog": "Registro alimentar",
     "notes": "Observações",
+    "waterL": "Água L",
 }
 CALCULATED = "Calculado"
 NO_CALC = "Sem cálculo"

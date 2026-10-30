@@ -421,12 +421,29 @@ const Setup = {
     });
   },
 
-  /** Removes the protections Setup created before (by description prefix). */
+  /**
+   * Removes the protections Setup created before (by description prefix). A listed protection can
+   * vanish before its remove() (seen with the person editing during a long Setup run); it is
+   * already gone, which is the goal, so only that error is skipped.
+   */
   dropProtections_(sheet) {
     sheet.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach((p) => {
-      if (String(p.getDescription()).indexOf(Setup.PROTECT_PREFIX) === 0) p.remove();
+      if (String(p.getDescription()).indexOf(Setup.PROTECT_PREFIX) !== 0) return;
+      try {
+        p.remove();
+      } catch (err) {
+        if (!Setup.GONE_PROTECTION.test(String(err && err.message))) throw err;
+        console.log(`proteção já removida em ${sheet.getName()}: ${err.message}`);
+      }
     });
   },
+
+  /**
+   * Apps Script's message for a protection that no longer exists (pt-BR, as seen in a real
+   * execution log, and en), matched from the start: a message that only mentions the ID (a
+   * missing permission, for example) is a real error.
+   */
+  GONE_PROTECTION: /^(Exception: )?(Não existe um intervalo protegido com o ID|There is no protected range with (the )?ID)/i,
 
   protect_(range, text) {
     const p = range.protect();
@@ -619,6 +636,9 @@ const Setup = {
       R(f.cell).setNumberFormat(nf || 'General');
     };
 
+    // Rows holding a field: the spacer above a section title must not shrink one of them.
+    const fieldRows = {};
+    layout.sections.forEach((s) => s.fields.forEach((f) => { fieldRows[Hoje.rc_(f.cell)[0]] = true; }));
     layout.sections.forEach((s) => {
       const width = s.table ? s.table.columns.length : 2;
       const rows = s.fields.map((f) => Hoje.rc_(f.cell)[0]);
@@ -630,7 +650,7 @@ const Setup = {
       if (s.titleCell) {
         Style.section(sheet.getRange(top, 1, 1, width));
         sheet.setRowHeight(top, Style.ROW.section);
-        if (top > 1) sheet.setRowHeight(top - 1, Style.ROW.spacer);
+        if (top > 1 && !fieldRows[top - 1]) sheet.setRowHeight(top - 1, Style.ROW.spacer);
       }
       s.fields.forEach(drawField);
       Object.keys(s.hints || {}).forEach((a1) => {
@@ -702,7 +722,7 @@ const Setup = {
 
   /** Number format of a Hoje field by key. */
   hojeFormat_(key) {
-    if (['weightKg', 'waistCm', 'sleepH', 'qty', 'portions'].indexOf(key) >= 0) return '0.0';
+    if (['weightKg', 'waistCm', 'sleepH', 'waterL', 'qty', 'portions'].indexOf(key) >= 0) return '0.0';
     if (['steps'].indexOf(key) >= 0) return '#,##0';
     if (['cardioMin', 'activityMin', 'hunger', 'fatigue', 'pain'].indexOf(key) >= 0) return '0';
     return null;

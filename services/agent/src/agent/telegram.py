@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from agent import logs
+
 # Update kinds the bot handles; scripts/set-webhook.sh registers the same list (a test checks).
 ALLOWED_UPDATES = ["message", "callback_query"]
 
@@ -16,10 +18,16 @@ def configure_logging() -> None:
     bot token, and those lines would put it in the terminal and in Cloud Logging."""
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logs.install()
 
 
 class TelegramError(RuntimeError):
-    pass
+    """`error_code` is the one in Telegram's own JSON answer; None when the answer was not
+    Telegram's (an HTML error page from a proxy, a network failure)."""
+
+    def __init__(self, message: str, error_code: int | None = None) -> None:
+        super().__init__(message)
+        self.error_code = error_code
 
 
 class TelegramClient:
@@ -34,9 +42,13 @@ class TelegramClient:
             body = response.json()
         except ValueError:
             body = {}
+        if not isinstance(body, dict):
+            body = {}
         if response.status_code != 200 or not body.get("ok"):
+            code = body.get("error_code")
             raise TelegramError(
-                f"{method}: HTTP {response.status_code} {body.get('description', '')}".strip()
+                f"{method}: HTTP {response.status_code} {body.get('description', '')}".strip(),
+                code if isinstance(code, int) and not isinstance(code, bool) else None,
             )
         return body["result"]
 

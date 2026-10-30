@@ -395,8 +395,13 @@ const Audit = {
     return Audit.validationScan_().broken;
   },
 
-  /** Rows per Sheets API request when reading validations. */
-  VALIDATION_BLOCK_ROWS: 1000,
+  /**
+   * Rows per Sheets API request when reading validations. Every cell's rule comes back, a list
+   * rule with its whole list, so a 1000-row block of a fully validated tab is the suspected cause
+   * of the final audit running out of memory on a fresh 4.0 spreadsheet; 200 keeps each response
+   * small, at the cost of more requests.
+   */
+  VALIDATION_BLOCK_ROWS: 200,
 
   /**
    * Every list-from-range validation of the audited tabs, each cell checked (no sampling):

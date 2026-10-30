@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from typing import NamedTuple
@@ -24,6 +26,10 @@ from agent.tools import Journal, SheetApi, build_tools
 
 log = logging.getLogger(__name__)
 
+# Event-loop time by which the whole Telegram message must be done (set by the handler when the
+# update arrives, so the media download and the agent share one budget); None = only deadline_s.
+MESSAGE_DEADLINE_AT: ContextVar[float | None] = ContextVar("message_deadline_at", default=None)
+
 APP_NAME = "fitness-log"
 WEEKDAYS = [
     "segunda-feira",
@@ -38,6 +44,10 @@ WEEKDAYS = [
 # What the user sees when the run cannot finish normally (see Bot.reply).
 MODEL_FAILED = "⚠ O modelo não respondeu agora. Nada novo foi gravado além do que aparece acima."
 MODEL_FAILED_NOTHING_WRITTEN = "⚠ O modelo não respondeu agora. Nada foi gravado."
+WRITE_UNCERTAIN = (
+    "⚠ O tempo acabou durante uma gravação: ela pode ter entrado na planilha. "
+    "Confira com /hoje antes de reenviar."
+)
 SHEET_FAILED = "⚠ A planilha não respondeu. Tente de novo em alguns minutos."
 MEDIA_UNREADABLE = "Não consegui ler o áudio/foto com o modelo configurado; envie em texto."
 
@@ -51,7 +61,7 @@ Ferramentas:
 rotação, nomes exatos de exercícios, ficha vigente, alimentos e favoritas, refeições e recent \
 (gravações dos últimos 30 minutos, a mais recente primeiro).
 - save_diary: dados do dia (peso, cintura, sono, passos, cardio, atividade e minutos, fome, \
-cansaço, dor, registro alimentar, observações).
+cansaço, dor, registro alimentar, observações, água em litros).
 - save_workout: exercícios de musculação: work sets, aquecimento e feeder separados.
 - save_food: alimentos de uma refeição (do catálogo, favorita ou descrição sem cálculo).
 - get_exercise_history: sessões anteriores de um exercício (só work sets).
@@ -63,9 +73,9 @@ Regras:
 1. Datas sempre em yyyy-MM-dd. Resolva "ontem", "sábado" etc. a partir de hoje. Sem data na \
 mensagem, use hoje.
 2. Grave só o que a mensagem diz. Nunca invente, estime, adivinhe ou complete valores.
-3. Sono em horas decimais (7h30 = 7.5). "8k passos" = 8000. Para apagar um campo do dia, use \
-clear em save_diary; campo omitido fica como está. foodLog (registro alimentar Completo/Parcial) \
-só quando a pessoa declarar.
+3. Sono em horas decimais (7h30 = 7.5). "8k passos" = 8000. Água em litros (2500 ml = 2.5). \
+Para apagar um campo do dia, use clear em save_diary; campo omitido fica como está. foodLog \
+(registro alimentar Completo/Parcial) só quando a pessoa declarar.
 4. Treino: work sets são as séries válidas (1 ou 2 por exercício) e são as únicas que contam \
 para volume e progressão. Aquecimento (warmup) e feeder vão separados, só se a pessoa disser \
 que aquela série foi aquecimento ou feeder; na dúvida, não classifique como aquecimento. \
@@ -192,12 +202,14 @@ class Bot:
         timezone: str,
         clock: Callable[[], datetime] | None = None,
         max_llm_calls: int = 8,
+        deadline_s: float = 90.0,
     ) -> None:
         self._sheet = sheet
         self._model = model
         self._zone = ZoneInfo(timezone)
         self._clock = clock or (lambda: datetime.now(self._zone))
         self._max_llm_calls = max_llm_calls
+        self._deadline_s = deadline_s
 
     async def reply(
         self,
@@ -248,14 +260,29 @@ class Bot:
         final, note = "", ""
         model_failed = False
         try:
-            async for event in runner.run_async(
-                user_id=user_id,
-                session_id=session.id,
-                new_message=message,
-                run_config=RunConfig(max_llm_calls=self._max_llm_calls),
-            ):
-                if event.is_final_response() and event.content and event.content.parts:
-                    final = "".join(p.text or "" for p in event.content.parts if not p.thought)
+            # One deadline for the whole message (every model call, retry and fallback), so the
+            # person gets an answer before the webhook's own request timeout.
+            deadline = self._deadline_s
+            deadline_at = MESSAGE_DEADLINE_AT.get()
+            if deadline_at is not None:
+                deadline = min(deadline, deadline_at - asyncio.get_running_loop().time())
+            async with asyncio.timeout(max(deadline, 0)):
+                async for event in runner.run_async(
+                    user_id=user_id,
+                    session_id=session.id,
+                    new_message=message,
+                    run_config=RunConfig(max_llm_calls=self._max_llm_calls),
+                ):
+                    if event.is_final_response() and event.content and event.content.parts:
+                        final = "".join(p.text or "" for p in event.content.parts if not p.thought)
+        except TimeoutError:
+            log.warning("message deadline (%ss) reached for message %r", self._deadline_s, text)
+            if journal.interrupted:
+                # A write was cancelled after it left: the sheet may have applied it.
+                note = WRITE_UNCERTAIN
+            else:
+                note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
+            model_failed = True
         except LlmCallsLimitExceededError:
             log.warning("LLM call budget exhausted for message %r", text)
             note = "Parei no limite de tentativas; o que não aparece acima não foi gravado."
@@ -269,7 +296,8 @@ class Bot:
                 log.exception("model call failed for message %r", text)
                 note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
                 model_failed = True
-        if journal.sheet_failed and not journal.writes:
+        # An interrupted write may have reached the sheet: "try again" would risk a duplicate.
+        if journal.sheet_failed and not journal.writes and not journal.interrupted:
             log.warning("sheet unavailable for message %r: %s", text, journal.error_codes)
             return Answer(SHEET_FAILED, failed=True)
         return Answer(

@@ -80,8 +80,8 @@ test('empty spreadsheet: formats, input vs calculated fills, validations and war
   // Protections: header row + calculated runs, warning only.
   const prot = diary.getProtections('RANGE').map((p) => ({ a1: p.getRange().getA1Notation(), warn: p.isWarningOnly(), d: p.getDescription() }));
   assert.ok(prot.every((p) => p.warn && p.d.startsWith('[Setup] ')));
-  assert.ok(prot.some((p) => p.a1 === 'A5:Y5'), 'header');
-  assert.ok(prot.some((p) => p.a1 === 'N6:Y1000' && /kcal/.test(p.d)), JSON.stringify(prot));
+  assert.ok(prot.some((p) => p.a1 === 'A5:Z5'), 'header');
+  assert.ok(prot.some((p) => p.a1 === 'O6:Z1000' && /kcal/.test(p.d)), JSON.stringify(prot));
   // Conditional formats: technical dates hidden, statuses coloured.
   const cf = sheet(ctx, 'Semanas').getConditionalFormatRules().map((r) => r.getBooleanCondition());
   assert.ok(cf.some((c) => c.getCriteriaType() === 'CUSTOM_FORMULA' && /DATE\(2000;1;1\)/.test(c.getCriteriaValues()[0])));
@@ -200,6 +200,68 @@ test('inside the migration: layout applied, audit clean, one undo returns the 3.
   assert.deepEqual(plain(ctx.ChangeLog.actions().filter((a) => !a.undone).map((a) => a.label)), ['Migrar 3.0 → 4.0']);
   ctx.Undo.last();
   assert.equal(values(), original);
+});
+
+test('a 4.0 spreadsheet from before waterL: Reaplicar layout adds Água L, keeps data, draws a full-height Hoje row', () => {
+  const ctx = load({ sheets: [{ name: 'Sheet1', rows: [] }], now: '2026-10-29T15:00:00-03:00' });
+  const client = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', '..', 'clients', 'luan.json'), 'utf8'));
+  assert.equal(plain(ctx.Migrate.run(client)).ok, true);
+  const api = (op, args) => plain(ctx.SheetApi.run(op, args));
+  // Roll the layout back to the one deployed before the field: no Diário column, no Hoje row.
+  const diary = sheet(ctx, 'Diário');
+  const hoje = sheet(ctx, 'Hoje');
+  diary.deleteColumn(ctx.Tabs.headerMap('diary').waterL);
+  hoje.getRange('A22:B22').setValue('');
+  hoje.setRowHeight(22, ctx.Style.ROW.spacer);
+  ctx.Tabs.invalidate();
+  assert.equal(api('diary.upsert', { date: '2026-10-29', fields: { weightKg: 85.3, sleepH: 7 } }).ok, true);
+  const refused = api('diary.upsert', { date: '2026-10-29', fields: { weightKg: 85.1, waterL: 2 } });
+  assert.equal(refused.ok, false);
+  assert.match(JSON.stringify(refused.errors), /Reaplicar layout/);
+  assert.equal(ctx.Days.get('2026-10-29').weightKg, 85.3, 'a refused request writes nothing');
+
+  const r = plain(ctx.Setup.apply());
+  assert.deepEqual(r.columnsAdded, { 'Diário': ['Água L'] });
+  assert.equal(hoje.getRange('A22').getValue(), 'Água L');
+  assert.equal(hoje.getRowHeight(22), ctx.Style.ROW.field, 'the water row is not the spacer above Alimentação');
+  const day = ctx.Days.get('2026-10-29');
+  assert.deepEqual([day.weightKg, day.sleepH, day.objective, day.goal], [85.3, 7, 'O001', 'M001']);
+
+  assert.equal(api('diary.upsert', { date: '2026-10-29', fields: { waterL: 2.5 } }).ok, true);
+  assert.equal(api('diary.upsert', { date: '2026-10-29', fields: { waterL: 3 } }).ok, true);
+  ctx.Undo.last();
+  assert.equal(ctx.Days.get('2026-10-29').waterL, 2.5, 'undo restores the previous water value');
+  assert.equal(api('diary.upsert', { date: '2026-10-29', fields: { waterL: null } }).ok, true);
+  assert.equal(ctx.Days.get('2026-10-29').waterL, null);
+  assert.deepEqual(plain(api('diary.range', { from: '2026-10-29', to: '2026-10-29' }).result.days.map((d) => d.weightKg)), [85.3]);
+});
+
+test('re-protecting a tab tolerates an old protection already gone, and still throws any other error', () => {
+  const ctx = empty();
+  ctx.Setup.apply();
+  const diary = sheet(ctx, 'Diário');
+  const RANGE = ctx.SpreadsheetApp.ProtectionType.RANGE;
+  const before = diary.getProtections(RANGE);
+  assert.ok(before.length >= 2, 'header and calculated runs');
+  // What Apps Script throws when a listed protection vanished in the meantime (real execution log).
+  const gone = before[0];
+  gone.remove = () => { throw new Error('Não existe um intervalo protegido com o ID "1954312258".'); };
+  ctx.Setup.protections_('diary');
+  const fresh = diary.getProtections(RANGE).filter((p) => p !== gone).map((p) => p.getRange().getA1Notation());
+  assert.ok(fresh.includes('A5:Z5') && fresh.includes('O6:Z1000'), JSON.stringify(fresh));
+
+  const other = diary.getProtections(RANGE).find((p) => p !== gone);
+  other.remove = () => { throw new Error('Service unavailable'); };
+  assert.throws(() => ctx.Setup.protections_('diary'), /Service unavailable/);
+  // A message that only mentions the protection's ID (no permission, for example) is not "gone".
+  ['Você não tem permissão para editar o intervalo protegido com o ID "1954312258".',
+    'You do not have permission to edit the protected range with ID "1954312258".'].forEach((m) => {
+    other.remove = () => { throw new Error(m); };
+    assert.throws(() => ctx.Setup.protections_('diary'), (err) => err.message === m, m);
+  });
+  // English wording of the same "does not exist" error is skipped too.
+  other.remove = () => { throw new Error('Exception: There is no protected range with ID "1954312258".'); };
+  ctx.Setup.protections_('diary');
 });
 
 test('no client names in the code', () => {

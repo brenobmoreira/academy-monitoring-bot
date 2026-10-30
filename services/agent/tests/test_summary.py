@@ -41,6 +41,11 @@ def test_a_cleared_diary_field_says_so():
     assert confirmation([cleared]) == ["<b>21/09</b> · Cintura cm apagado · Registro alimentar Completo"]
 
 
+def test_water_is_labelled_in_litres():
+    water = ("diary.upsert", {"date": "2026-09-21", "fields": {"waterL": 2.5}})
+    assert confirmation([water]) == ["<b>21/09</b> · Água L 2,5"]
+
+
 def test_merges_repeated_writes_of_the_same_day_and_session():
     fix = ("diary.upsert", {"date": "2026-09-21", "row": 6, "fields": {"weightKg": 82.1, "sleepH": 7.5}})
     more = (

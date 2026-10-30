@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from agent import buttons
-from agent.bot import MEDIA_UNREADABLE, Answer, Bot, Media
+from agent.bot import MEDIA_UNREADABLE, MESSAGE_DEADLINE_AT, Answer, Bot, Media
 from agent.commands import COMMANDS, CommandSheet, Context, Reply, parse_command
 from agent.format import escape, split
 from agent.llm import build_model
@@ -30,6 +30,13 @@ log = logging.getLogger(__name__)
 FAILURE = "⚠ Não consegui processar agora. Confira a planilha antes de reenviar."
 TYPING_EVERY = 4.0  # seconds; Telegram clears the "typing…" status after about 5 s
 MEDIA_MAX_BYTES = 5_000_000
+# Seconds left after MESSAGE_DEADLINE_S to send the reply, then at most CUT_NOTICE_S to say an
+# update was cut: with the default 90 s, an update ends within 115 s, below Cloud Run's 120 s.
+SEND_RESERVE_S = 20.0
+CUT_NOTICE_S = 5.0
+CUT = (
+    "⚠ Demorou demais e parei no meio: pode ter gravado ou desfeito algo. Confira com /hoje antes de repetir."
+)
 DOWNLOAD_FAILED = "⚠ Não consegui baixar o arquivo do Telegram. Tente de novo ou envie em texto."
 
 
@@ -40,7 +47,8 @@ class UpdateDeduplicator:
     Once an update finishes without a transient failure (`reply.transient` is False), its update_id
     is kept in a bounded FIFO cache so late webhook retries are also ignored. If an update fails
     transiently (sheet/model/download/send error), it is released without marking completed so a
-    retry can complete the work.
+    retry can complete the work. An update cut at the hard time limit counts as completed: what it
+    did is unknown, and running it again could undo a second write (/desfazer).
     """
 
     def __init__(self, max_size: int = 1024) -> None:
@@ -166,6 +174,8 @@ class Handler:
         media_enabled: bool = True,
         media_max_bytes: int = MEDIA_MAX_BYTES,
         deduplicator: UpdateDeduplicator | None = None,
+        message_deadline_s: float | None = None,
+        send_reserve_s: float = SEND_RESERVE_S,
     ) -> None:
         self._allowed = allowed_chat_ids
         self._bot = bot
@@ -177,6 +187,8 @@ class Handler:
         self._media_enabled = media_enabled
         self._media_max_bytes = media_max_bytes
         self._deduplicator = deduplicator if deduplicator is not None else UpdateDeduplicator()
+        self._message_deadline_s = message_deadline_s
+        self._send_reserve_s = send_reserve_s
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         """Never raises: a webhook that errors makes Telegram resend the same update."""
@@ -185,11 +197,52 @@ class Handler:
             log.info("ignoring duplicate Telegram update %s", update_id)
             return
         completed = False
+        # One budget from the arrival of the update: the media download and the agent share it,
+        # and the reply goes out after it.
+        token, hard_limit = None, None
+        if self._message_deadline_s is not None:
+            deadline_at = asyncio.get_running_loop().time() + self._message_deadline_s
+            token = MESSAGE_DEADLINE_AT.set(deadline_at)
+            # Commands, button taps and a reply sent in several parts stop here at the latest.
+            hard_limit = deadline_at + self._send_reserve_s
         try:
-            completed = await self._process_update(update, update_id)
+            async with asyncio.timeout_at(hard_limit):
+                completed = await self._process_update(update, update_id)
+        except TimeoutError:
+            log.warning("update %s cut at the message's hard time limit", update_id)
+            completed = True
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(CUT_NOTICE_S):
+                    await self._notify_cut(update)
         finally:
+            if token is not None:
+                MESSAGE_DEADLINE_AT.reset(token)
             if update_id is not None:
                 self._deduplicator.finish(update_id, completed=completed)
+
+    async def _notify_cut(self, update: dict[str, Any]) -> None:
+        """Tells the person an update was cut and stops a button's spinner, both at once so a
+        hanging one does not hold back the other; best effort."""
+        query = update.get("callback_query")
+        message = (query.get("message") if query else update.get("message")) or {}
+        chat_id = (message.get("chat") or {}).get("id")
+
+        async def answer(query: dict[str, Any]) -> None:
+            try:
+                await self._telegram.answer_callback_query(str(query.get("id", "")), CUT)
+            except Exception as error:
+                log.warning("could not answer callback query %s: %s", query.get("id"), error)
+
+        async def tell(chat_id: int) -> None:
+            try:
+                await self._send(chat_id, Reply(CUT))
+            except Exception as error:
+                log.warning("could not tell chat %s the update was cut: %s", chat_id, error)
+
+        notices = [answer(query)] if query else []
+        if chat_id in self._allowed:
+            notices.append(tell(chat_id))
+        await asyncio.gather(*notices)
 
     async def _process_update(self, update: dict[str, Any], update_id: int | None) -> bool:
         if "callback_query" in update:
@@ -256,7 +309,9 @@ class Handler:
         caption = message.get("caption")
         caption = caption if isinstance(caption, str) else ""
         try:
-            data = await self._download(ref)
+            deadline_at = MESSAGE_DEADLINE_AT.get()
+            async with asyncio.timeout_at(deadline_at):
+                data = await self._download(ref)
         except TooLarge:
             return Reply(too_large(self._media_max_bytes))
         except Exception:
@@ -372,7 +427,13 @@ def build_handler(
     deduplicator: UpdateDeduplicator | None = None,
 ) -> Handler:
     sheet = SheetClient(settings.SHEET_API_URL, settings.SHEET_API_KEY.get_secret_value(), http)
-    bot = Bot(sheet, build_model(settings), timezone=settings.TIMEZONE, max_llm_calls=settings.MAX_LLM_CALLS)
+    bot = Bot(
+        sheet,
+        build_model(settings),
+        timezone=settings.TIMEZONE,
+        max_llm_calls=settings.MAX_LLM_CALLS,
+        deadline_s=settings.MESSAGE_DEADLINE_S,
+    )
     telegram = TelegramClient(settings.TELEGRAM_BOT_TOKEN.get_secret_value(), http)
     return Handler(
         settings.ALLOWED_CHAT_IDS,
@@ -382,5 +443,6 @@ def build_handler(
         timezone=settings.TIMEZONE,
         media_enabled=settings.MEDIA_ENABLED,
         media_max_bytes=settings.MEDIA_MAX_BYTES,
+        message_deadline_s=settings.MESSAGE_DEADLINE_S,
         deduplicator=deduplicator,
     )

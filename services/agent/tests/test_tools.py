@@ -53,6 +53,15 @@ async def test_save_diary_clears_only_the_fields_asked(sheet):
     ]
 
 
+async def test_save_diary_sends_water_in_litres_and_can_clear_it(sheet):
+    await tools(sheet)["save_diary"]("2026-09-21", DiaryFields(waterL=2.5))
+    await tools(sheet)["save_diary"]("2026-09-21", DiaryFields(), clear=["waterL"])
+    assert sheet.calls == [
+        ("diary.upsert", {"date": "2026-09-21", "fields": {"waterL": 2.5}}),
+        ("diary.upsert", {"date": "2026-09-21", "fields": {"waterL": None}}),
+    ]
+
+
 async def test_accepts_raw_dicts_when_adk_could_not_build_the_models(sheet):
     await tools(sheet)["save_workout"](
         "2026-09-21",

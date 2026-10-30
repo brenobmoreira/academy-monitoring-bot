@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Annotated, Any, ClassVar
 
 import yaml
-from pydantic import Field, SecretStr, ValidationError, field_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     NoDecode,
@@ -24,6 +24,8 @@ from pydantic_settings import (
     SettingsConfigDict,
     YamlConfigSettingsSource,
 )
+
+from agent import logs
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parents[2] / "settings.yaml"
 
@@ -36,7 +38,14 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     SECRETS: ClassVar[frozenset[str]] = frozenset(
-        {"TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "SHEET_API_KEY", "LLM_API_KEY", "REMINDER_TOKEN"}
+        {
+            "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_WEBHOOK_SECRET",
+            "SHEET_API_KEY",
+            "LLM_API_KEY",
+            "LLM_FALLBACK_API_KEY",
+            "REMINDER_TOKEN",
+        }
     )
 
     # --- Telegram -----------------------------------------------------------------------------
@@ -60,6 +69,21 @@ class Settings(BaseSettings):
     # A LiteLLM proxy or self-hosted endpoint; empty = the provider's public API.
     LLM_API_BASE: str | None = None
     MAX_LLM_CALLS: int = Field(8, ge=1, le=30)
+    # Transient provider errors (overloaded 503, rate limit 429, 500) are tried again this many
+    # times, waiting LLM_RETRY_WAIT_S, then 2x, 4x...; then LLM_FALLBACK_MODEL gets the same
+    # treatment. Without LLM_FALLBACK_API_KEY the fallback uses LLM_API_KEY (same provider); with
+    # it, the fallback can be another provider (e.g. anthropic/claude-haiku-5-5), and LLM_API_BASE,
+    # which belongs to the main model, is not sent to it.
+    LLM_RETRIES: int = Field(2, ge=0, le=5)
+    LLM_RETRY_WAIT_S: float = Field(2.0, ge=0, le=30)
+    LLM_FALLBACK_MODEL: str | None = None
+    LLM_FALLBACK_API_KEY: SecretStr | None = None
+    # Seconds one model call may take. LiteLLM's own default is 6000, so a provider that hangs
+    # instead of answering 503 froze the bot; a call that times out goes straight to the fallback.
+    LLM_TIMEOUT_S: float = Field(30.0, ge=5, le=600)
+    # Seconds one Telegram message may take from its arrival: the media download and every model
+    # call, retry and fallback. The reply goes out after it, within the rest of Cloud Run's 120 s.
+    MESSAGE_DEADLINE_S: float = Field(90.0, ge=10, le=3600)
     TIMEZONE: str = "America/Sao_Paulo"
 
     # --- Voice and photo messages -------------------------------------------------------------
@@ -76,6 +100,49 @@ class Settings(BaseSettings):
         if isinstance(value, int):
             return frozenset({value})
         return value
+
+    @field_validator("LLM_API_KEY", "LLM_FALLBACK_API_KEY", mode="before")
+    @classmethod
+    def _blank_key_is_missing(cls, value: Any) -> Any:
+        """An empty variable (LLM_FALLBACK_API_KEY=) is no key, for the check below and the client."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator(
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_WEBHOOK_SECRET",
+        "SHEET_API_KEY",
+        "LLM_API_KEY",
+        "LLM_FALLBACK_API_KEY",
+        "REMINDER_TOKEN",
+        mode="after",
+    )
+    @classmethod
+    def _secret_is_long_enough(cls, value: SecretStr | None) -> SecretStr | None:
+        """Log masking needs secrets that cannot be mistaken for ordinary text."""
+        if value is not None and len(value.get_secret_value().strip()) < logs.MIN_SECRET_LEN:
+            raise ValueError(f"must be at least {logs.MIN_SECRET_LEN} characters")
+        return value
+
+    @model_validator(mode="after")
+    def _fallback_key_matches_provider(self) -> Settings:
+        """A fallback of another provider would otherwise receive the main model's key."""
+        fallback = self.LLM_FALLBACK_MODEL
+        if (
+            fallback
+            and self.LLM_FALLBACK_API_KEY is None
+            and _provider(fallback) != _provider(self.LLM_MODEL)
+        ):
+            main = _provider(self.LLM_MODEL) or "same-provider"
+            raise ValueError(
+                f"LLM_FALLBACK_MODEL {fallback} is not a {main} model: set LLM_FALLBACK_API_KEY for it"
+            )
+        return self
+
+    def secret_values(self) -> list[str]:
+        values = (getattr(self, name, None) for name in self.SECRETS)
+        return [v.get_secret_value() for v in values if isinstance(v, SecretStr)]
 
     @classmethod
     def settings_customise_sources(
@@ -95,10 +162,30 @@ class Settings(BaseSettings):
         path = settings_file()
         check_no_secrets(path)
         try:
-            return cls()
+            settings = cls()
         except ValidationError as err:
             problems = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in err.errors()]
             raise ConfigError(f"Invalid settings ({path}): " + "; ".join(problems)) from err
+        logs.register_secrets(settings.secret_values())
+        # Keys a provider SDK reads from the environment on its own, without LLM_API_KEY.
+        logs.register_secrets(os.environ.get(name) for name in PROVIDER_KEY_VARIABLES)
+        logs.install()
+        return settings
+
+
+PROVIDER_KEY_VARIABLES = (
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "MISTRAL_API_KEY",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+)
+
+
+def _provider(model: str) -> str:
+    return model.split("/", 1)[0] if "/" in model else ""
 
 
 def settings_file() -> Path:

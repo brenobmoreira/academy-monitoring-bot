@@ -3,6 +3,7 @@ from datetime import datetime
 
 import pytest
 
+from agent import handler as handler_module
 from agent.bot import (
     MEDIA_UNREADABLE,
     MODEL_FAILED,
@@ -13,7 +14,7 @@ from agent.bot import (
 )
 from agent.buttons import FIX_PLACEHOLDER, FIX_PROMPT, keyboard
 from agent.commands import Reply, help_text
-from agent.handler import DOWNLOAD_FAILED, FAILURE, Handler, UpdateDeduplicator, media_ref, too_large
+from agent.handler import CUT, DOWNLOAD_FAILED, FAILURE, Handler, UpdateDeduplicator, media_ref, too_large
 from agent.undo import ALREADY, SHEET_DOWN
 
 from .fakes import FakeSheet
@@ -110,6 +111,168 @@ def undone(date="2026-09-21", **fields):
 
 def refused(code, message="m"):
     return {"ok": False, "errors": [{"path": "args.writeId", "code": code, "message": message}]}
+
+
+class DeadlineBot(FakeBot):
+    """Records how much of the message deadline is left when the bot starts."""
+
+    async def reply(self, text, user_id="telegram", *, context=None, media=None):
+        from agent.bot import MESSAGE_DEADLINE_AT
+
+        at = MESSAGE_DEADLINE_AT.get()
+        self.left = None if at is None else at - asyncio.get_running_loop().time()
+        return await super().reply(text, user_id, context=context, media=media)
+
+
+class SlowDownloadTelegram(FakeTelegram):
+    def __init__(self, seconds, **kwargs):
+        super().__init__(**kwargs)
+        self._seconds = seconds
+
+    async def download_file(self, file_path):
+        await asyncio.sleep(self._seconds)
+        return await super().download_file(file_path)
+
+
+VOICE = {"file_id": "v1", "file_unique_id": "u1", "duration": 3, "mime_type": "audio/ogg", "file_size": 10}
+
+
+def voice_update():
+    return {"update_id": 7, "message": {"chat": {"id": 42}, "voice": VOICE}}
+
+
+async def test_the_message_deadline_counts_from_receipt_and_the_download_uses_part_of_it():
+    tg = SlowDownloadTelegram(0.2, files={"v1": ({"file_path": "voice/1.oga", "file_size": 10}, b"ogg")})
+    bot = DeadlineBot()
+    await Handler({42}, bot, tg, message_deadline_s=1.0).handle_update(voice_update())
+    assert bot.left is not None and bot.left < 0.85
+    assert tg.sent
+
+
+async def test_a_download_that_outlives_the_deadline_gets_the_download_failure_reply():
+    tg = SlowDownloadTelegram(5, files={"v1": ({"file_path": "voice/1.oga", "file_size": 10}, b"ogg")})
+    started = asyncio.get_running_loop().time()
+    await Handler({42}, FakeBot(), tg, message_deadline_s=0.2).handle_update(voice_update())
+    assert tg.sent == [(42, DOWNLOAD_FAILED)]
+    assert asyncio.get_running_loop().time() - started < 3
+
+
+class SlowSheet(FakeSheet):
+    """/hoje's sheet call takes 5 s."""
+
+    async def day(self, date):
+        await asyncio.sleep(5)
+        return await super().day(date)
+
+
+class SlowSendTelegram(FakeTelegram):
+    async def send_message(self, chat_id, text, *, html=False, reply_markup=None, reply_to=None):
+        await asyncio.sleep(5)
+        return await super().send_message(
+            chat_id, text, html=html, reply_markup=reply_markup, reply_to=reply_to
+        )
+
+
+class SlowUndoSheet(FakeSheet):
+    """Each undo is applied, then the answer takes 5 s."""
+
+    async def undo(self, write_id=None):
+        response = await super().undo(write_id)
+        await asyncio.sleep(5)
+        return response
+
+
+async def test_a_slow_command_is_cut_and_the_person_is_told():
+    tg = FakeTelegram()
+    handler = Handler({42}, FakeBot(), tg, sheet=SlowSheet(), message_deadline_s=0.05, send_reserve_s=0.1)
+    started = asyncio.get_running_loop().time()
+    await handler.handle_update(update("/hoje"))
+    assert asyncio.get_running_loop().time() - started < 2
+    assert tg.sent == [(42, CUT)]
+
+
+async def test_a_cut_undo_is_never_run_again():
+    sheet = SlowUndoSheet(**{"write.undo": [undone()]})
+    tg = FakeTelegram()
+    handler = Handler({42}, FakeBot(), tg, sheet=sheet, message_deadline_s=0.05, send_reserve_s=0.1)
+    await handler.handle_update(update("/desfazer", update_id=30))
+    await handler.handle_update(update("/desfazer", update_id=30))  # the same update delivered again
+    assert [op for op, _ in sheet.calls] == ["write.undo"]
+    assert tg.sent == [(42, CUT)]
+
+
+async def test_a_cut_button_tap_stops_the_spinner_with_the_notice():
+    sheet = SlowUndoSheet(**{"write.undo": [undone()]})
+    tg = FakeTelegram()
+    handler = Handler({42}, FakeBot(), tg, sheet=sheet, message_deadline_s=0.05, send_reserve_s=0.1)
+    await handler.handle_update(tap("undo:w1"))
+    await handler.handle_update(tap("undo:w1"))
+    assert [op for op, _ in sheet.calls] == ["write.undo"]
+    assert tg.answered == [("cb1", CUT)]
+    assert tg.sent == [(42, CUT)]
+
+
+class HangingAnswerTelegram(FakeTelegram):
+    """answerCallbackQuery never returns."""
+
+    async def answer_callback_query(self, callback_query_id, text=None):
+        await asyncio.sleep(60)
+
+
+async def test_a_hanging_button_answer_does_not_hold_back_the_notice(monkeypatch):
+    monkeypatch.setattr(handler_module, "CUT_NOTICE_S", 0.3)
+    sheet = SlowUndoSheet(**{"write.undo": [undone()]})
+    tg = HangingAnswerTelegram()
+    handler = Handler({42}, FakeBot(), tg, sheet=sheet, message_deadline_s=0.05, send_reserve_s=0.1)
+    started = asyncio.get_running_loop().time()
+    await handler.handle_update(tap("undo:w1"))
+    assert asyncio.get_running_loop().time() - started < 2
+    assert tg.sent == [(42, CUT)]
+
+
+class HangingNoticeTelegram(FakeTelegram):
+    """Both the button answer and every message hang; records which ones were cancelled."""
+
+    def __init__(self):
+        super().__init__()
+        self.cancelled = []
+
+    async def _hang(self, name):
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            self.cancelled.append(name)
+            raise
+
+    async def answer_callback_query(self, callback_query_id, text=None):
+        await self._hang("answer")
+
+    async def send_message(self, chat_id, text, *, html=False, reply_markup=None, reply_to=None):
+        await self._hang(f"send:{text}")
+
+
+async def test_a_notice_that_hangs_is_cancelled_cleanly_at_the_notice_time(monkeypatch):
+    monkeypatch.setattr(handler_module, "CUT_NOTICE_S", 0.2)
+    sheet = SlowUndoSheet(**{"write.undo": [undone()]})
+    tg = HangingNoticeTelegram()
+    handler = Handler({42}, FakeBot(), tg, sheet=sheet, message_deadline_s=0.05, send_reserve_s=0.1)
+    before = asyncio.all_tasks()
+    started = asyncio.get_running_loop().time()
+    await handler.handle_update(tap("undo:w1"))
+    assert asyncio.get_running_loop().time() - started < 2
+    assert sorted(tg.cancelled) == ["answer", f"send:{CUT}"]
+    await asyncio.sleep(0)
+    assert asyncio.all_tasks() <= before  # nothing left running
+    await handler.handle_update(tap("undo:w1"))  # still counted as done: no second undo
+    assert [op for op, _ in sheet.calls] == ["write.undo"]
+
+
+async def test_a_reply_cut_while_sending_ends_within_the_notice_time(monkeypatch):
+    monkeypatch.setattr(handler_module, "CUT_NOTICE_S", 0.1)
+    handler = Handler({42}, FakeBot(), SlowSendTelegram(), message_deadline_s=0.05, send_reserve_s=0.1)
+    started = asyncio.get_running_loop().time()
+    await handler.handle_update(update("peso 82"))
+    assert asyncio.get_running_loop().time() - started < 1
 
 
 async def test_runs_the_bot_and_replies_in_the_same_chat():

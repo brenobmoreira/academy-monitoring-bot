@@ -699,6 +699,7 @@ const Tabs = {
       col('pain', 'Dor 0–10', 'integer'),
       col('foodLog', 'Registro alimentar', 'enum', 'input', { enum: E.FOOD_LOG }),
       col('notes', 'Observações', 'text'),
+      col('waterL', 'Água L', 'number'),
       col('objective', 'Objetivo', 'id', 'calc'),
       col('goal', 'Meta', 'id', 'calc'),
       col('plan', 'Ficha', 'id', 'calc'),

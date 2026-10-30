@@ -230,6 +230,43 @@ async def test_a_hanging_button_answer_does_not_hold_back_the_notice(monkeypatch
     assert tg.sent == [(42, CUT)]
 
 
+class HangingNoticeTelegram(FakeTelegram):
+    """Both the button answer and every message hang; records which ones were cancelled."""
+
+    def __init__(self):
+        super().__init__()
+        self.cancelled = []
+
+    async def _hang(self, name):
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            self.cancelled.append(name)
+            raise
+
+    async def answer_callback_query(self, callback_query_id, text=None):
+        await self._hang("answer")
+
+    async def send_message(self, chat_id, text, *, html=False, reply_markup=None, reply_to=None):
+        await self._hang(f"send:{text}")
+
+
+async def test_a_notice_that_hangs_is_cancelled_cleanly_at_the_notice_time(monkeypatch):
+    monkeypatch.setattr(handler_module, "CUT_NOTICE_S", 0.2)
+    sheet = SlowUndoSheet(**{"write.undo": [undone()]})
+    tg = HangingNoticeTelegram()
+    handler = Handler({42}, FakeBot(), tg, sheet=sheet, message_deadline_s=0.05, send_reserve_s=0.1)
+    before = asyncio.all_tasks()
+    started = asyncio.get_running_loop().time()
+    await handler.handle_update(tap("undo:w1"))
+    assert asyncio.get_running_loop().time() - started < 2
+    assert sorted(tg.cancelled) == ["answer", f"send:{CUT}"]
+    await asyncio.sleep(0)
+    assert asyncio.all_tasks() <= before  # nothing left running
+    await handler.handle_update(tap("undo:w1"))  # still counted as done: no second undo
+    assert [op for op, _ in sheet.calls] == ["write.undo"]
+
+
 async def test_a_reply_cut_while_sending_ends_within_the_notice_time(monkeypatch):
     monkeypatch.setattr(handler_module, "CUT_NOTICE_S", 0.1)
     handler = Handler({42}, FakeBot(), SlowSendTelegram(), message_deadline_s=0.05, send_reserve_s=0.1)

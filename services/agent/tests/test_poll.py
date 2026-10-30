@@ -187,3 +187,35 @@ def test_main_lets_other_errors_through(monkeypatch):
         run_main_raising(monkeypatch, TelegramError("getUpdates: HTTP 502 Bad Gateway", 502))
     with pytest.raises(KeyError):
         run_main_raising(monkeypatch, KeyError("bug"))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        [{"ok": False, "error_code": 404}],  # a JSON list, not Telegram's object
+        {"ok": False, "error_code": True, "description": "Not Found"},
+        {"ok": False, "error_code": "404", "description": "Not Found"},
+        {"ok": False, "description": "Not Found"},
+    ],
+)
+async def test_a_404_without_telegrams_numeric_error_code_is_retried(body):
+    tg = telegram_answering(
+        httpx.Response(404, json=body),
+        httpx.Response(200, json={"ok": True, "result": [{"update_id": 8}]}),
+    )
+    handler, waits = FakeHandler(), []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    await poll_forever(tg, handler, sleep=sleep, rounds=2)
+    assert waits == [1]
+    assert handler.seen == [8]
+
+
+async def test_an_error_carries_no_code_when_the_body_is_not_telegrams():
+    tg = telegram_answering(httpx.Response(409, json=["unexpected"]))
+    with pytest.raises(TelegramError) as raised:
+        await tg.get_updates()
+    assert raised.value.error_code is None
+    assert "HTTP 409" in str(raised.value)

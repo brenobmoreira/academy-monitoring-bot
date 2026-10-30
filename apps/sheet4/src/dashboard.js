@@ -373,7 +373,7 @@ const Dashboard = {
     return Tabs.layer(Tabs.LAYERS.PERSON).filter((id) => id !== selfId).map((id) => {
       const spec = Tabs.get(id);
       const sheet = Tabs.findSheet(id);
-      return sheet ? `=HYPERLINK("#gid=${sheet.getSheetId()}","${spec.name}")` : spec.name;
+      return sheet ? Tabs.formula(`=HYPERLINK("#gid=${sheet.getSheetId()}","${spec.name}")`) : spec.name;
     });
   },
 

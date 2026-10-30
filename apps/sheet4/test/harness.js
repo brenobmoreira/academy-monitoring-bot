@@ -34,7 +34,7 @@ function sourceFiles() {
 
 function loadSources() {
   return sourceFiles()
-    .map((f) => fs.readFileSync(path.join(SRC, f), 'utf8').replace(/^const (\w+) =/gm, 'var $1 ='))
+    .map((f) => fs.readFileSync(path.join(SRC, f), 'utf8').replace(/^const (\w+) =/gm, 'var $1 =').replace(/^class (\w+)/gm, 'var $1 = class $1'))
     .join('\n');
 }
 
@@ -58,9 +58,31 @@ function load(options = {}) {
   return ctx;
 }
 
+/**
+ * A new Apps Script execution on the same spreadsheet: the sources run again, so every module
+ * starts from its initial state (locks, mutes, caches, the running action), and only what Google
+ * keeps between runs survives: the spreadsheet, PropertiesService, CacheService, the clock and
+ * advanced services set on ctx (ctx.Sheets).
+ */
+function freshExecution(ctx) {
+  vm.runInContext(loadSources(), ctx, { filename: 'src.js' });
+  return ctx;
+}
+
+/**
+ * A second Apps Script execution running at the same time as ctx (another window, the bot): its
+ * own module state, the same spreadsheet, properties, caches, clock and locks.
+ */
+function parallelExecution(ctx) {
+  const other = Object.assign({}, ctx);
+  vm.createContext(other);
+  vm.runInContext(loadSources(), other, { filename: 'src.js' });
+  return other;
+}
+
 /** Strips VM-realm prototypes so assert.deepEqual can compare with host literals. */
 function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-module.exports = { load, plain, fixture, sourceFiles, LOAD_ORDER };
+module.exports = { load, freshExecution, parallelExecution, plain, fixture, sourceFiles, LOAD_ORDER };

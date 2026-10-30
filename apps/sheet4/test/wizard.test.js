@@ -75,7 +75,10 @@ test('confirm with the pasted JSON and an edited protein target', () => {
   assert.deepEqual(plain(r.findingsAfter), []);
   assert.equal(ctx.Goals.current().fields.protein, 175);
   assert.equal(ctx.Goals.current().fields.carbs, (2650 - 4 * 175 - 9 * 70) / 4);
-  assert.equal(ctx.Wizard.confirm({ json: clientText('zoio') }).alreadyMigrated, true);
+  const again = ctx.Wizard.confirm({ json: clientText('zoio') });
+  assert.equal(again.alreadyMigrated, false, 'schema 4.0 with steps left is not a finished migration');
+  assert.equal(again.resumed, true);
+  assert.equal(again.status.next, 'weeks');
 });
 
 test('menu Sistema: the three actions; the dialog shows the proposal page', () => {
@@ -95,3 +98,4 @@ test('menu Sistema: the three actions; the dialog shows the proposal page', () =
   assert.equal(out.ok, true);
   assert.deepEqual(out.open, []);
 });
+

@@ -338,7 +338,7 @@ const Progression = {
     const first = spec.firstDataRow;
     const lastRow = sheet.getLastRow();
     if (lastRow >= first) sheet.getRange(first, 1, lastRow - first + 1, width).clearContent();
-    if (lines.length) sheet.getRange(first, 1, lines.length, width).setValues(lines);
+    if (lines.length) sheet.getRange(first, 1, lines.length, width).setValues(lines.map((l) => l.map(Tabs.input)));
 
     // History block.
     const H = Progression.HISTORY;
@@ -347,7 +347,7 @@ const Progression = {
     const picked = exercise || sheet.getRange(pickerA1).getValue() || (order.length ? order[0].name : '');
     const name = picked ? String(picked).trim() : '';
     sheet.getRange(H.PICKER_ROW, col).setValue(H.PICKER_LABEL);
-    sheet.getRange(pickerA1).setValue(name);
+    sheet.getRange(pickerA1).setValue(Tabs.input(name));
     sheet.getRange(spec.headerRow, col, 1, H.HEADERS.length).setValues([H.HEADERS]);
     sheet.getRange(first, col, H.ROWS, H.HEADERS.length).clearContent();
     const hist = name ? (idx[Exercises.normalize(name)] || []).filter((e) => Dates.compare(e.date, d) <= 0) : [];
@@ -361,7 +361,7 @@ const Progression = {
       return [e.date, e.session, e.plan || '', w1.kg, w1.reps, w1.rir === null ? '' : w1.rir, w2.kg, w2.reps, w2.rir === null ? '' : w2.rir,
         Math.round(e.volume * 100) / 100, e.state || '', r ? Progression.LABELS[r] : (prev ? Progression.NO_COMPARISON : 'Primeiro registro')];
     });
-    if (hLines.length) sheet.getRange(first, col, hLines.length, H.HEADERS.length).setValues(hLines);
+    if (hLines.length) sheet.getRange(first, col, hLines.length, H.HEADERS.length).setValues(hLines.map((l) => l.map(Tabs.input)));
     return { exercise: name || null, rows: lines.length, history: hLines.length, suggestions: sugg };
   },
 

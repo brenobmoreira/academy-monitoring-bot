@@ -75,10 +75,19 @@ const Wizard = {
   },
 
   /**
-   * Applies the person's edits to the client JSON and runs the migration.
+   * Applies the person's edits to the client JSON and runs the migration (staged: the steps
+   * follow through wizardStep).
    * @throws Error with every validation message (Portuguese) when a value is missing or wrong
    */
   confirm(values) {
+    return Migrate.run(Wizard.prepare_(values), { staged: true });
+  },
+
+  /**
+   * The client JSON with the person's edits and the 3.0 profile merged in, validated.
+   * @throws Error with every validation message (Portuguese) when a value is missing or wrong
+   */
+  prepare_(values) {
     const vals = values || {};
     let raw = vals.json;
     if (typeof raw === 'string') {
@@ -131,7 +140,7 @@ const Wizard = {
 
     const errors = Wizard.validate_(raw);
     if (errors.length) throw new Error(errors.join(' '));
-    return Migrate.run(raw);
+    return raw;
   },
 
   /** Values the migration needs before writing anything (sex is asked, never assumed). */
@@ -216,22 +225,62 @@ function wizardProposal(jsonText) {
   return Wizard.proposal(jsonText || null);
 }
 
+/**
+ * Runs the migration (or resumes it when it was already applied): {ok, alreadyMigrated, resumed,
+ * message, changes, open, state}. The dialog then follows state with wizardStep.
+ */
 function wizardConfirm(values) {
   const r = Wizard.confirm(values);
   return {
-    ok: r.ok, alreadyMigrated: r.alreadyMigrated, message: r.message, changes: r.changes,
+    ok: r.ok, alreadyMigrated: r.alreadyMigrated, resumed: !!r.resumed, message: r.message, changes: r.changes,
     open: (r.findingsAfter || []).map((f) => `${f.severity}: ${f.tab} ${f.cell} — ${f.finding}`),
-    postSteps: r.postSteps || [],
+    state: r.status || Migrate.publicStatus_(Core.withLock(() => Migrate.status())),
   };
 }
 
+/** Where the migration stands, for a dialog that opens or reopens (see Migrate.publicStatus_). */
+function wizardStatus() {
+  return Migrate.publicStatus_(Core.withLock(() => Migrate.status()));
+}
+
+/**
+ * The client JSON shipped with this spreadsheet's script, as text for the dialog's field, or ''.
+ * CLIENT_JSON comes from client_data.js, a file pushed only to that client's Apps Script project
+ * (generated from clients/<name>.json, never committed): the code itself holds no client data.
+ */
+function wizardClientJson() {
+  return typeof CLIENT_JSON !== 'undefined' && CLIENT_JSON ? JSON.stringify(CLIENT_JSON, null, 2) : '';
+}
+
+/**
+ * Native tables turned into plain ranges, in an execution of its own before wizardConfirm. The
+ * values are validated first: nothing is converted for a configuration the migration would refuse.
+ * @returns {{tables: string[], state: Object}}
+ */
+function wizardUnwrapTables(values) {
+  Wizard.prepare_(values);
+  Migrate.t0_ = Date.now();
+  return Core.withLock(() => {
+    const st = Migrate.status();
+    if (st.state !== 'none' && st.state !== 'tables') return { tables: [], state: Migrate.publicStatus_(st) };
+    Migrate.beginOp_();
+    const tables = Migrate.unwrapTables_();
+    return { tables, state: Migrate.publicStatus_(Migrate.status()) };
+  });
+}
+
+/** The next step of the migration (see Migrate.runStep): {step, status, message, stale, state}. */
+function wizardStep(opId, id, cursor) {
+  return Migrate.runStep(opId, id, cursor || null);
+}
+
 Actions.register({
-  id: 'setupWizard', label: 'Configuração inicial', group: 'system', order: 10, logged: false, locked: false,
+  id: 'setupWizard', label: 'Configuração inicial', group: 'system', order: 10, logged: false, locked: false, duringMigration: true,
   run: () => Wizard.show('setup'),
 });
 
 Actions.register({
-  id: 'migrate', label: 'Migrar 3.0 → 4.0', group: 'system', order: 20, logged: false, locked: false,
+  id: 'migrate', label: 'Migrar 3.0 → 4.0', group: 'system', order: 20, logged: false, locked: false, duringMigration: true,
   run: () => Wizard.show('migrate'),
 });
 

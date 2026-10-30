@@ -70,35 +70,63 @@ const Setup = {
    *   configKeysAdded: string[], hojeReset: boolean, triggers: Object, dashboard: Object|null,
    *   warnings: string[]}}
    */
-  apply() {
+  /**
+   * @param {{dashboard?: boolean, deadline?: number, tabs?: string[]}=} opts dashboard=false skips
+   *   Dashboard.render; with a deadline (ms timestamp) the tab styling stops once it is passed (after
+   *   at least one tab) and report.pending lists the tab ids left; a call with tabs resumes there,
+   *   skipping the first part. Apps Script stops any run after 6 minutes.
+   */
+  apply(opts) {
+    const o = opts || {};
+    const withDashboard = o.dashboard !== false;
+    const resume = Array.isArray(o.tabs);
     const ss = SpreadsheetApp.getActive();
+    const t0 = Date.now();
+    const log = (what) => console.log(`[layout ${Math.round((Date.now() - t0) / 1000)}s] ${what}`);
     const report = { created: [], removed: [], columnsAdded: {}, configKeysAdded: [], hojeReset: false, triggers: null, dashboard: null, warnings: [] };
-    Setup.theme_(ss, report);
-    Tabs.ids().forEach((id) => {
-      if (Tabs.findSheet(id)) return;
-      if (ChangeLog.active()) ChangeLog.structure(Tabs.get(id).name, { op: 'insertSheet', name: Tabs.get(id).name });
-      if (id === Hoje.TAB) Hoje.ensure(); else Tabs.ensure(id);
-      report.created.push(Tabs.get(id).name);
-    });
-    Setup.dropDefaultSheets_(ss, report);
-    Tabs.ids().forEach((id) => { if (Tabs.get(id).kind === 'table') Setup.addMissingColumns_(id, report); });
-    Tabs.invalidate();
-    Setup.config_(report);
-    Setup.guide_();
-    Setup.order_(ss);
-    Setup.namedRanges_(ss);
-    Tabs.ids().forEach((id) => {
+    if (!resume) {
+      Setup.theme_(ss, report);
+      Tabs.ids().forEach((id) => {
+        if (Tabs.findSheet(id)) return;
+        if (ChangeLog.active()) ChangeLog.structure(Tabs.get(id).name, { op: 'insertSheet', name: Tabs.get(id).name });
+        if (id === Hoje.TAB) Hoje.ensure(); else Tabs.ensure(id);
+        report.created.push(Tabs.get(id).name);
+      });
+      Setup.dropDefaultSheets_(ss, report);
+      Tabs.ids().forEach((id) => { if (Tabs.get(id).kind === 'table') Setup.addMissingColumns_(id, report); });
+      Tabs.invalidate();
+      Setup.config_(report);
+      Setup.guide_();
+      Setup.order_(ss);
+      Setup.namedRanges_(ss);
+      log('abas, colunas, configuração e guia');
+    }
+    const pending = [];
+    let styled = 0;
+    (resume ? o.tabs : Tabs.ids()).forEach((id) => {
+      if (pending.length || (styled && o.deadline && Date.now() > o.deadline)) { pending.push(id); return; }
       const spec = Tabs.get(id);
       if (spec.kind === 'table') Setup.styleTable_(id);
       Setup.frame_(id);
+      styled += 1;
+      log(`estilo: ${spec.name}`);
     });
+    if (pending.length) {
+      report.pending = pending;
+      log(`continua depois: ${pending.length} abas`);
+      return report;
+    }
     report.hojeReset = Setup.hoje_();
     report.triggers = Setup.ensureTriggers(report);
-    try {
-      report.dashboard = Dashboard.render();
-    } catch (err) {
-      console.error(err);
-      report.warnings.push(`Painel: ${err.message}`);
+    log('Hoje e gatilhos');
+    if (withDashboard) {
+      try {
+        report.dashboard = Dashboard.render();
+      } catch (err) {
+        console.error(err);
+        report.warnings.push(`Painel: ${err.message}`);
+      }
+      log('painel');
     }
     const hoje = Tabs.findSheet(Hoje.TAB);
     if (hoje) ss.setActiveSheet(hoje);
@@ -269,7 +297,7 @@ const Setup = {
     if (spec.layer === Tabs.LAYERS.PERSON) {
       const links = ['today', 'dashboard'].map((target) => {
         const s = Tabs.findSheet(target);
-        return s ? `=HYPERLINK("#gid=${s.getSheetId()}","${target === 'today' ? '‹ ' : ''}${Tabs.get(target).name}")` : Tabs.get(target).name;
+        return s ? Tabs.formula(`=HYPERLINK("#gid=${s.getSheetId()}","${target === 'today' ? '‹ ' : ''}${Tabs.get(target).name}")`) : Tabs.get(target).name;
       });
       Style.write(sheet, 1, 1, [links]);
       Style.link(sheet.getRange(1, 1, 1, 2));
@@ -648,7 +676,7 @@ const Setup = {
     // Header card accents: Ação rápida stands out; the day state and session state are chips.
     const q = R(layout.quickCell);
     q.setBackground(Style.C.primarySoft).setFontColor(Style.C.primaryText).setFontWeight('bold')
-      .setBorder(true, true, true, true, null, null, Style.C.primary, 'SOLID_MEDIUM');
+      .setBorder(true, true, true, true, null, null, Style.C.primary, Style.border('SOLID_MEDIUM'));
     Style.label(R(`A${Hoje.rc_(layout.quickCell)[0]}`)).setFontColor(Style.C.primaryText).setFontWeight('bold');
     sheet.setRowHeight(Hoje.rc_(layout.quickCell)[0], 32);
     Style.statusRules(R(Hoje.STATE_CELL), Tabs.ENUMS.DAY_STATE).forEach((x) => rules.push(x));

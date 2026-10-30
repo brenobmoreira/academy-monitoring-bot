@@ -114,10 +114,17 @@ function onEditInstalled(e) {
       }
     }
     if (name === Tabs.get('measures').name && row + e.range.getNumRows() - 1 >= Tabs.get('measures').firstDataRow) {
-      Core.withLock(() => {
+      // The id/date stamps wait for an open staged migration (they write outside the Log). The
+      // early check only answers fast; the decision is taken again under the lock, before the
+      // first row, because another execution may start the migration while this edit waits.
+      const blocked = ChangeLog.blockedReason('Medidas') || Core.withLock(() => {
+        const late = ChangeLog.blockedReason('Medidas');
+        if (late) return late;
         const first = Math.max(row, Tabs.get('measures').firstDataRow);
         for (let r = first; r < row + e.range.getNumRows(); r++) Measures.stampRow(r);
+        return null;
       });
+      if (blocked) Actions.fail_(blocked, 'Medidas');
     }
   } catch (err) {
     Actions.fail_(err);

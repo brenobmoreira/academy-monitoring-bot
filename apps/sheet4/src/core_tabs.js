@@ -15,6 +15,35 @@
  * Writes go through ChangeLog.track when an action is running, so Undo can restore them.
  */
 const Tabs = {
+  /**
+   * Formula text in the spreadsheet's own syntax: Apps Script parses a formula with the
+   * spreadsheet locale, so where the decimal mark is a comma (pt_BR…) arguments are separated by
+   * ';' (a ',' there makes #ERROR!). Commas inside "quoted text" are kept.
+   */
+  formula(text) {
+    if (Tabs.formulaSep_ === undefined) {
+      let locale = '';
+      try { locale = SpreadsheetApp.getActive().getSpreadsheetLocale() || ''; } catch (err) { locale = ''; }
+      Tabs.formulaSep_ = /^(pt|es|fr|de|it|nl|ru|pl|tr|sv|da|nb|no|fi|cs|sk|hu|ro|el|uk|id|vi|ca|hr|sl|bg|lt|lv|et)/i.test(locale) ? ';' : ',';
+    }
+    if (Tabs.formulaSep_ === ',') return text;
+    let out = '';
+    let quoted = false;
+    String(text).split('').forEach((ch) => {
+      if (ch === '"') quoted = !quoted;
+      out += !quoted && ch === ',' ? ';' : ch;
+    });
+    return out;
+  },
+
+  /**
+   * A value for setValue(s) that Sheets stores as given: a leading apostrophe marks the rest as
+   * text, so text that itself starts with one ("'Aba'!B5") gets a second, or it would lose it.
+   */
+  input(v) {
+    return typeof v === 'string' && v.charAt(0) === "'" ? `'${v}` : v;
+  },
+
   TITLE_ROW: 2,
   HELP_ROW: 3,
   HEADER_ROW: 5,
@@ -338,7 +367,7 @@ const Tabs = {
     const rows = [];
     const values = lines.map((cells, i) => {
       const line = [];
-      for (let c = 1; c <= width; c++) line.push(c in cells ? cells[c] : '');
+      for (let c = 1; c <= width; c++) line.push(c in cells ? Tabs.input(cells[c]) : '');
       const after = {};
       Object.keys(cells).forEach((c) => { after[Tabs.cellName_(byCol, Number(c))] = cells[c]; });
       Tabs.track_(id, { kind: 'append', tab: spec.name, row: first + i, before: null, after });
@@ -375,7 +404,7 @@ const Tabs = {
     });
     if (!changed.length) return row;
     Tabs.track_(id, { kind: 'update', tab: spec.name, row, before, after });
-    changed.forEach((c) => sheet.getRange(row, c).setValue(cells[c]));
+    changed.forEach((c) => sheet.getRange(row, c).setValue(Tabs.input(cells[c])));
     return row;
   },
 
@@ -415,7 +444,7 @@ const Tabs = {
     Object.keys(after).forEach((a1) => {
       const v = after[a1];
       if (typeof v === 'string' && v.charAt(0) === '=') sheet.getRange(a1).setFormula(v);
-      else sheet.getRange(a1).setValue(v);
+      else sheet.getRange(a1).setValue(Tabs.input(v));
     });
   },
 

@@ -103,15 +103,71 @@
         if (v && v !== current.objective[k]) values.objective[k] = v;
       });
       document.getElementById('confirm').disabled = true;
-      document.getElementById('out').innerHTML = '<p class="note">Migrando…</p>';
-      google.script.run.withSuccessHandler(done).withFailureHandler(fail).wizardConfirm(values);
+      document.getElementById('out').innerHTML = '<p class="note">Convertendo tabelas…</p>';
+      // Tables first, in an execution of their own (Apps Script stops a run after 6 minutes).
+      google.script.run.withSuccessHandler(function (t) {
+        document.getElementById('out').innerHTML = '<p class="note">' + (t.tables.length ? t.tables.length + ' tabela(s) convertida(s). ' : '') + 'Migrando…</p>';
+        google.script.run.withSuccessHandler(done).withFailureHandler(fail).wizardConfirm(values);
+      }).withFailureHandler(fail).wizardUnwrapTables(values);
     }
 
     function done(r) {
       var html = '<p class="ok">' + esc(r.message) + '</p>';
       if (r.open && r.open.length) html += '<p class="err">Ainda abertos:\n' + r.open.map(esc).join('\n') + '</p>';
-      (r.postSteps || []).forEach(function (s) { html += '<p class="note">' + esc(s.step) + ': ' + esc(s.status) + (s.message ? ' — ' + esc(s.message) : '') + '</p>'; });
       document.getElementById('out').innerHTML = html;
+      follow(r.state);
+    }
+
+    function line(cls, text) {
+      var p = document.createElement('p');
+      p.className = cls;
+      p.textContent = text;
+      document.getElementById('out').appendChild(p);
+      return p;
+    }
+
+    function retryButton(label) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.onclick = function () {
+        b.disabled = true;
+        google.script.run.withSuccessHandler(function (st) { follow(st, true); }).withFailureHandler(stepFailed).wizardStatus();
+      };
+      document.getElementById('out').appendChild(b);
+    }
+
+    function stepFailed(err) {
+      line('err', 'Falhou: ' + (err && err.message ? err.message : String(err)) + '. A planilha guardou onde parou.');
+      retryButton('Tentar de novo');
+    }
+
+    // The server keeps where the migration stands (Migrate.status); the dialog only follows it:
+    // each step is its own execution (Apps Script stops a run after 6 minutes), an error stops
+    // the chain, and only a finished operation ends in green.
+    function follow(st, retry) {
+      if (!st) return;
+      if (st.state === 'done') {
+        line(st.auditOpen ? 'err' : 'ok', st.message);
+        return;
+      }
+      if (st.state === 'unverified') {
+        line('err', st.message);
+        return;
+      }
+      if (st.state === 'failed' && !retry) {
+        line('err', st.message);
+        retryButton('Tentar de novo');
+        return;
+      }
+      if (st.state !== 'running' && st.state !== 'failed') return;
+      var wait = line('note', 'Executando o próximo passo… não feche esta janela.');
+      google.script.run.withSuccessHandler(function (r) {
+        if (r.stale) { wait.remove(); follow(r.state, retry); return; }
+        wait.className = r.status === 'erro' ? 'err' : 'note';
+        wait.textContent = r.step + ': ' + r.status + (r.message ? ' — ' + r.message : '');
+        follow(r.state);
+      }).withFailureHandler(function (err) { wait.remove(); stepFailed(err); }).wizardStep(st.opId, st.next, st.cursor);
     }
 
     function fail(err) {
@@ -120,7 +176,22 @@
       document.getElementById('errors').textContent = err && err.message ? err.message : String(err);
     }
 
-    load();
+    // The client JSON shipped with this spreadsheet's script (client_data.js, pushed per client and
+    // kept out of the repository) fills the field, so nothing has to be pasted.
+    google.script.run.withSuccessHandler(function (text) {
+      var field = document.getElementById('json');
+      if (text && !field.value) field.value = text;
+      load();
+    }).withFailureHandler(function () { load(); }).wizardClientJson();
+
+    // A migration left unfinished (window closed, execution stopped) is offered to continue.
+    google.script.run.withSuccessHandler(function (st) {
+      if (st && st.state === 'unverified') { line('err', st.message); return; }
+      if (!st || (st.state !== 'running' && st.state !== 'failed')) return;
+      document.getElementById('confirm').disabled = true;
+      line(st.state === 'failed' ? 'err' : 'note', st.message);
+      retryButton('Continuar a migração');
+    }).wizardStatus();
   </script>
 </body>
 </html>

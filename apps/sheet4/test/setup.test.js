@@ -84,7 +84,7 @@ test('empty spreadsheet: formats, input vs calculated fills, validations and war
   assert.ok(prot.some((p) => p.a1 === 'N6:Y1000' && /kcal/.test(p.d)), JSON.stringify(prot));
   // Conditional formats: technical dates hidden, statuses coloured.
   const cf = sheet(ctx, 'Semanas').getConditionalFormatRules().map((r) => r.getBooleanCondition());
-  assert.ok(cf.some((c) => c.getCriteriaType() === 'CUSTOM_FORMULA' && /DATE\(2000,1,1\)/.test(c.getCriteriaValues()[0])));
+  assert.ok(cf.some((c) => c.getCriteriaType() === 'CUSTOM_FORMULA' && /DATE\(2000;1;1\)/.test(c.getCriteriaValues()[0])));
   assert.ok(cf.some((c) => c.getCriteriaType() === 'TEXT_EQUAL_TO' && c.getCriteriaValues()[0] === 'Fora do esperado' && c.getBackground() === ctx.Style.STATUS.off.bg));
   // Config: every key, sections styled, enum keys validated.
   const keys = ctx.Tabs.read('config').filter((x) => x.key).map((x) => x.key);
@@ -123,8 +123,8 @@ test('Hoje is drawn from Hoje.layout(): validations, inputs, calculated cells, c
   assert.equal(hoje.getRange('B6').getBackground(), ctx.Style.C.calc);
   assert.equal(hoje.getRange('B5').getNumberFormat(), 'dd/mm/yyyy');
   assert.equal(hoje.getFrozenRows(), 5);
-  assert.equal(hoje.getRange('A1').getFormula(), `=HYPERLINK("#gid=${sheet(ctx, 'Painel').getSheetId()}","Painel")`);
-  assert.equal(hoje.getRange('E1').getFormula(), `=HYPERLINK("#gid=${sheet(ctx, 'Medidas e fotos').getSheetId()}","Medidas e fotos")`);
+  assert.equal(hoje.getRange('A1').getFormula(), `=HYPERLINK("#gid=${sheet(ctx, 'Painel').getSheetId()}";"Painel")`);
+  assert.equal(hoje.getRange('E1').getFormula(), `=HYPERLINK("#gid=${sheet(ctx, 'Medidas e fotos').getSheetId()}";"Medidas e fotos")`);
   const chips = hoje.getConditionalFormatRules().map((r) => r.getRanges()[0].getA1Notation());
   assert.ok(chips.includes('B7') && chips.includes('E60:E65') && chips.includes('B40'));
   const calc = hoje.getProtections('RANGE').filter((p) => /Calculado/.test(p.getDescription())).map((p) => p.getRange().getA1Notation());

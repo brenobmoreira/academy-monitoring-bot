@@ -443,6 +443,8 @@ const FORMAT_PROPS = [
 ];
 
 const BORDER_STYLE = { DOTTED: 'DOTTED', DASHED: 'DASHED', SOLID: 'SOLID', SOLID_MEDIUM: 'SOLID_MEDIUM', SOLID_THICK: 'SOLID_THICK', DOUBLE: 'DOUBLE' };
+/** SpreadsheetApp.BorderStyle values are enum objects: setBorder refuses a plain string, like Apps Script. */
+const BORDER_ENUM = Object.freeze(Object.fromEntries(Object.keys(BORDER_STYLE).map((k) => [k, Object.freeze({ name: () => k, toString: () => k })])));
 
 function setFmt(cell, key, value, def) {
   if (value === null || value === undefined || value === def) {
@@ -729,6 +731,38 @@ class FakeEmbeddedChart {
 
 // ---------------------------------------------------------------- Range
 
+/**
+ * Apps Script rejects setValue/setValues of a non-empty value that a strict (allowInvalid=false)
+ * list or range validation does not accept, with the rule's help text as the message. Other
+ * criteria, and a range that cannot be resolved, are not checked.
+ */
+function checkStrictValidation(sheet, r, c, v) {
+  if (typeof v === 'string' && v.length > 50000) {
+    throw new Error('A entrada contém mais que o limite máximo de 50000 caracteres em uma única célula.');
+  }
+  const cell = sheet.cellAt_(r, c);
+  const dv = cell && cell.dv;
+  if (!dv || dv.rule_.allowInvalid !== false || isEmpty(v)) return;
+  const { criteria, values } = dv.rule_;
+  let allowed;
+  if (criteria === 'VALUE_IN_LIST') {
+    allowed = values;
+  } else if (criteria === 'VALUE_IN_RANGE') {
+    const t = values[0];
+    const range = t && t.sheet ? new FakeRange(t.sheet, t.rect) : (typeof t === 'string' ? sheet.ss_.getRangeByName(t) : null);
+    if (!range) return;
+    allowed = range.getValues().flat();
+  } else {
+    return;
+  }
+  // Like Sheets: a date matches by its instant, booleans as TRUE/FALSE, the rest as text.
+  const key = (x) => (isDate(x) ? `d:${x.getTime()}` : typeof x === 'boolean' ? (x ? 'TRUE' : 'FALSE') : String(x));
+  const text = key(typeof v === 'string' && v.startsWith("'") ? v.slice(1) : v);
+  if (!allowed.some((a) => !isEmpty(a) && key(a) === text)) {
+    throw new Error(dv.getHelpText() || 'Os dados inseridos na célula violam as regras de validação de dados definidas para esta célula.');
+  }
+}
+
 class FakeRange {
   constructor(sheet, rect) {
     this.sheet_ = sheet;
@@ -784,10 +818,14 @@ class FakeRange {
   getValue() { return this.getValues()[0][0]; }
   setValues(values) {
     this.checkShape_(values, 'setValues');
-    this.each_((r, c, i, j) => this.sheet_.write_(r, c, values[i][j]));
+    this.each_((r, c, i, j) => checkStrictValidation(this.sheet_, r, c, values[i][j]));
+    this.each_((r, c, i, j) => this.sheet_.input_(r, c, values[i][j]));
     return this;
   }
-  setValue(v) { return this.each_((r, c) => this.sheet_.write_(r, c, v)); }
+  setValue(v) {
+    this.each_((r, c) => checkStrictValidation(this.sheet_, r, c, v));
+    return this.each_((r, c) => this.sheet_.input_(r, c, v));
+  }
   isBlank() { return this.map_((cell) => cell).every((l) => l.every((cell) => !cell || (isEmpty(cell.v) && !cell.f))); }
   getDisplayValues() { return this.map_((cell, r, c) => this.sheet_.display_(cell, r, c)); }
   getDisplayValue() { return this.getDisplayValues()[0][0]; }
@@ -856,7 +894,10 @@ class FakeRange {
     return f.wrap ? 'WRAP' : f.wrapStrategy || 'OVERFLOW';
   }
   setBorder(top, left, bottom, right, vertical, horizontal, color, style) {
-    const spec = { style: style || 'SOLID', color: normColor(color) || '#000000' };
+    if (typeof style === 'string') {
+      throw new Error('Os parâmetros não correspondem à assinatura de método para SpreadsheetApp.Range.setBorder.');
+    }
+    const spec = { style: style ? String(style) : 'SOLID', color: normColor(color) || '#000000' };
     const { r1, c1, r2, c2 } = this.rect_;
     const apply = (cell, side, flag) => {
       if (flag === null || flag === undefined) return;
@@ -1024,6 +1065,20 @@ class FakeSheet {
     if (!cell && create) cell = line[c - 1] = { v: '', f: null, fmt: null, note: '', dv: null };
     return cell;
   }
+  /**
+   * A value set by setValue(s)/appendRow, as Sheets reads it: "=..." is a formula and a leading
+   * apostrophe stores the rest as literal text ("'=1+1" is the text "=1+1", getFormula '').
+   * Not modelled: Sheets also parses other text ("0123", "29/09/2026") into numbers and dates.
+   */
+  input_(r, c, v) {
+    if (typeof v === 'string' && v.startsWith("'")) {
+      const cell = this.cellAt_(r, c, true);
+      cell.v = v.slice(1);
+      cell.f = null; delete cell.cached; delete cell.computed;
+      return cell;
+    }
+    return this.write_(r, c, v);
+  }
   write_(r, c, v) {
     if (typeof v === 'string' && v.startsWith('=') && v.length > 1) return this.writeFormula_(r, c, v);
     const cell = this.cellAt_(r, c, true);
@@ -1128,7 +1183,7 @@ class FakeSheet {
     const r = this.getLastRow() + 1;
     if (r > this.maxRows_) this.maxRows_ = r;
     if (values.length > this.maxCols_) this.maxCols_ = values.length;
-    values.forEach((v, i) => this.write_(r, i + 1, v));
+    values.forEach((v, i) => this.input_(r, i + 1, v));
     return this;
   }
   // structure
@@ -1762,7 +1817,7 @@ function createContext(options = {}) {
     DataValidationCriteria: enumOf(DV_CRITERIA),
     BooleanCriteria: enumOf(BOOLEAN_CRITERIA),
     ProtectionType: enumOf(['RANGE', 'SHEET']),
-    BorderStyle: Object.freeze({ ...BORDER_STYLE }),
+    BorderStyle: BORDER_ENUM,
     WrapStrategy: enumOf(['WRAP', 'OVERFLOW', 'CLIP']),
     Dimension: enumOf(['ROWS', 'COLUMNS']),
     SheetType: enumOf(['GRID', 'OBJECT', 'DATASOURCE']),
@@ -1876,18 +1931,24 @@ function createContext(options = {}) {
     getDocumentProperties: () => makeProps(stores.document),
   };
 
+  // One lock of each kind for the whole spreadsheet, as in Apps Script: while one lock object
+  // holds it, another (a second execution, see harness.parallelExecution) waits and times out.
+  const holders = {};
+  // Test helper: Apps Script frees the locks of an execution it killed (6-minute limit).
+  ctx.__releaseLocks = () => { Object.keys(holders).forEach((k) => { holders[k] = null; }); };
   const makeLock = (kind) => {
-    let held = false;
-    return {
+    const self = {};
+    const busy = () => ctx.__lockBusy || (holders[kind] && holders[kind] !== self);
+    return Object.assign(self, {
       waitLock: (ms) => {
         ctx.__locks.push('wait');
-        if (ctx.__lockBusy) throw new Error(`Lock timeout: another process was holding the ${kind} lock for too long (${ms} ms).`);
-        held = true;
+        if (busy()) throw new Error(`Lock timeout: another process was holding the ${kind} lock for too long (${ms} ms).`);
+        holders[kind] = self;
       },
-      tryLock: () => { ctx.__locks.push('try'); if (ctx.__lockBusy) return false; held = true; return true; },
-      releaseLock: () => { ctx.__locks.push('release'); held = false; },
-      hasLock: () => held,
-    };
+      tryLock: () => { ctx.__locks.push('try'); if (busy()) return false; holders[kind] = self; return true; },
+      releaseLock: () => { ctx.__locks.push('release'); if (holders[kind] === self) holders[kind] = null; },
+      hasLock: () => holders[kind] === self,
+    });
   };
   ctx.LockService = { getScriptLock: () => makeLock('script'), getDocumentLock: () => makeLock('document'), getUserLock: () => makeLock('user') };
 

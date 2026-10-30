@@ -301,3 +301,74 @@ test('client files hold the client data; the code does not', () => {
     ['Breno', 'Zoio', 'Luan', 'Muay'].forEach((n) => assert.ok(!text.includes(n), `${f} mentions ${n}`));
   });
 });
+
+test('native tables become plain ranges before migrating, with every value and formula kept', () => {
+  const ctx = boot('breno');
+  const ss = ctx.SpreadsheetApp.getActive();
+  const gridRange = (s, a1) => {
+    const r = s.getRange(a1);
+    return { startRowIndex: r.getRow() - 1, endRowIndex: r.getLastRow(), startColumnIndex: r.getColumn() - 1, endColumnIndex: r.getLastColumn() };
+  };
+  const contents = () => ss.getSheets().flatMap((s) => s.tables_.map((t) => [s.getName(), plain(s.getRange(t.range).getValues()), s.getRange(t.range).getFormulas()]));
+  const before = contents();
+  assert.equal(before.length, 13);
+  // Like "Excluir tabela" in the Sheets UI, removing a table also clears its cells.
+  ctx.Sheets = {
+    Spreadsheets: {
+      get: () => ({ sheets: ss.getSheets().map((s, i) => ({ properties: { sheetId: i, title: s.getName() }, tables: s.tables_.map((t) => ({ tableId: t.name, name: t.name, range: gridRange(s, t.range) })) })) }),
+      batchUpdate: (body) => body.requests.forEach(({ deleteTable }) => ss.getSheets().forEach((s) => {
+        const t = s.tables_.find((x) => x.name === deleteTable.tableId);
+        if (!t) return;
+        before.saved = (before.saved || []).concat([[s.getName(), t.range]]);
+        s.getRange(t.range).clearContent();
+        s.tables_ = s.tables_.filter((x) => x !== t);
+      })),
+    },
+  };
+  const converted = plain(ctx.Migrate.unwrapTables_());
+  assert.equal(converted.length, 13);
+  assert.ok(converted.includes('Ficha de treino (PropostaFicha)'));
+  assert.equal(ss.getSheets().reduce((n, s) => n + s.tables_.length, 0), 0, 'no table left');
+  const after = before.saved.map(([name, a1]) => {
+    const s = ss.getSheetByName(name);
+    return [name, plain(s.getRange(a1).getValues()), s.getRange(a1).getFormulas()];
+  });
+  assert.deepEqual(after, before.slice(0, 13));
+
+  const r = plain(ctx.Migrate.run(client('breno')));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.tablesConverted, [], 'nothing left to convert on the second pass');
+});
+
+test('a validation whose range is gone throws on a real spreadsheet: the audit reports it and the migration completes', () => {
+  const ctx = boot('breno');
+  const rule = ctx.SpreadsheetApp.getActive().getSheetByName('Registro de treino').getRange('C6').getDataValidation();
+  const proto = Object.getPrototypeOf(rule);
+  const original = proto.getCriteriaValues;
+  let calls = 0;
+  // Apps Script throws "Intervalo não encontrado" instead of returning the name of a deleted named range.
+  proto.getCriteriaValues = function () {
+    const values = original.call(this);
+    if (String(this.getCriteriaType()) !== 'VALUE_IN_RANGE') return values;
+    calls += 1;
+    if (typeof values[0] === 'string' && !ctx.SpreadsheetApp.getActive().getRangeByName(values[0])) {
+      throw new Error('Intervalo não encontrado');
+    }
+    return values;
+  };
+  try {
+    const findings = plain(ctx.Audit.findings({ otherNames: ['Zoio'] }));
+    const broken = findings.filter((f) => f.code === 'validation_named_range');
+    assert.ok(broken.some((f) => f.tab === 'Registro de treino' && f.before === '(intervalo inexistente)'));
+    assert.ok(calls > 0);
+    // Every range rule is resolved (neighbours with the same help text can point elsewhere); the
+    // slow part on a real spreadsheet, the named range lookup, happens once per name
+    // (validation_rules.test.js).
+
+    const r = plain(ctx.Migrate.run(client('breno')));
+    assert.equal(r.ok, true);
+    assert.ok(ctx.Tabs.findSheet('plans'), 'Fichas exists after the migration');
+  } finally {
+    proto.getCriteriaValues = original;
+  }
+});

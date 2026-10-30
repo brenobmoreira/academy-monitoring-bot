@@ -600,7 +600,7 @@ Files: `apps/sheet4/src/workout.js` (`Exercises`, `Workouts`, `TrainingScreen`/`
 
 ## As built (migration/audit)
 
-Files: `apps/sheet4/src/migrate.js` (`Migrate`), `audit.js` (`Audit`), `wizard.js` + `wizard.html`
+Files: `apps/sheet4/src/migrate.js` (`Migrate`), `audit.js` (`Audit`), `wizard_ui.js` + `wizard.html`
 (`Wizard`, menu Sistema → Configuração inicial · Migrar 3.0 → 4.0 · Auditoria), client data in
 `clients/breno.json` and `clients/zoio.json` (format `academy-client/1`: `config` keyed by Config
 keys, `otherClientNames`, `history.{objectives,goals,plans}` with ids and real dates, `review` flags),
@@ -651,6 +651,86 @@ preview tool `tools/migrate_preview.js` → `sheets/preview/<name>_4_0.xlsx`.
 - Left for later modules: Hoje keeps its 3.0 formulas (they read Diário by column letter and now
   show nothing useful) until the Hoje module renders it; Painel keeps its typed 3.0 texts and charts
   until Dashboard renders it; Guia texts are only cleaned of other-client sentences.
+
+### Staged migration (the dialog)
+
+Real spreadsheets do not fit in one 6-minute execution, so the dialog runs the migration as one
+operation in several executions: native tables → migration body → Recalcular semanas → Aplicar
+layout (resumable, one tab per slice) → Atualizar painel → Auditoria final.
+
+- **State** in the document properties (`migration.op`: phase `tables|migrating|steps`, the
+  migration's action id saved **before** its first write, steps left, layout cursor, failure,
+  open audit errors). `Migrate.status()` checks it against the spreadsheet; the dialog only follows
+  what the server says (reopening resumes, repeated or late requests are `stale` and change
+  nothing, an error stops the chain with "Tentar de novo"; green only when the audit has no open
+  error). The decision to migrate and the body run under one script lock.
+- **Killed midway** (no catch/finally at the time limit): the schema marker is the body's last
+  write; without it, the rows of the saved action id are rolled back in two phases (`recoverBody_`)
+  and the retry starts over. 1) Plan, nothing written: every logged cell must hold one of the
+  values the body wrote there or its value before (a cell written A → B → C and already put back
+  to A is not a conflict); a column block the body inserted is removed only when the tab has
+  exactly the width the body left and those columns hold nothing the body did not write; a tab it
+  created only when it holds its skeleton and the body's cells; a rename is undone only when the
+  old name is free; a named range only when it still points to its `LEGACY_LISTS` tab; a deleted
+  row is always a conflict. Any conflict → `interrupted_conflict` with the cells/tabs named, nothing
+  changed. 2) Apply: cells straight to their value before, then structures newest first (ones
+  already undone are recognised), then the Log rows marked undone. The plan reads its context
+  (structures, renames, header texts) and each cell's history (value before its first write,
+  every value written) from every row of the action in Log order, undone ones included; only
+  cells with a row still pending are checked and written. So a recovery killed at any point, Log
+  half marked included, is finished by the next one without false conflicts and back to the
+  original (A in A → B → C or A → B → A, never an intermediate value).
+- **One undo**: the steps write under the migration's action id (`ChangeLog.run` `join`, only while
+  it is the latest action) with rows labelled "Migrar 3.0 → 4.0 — <etapa>"; undoing actions with
+  that label runs no derived refresh. While steps are left every other write is refused
+  (`migration_in_progress`, nothing logged, so a refused bot request can be retried): logged ones
+  through `ChangeLog.GUARDS`, unlogged ones through `ChangeLog.blockedReason` — `Actions.run`
+  (except actions flagged `duringMigration`: the wizard dialogs and `undoLast`; checked early and
+  again under the script lock, so a migration started while the action waited for the lock stops
+  it before it writes), `dailyRefresh`
+  (postponed, `{skipped}`) and the Medidas id/date stamps in `onEditInstalled` (a toast).
+- **Step proof**: a finished step appends an Info row `step_done` (`Código`) to Auditoria inside the
+  step's own action, so undoing the step removes its proof too. A step run after another action
+  became the latest is logged as "<etapa> (continuação)" in its own action.
+- **Spreadsheets migrated earlier** (no state, or a `legacy` state): recomputed on every status
+  from the Log (`stepsLeft_`): steps in order, each proven by a `step_done` row after the previous
+  proof, or by legacy rows with the exact step label outside the migration action; the layout
+  counts as done only when a later Painel ran; no audit rows → the audit runs again (open findings
+  are not repeated); no migration action at all → `unverified`, never done. Undoing the audit or
+  the Painel brings those steps back. A legacy operation does not block other writes.
+- **Native tables**: verified copy in a hidden sheet named "Migração — cópia das tabelas <token>",
+  the token saved in the document properties **before** `insertSheet`, the sheet id after. Only a
+  sheet with that exact name is the copy; an empty one is adopted (a run killed between
+  `insertSheet` and its header), one with content but no token mark is refused. Sheets of the
+  person under the base name are never read, reused or deleted. Refused before any removal when
+  formulas use a table (`Tabela1`, `Tabela1[Col]`, `Tabela_de_dados`) or INDIRECT names one;
+  values, formulas, literal text and number formats compared before the copy is dropped, and it is
+  dropped only when every entry is restored without error.
+- **Validation audit**: exact. With the Sheets advanced service, `spreadsheets.get` per block of
+  rows reads every cell's rule; `ONE_OF_RANGE` sources are classified (`Audit.isA1_`: cell,
+  cell:cell, col:col, row:row and open ranges, columns of 1–3 letters, rows from 1 — so `=TMP`,
+  `=Foo`, `=A0` are names; `=A$`, `=A1:` are inconclusive; sheet names with escaped quotes;
+  named-range lookups cached in a `Map`, so `constructor`/`toString`/`__proto__` are ordinary
+  names); anything else is an open `validation_inconclusive` error, a failed read is
+  `validation_unread`. Without the service, cell by cell (exact, slow).
+- **Text writes**: a value that starts with an apostrophe gets a second one (`Tabs.input`) in Tabs,
+  Undo, migration, Hoje, Style and Progressão writes.
+
+### Validação controlada (pendente, numa cópia de planilha)
+
+What the fakes model but was not confirmed on Google; to run on a copy, never on a client sheet:
+
+1. `setValue("'abc")` stores `abc`, and `setValue("''abc")` stores `'abc` (the Sheets API documents
+   that a typed leading apostrophe is not part of the value; Apps Script's own reference does not
+   say it for `setValue`).
+2. `spreadsheets.get` with `fields=sheets(data(rowData(values(dataValidation))))` on a cell whose
+   list range was a deleted named range: the `userEnteredValue` text (`=Nome`, `#REF!` or other).
+   Anything else shows as `validation_inconclusive`, never as clean.
+3. `deleteTable` on a table: the cells and number formats it leaves (the code assumes it may clear
+   both and restores both).
+4. Whole staged migration on a copy of a 3.0 file: close the dialog between steps, reopen,
+   continue; then one "Desfazer última alteração" back to 3.0.
+5. Time of `Auditoria` on Breno's file with the Sheets API path (one request per 1 000 rows per tab).
 
 ## As built (bot API)
 

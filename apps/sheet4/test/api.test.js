@@ -545,3 +545,64 @@ test('requestId conflict, user undo vs rolled-back partial failure, entryId look
   ok(ctx.api('diary.upsert', { date: '2026-10-20', fields: { sleepH: 8 } }, 'req-brand-new'));
   assert.equal(decodeCalls, 0, 'no Log JSON decoded on a fresh requestId');
 });
+
+test('catalog includes lastWork per plan row, todayDiary, and progressionSuggestions; food.copy, measures.upsert, foods.seed', () => {
+  const ctx = setup({ config: { 'analysis.progressionSessions': 1, 'routine.loadIncrementKg': 2.5 } });
+
+  // Log a workout on 2026-10-18 that hits top of rep range (10 reps) on Supino inclinado
+  ok(ctx.api('workout.upsert', {
+    date: '2026-10-18',
+    session: 'Upper',
+    complete: true,
+    exercises: [
+      { name: 'Supino inclinado', work: [{ kg: 60, reps: 10, rir: 1 }, { kg: 60, reps: 10, rir: 1 }] },
+    ],
+  }));
+  ok(ctx.api('diary.upsert', { date: '2026-10-20', fields: { waterL: 2.0, steps: 6000 } }));
+
+  const cat = ok(ctx.api('catalog', {}));
+  assert.deepEqual(cat.todayDiary, { waterL: 2, steps: 6000 });
+  assert.equal(cat.plan[0].lastWork.date, '2026-10-18');
+  assert.equal(cat.plan[0].lastWork.text, '60 kg × 10 (RIR 1) · 60 kg × 10 (RIR 1)');
+  assert.equal(cat.progressionSuggestions.length, 1);
+  assert.equal(cat.progressionSuggestions[0].exercise, 'Supino inclinado');
+  assert.equal(cat.progressionSuggestions[0].suggestedKg, 62.5);
+
+  // food.copy copies a meal or whole day and supports undo + idempotency
+  ok(ctx.api('food.add', {
+    date: '2026-10-19',
+    meal: 'Almoço',
+    items: [{ food: 'Arroz branco cozido', qty: 150, unit: 'g' }],
+  }));
+  const cp1 = ok(ctx.api('food.copy', { from: '2026-10-19', to: '2026-10-20', meal: 'Almoço' }, 'req-copy-1'));
+  const cp2 = ok(ctx.api('food.copy', { from: '2026-10-19', to: '2026-10-20', meal: 'Almoço' }, 'req-copy-1'));
+  assert.equal(cp1.items.length, 1);
+  assert.equal(cp1.items[0].food, 'Arroz branco cozido');
+  assert.equal(cp2.deduplicated, true);
+  assert.equal(cp2.writeId, cp1.writeId);
+
+  // measures.upsert saves body circumferences, stamps objective, and supports idempotency
+  const m1 = ok(ctx.api('measures.upsert', {
+    date: '2026-10-20',
+    fields: { waistCm: 83.5, chestCm: 102, armCm: 38.5, notes: 'Jejum' },
+  }, 'req-meas-1'));
+  const m2 = ok(ctx.api('measures.upsert', {
+    date: '2026-10-20',
+    fields: { waistCm: 83.5, chestCm: 102, armCm: 38.5, notes: 'Jejum' },
+  }, 'req-meas-1'));
+  assert.equal(m1.objective, 'O001');
+  assert.deepEqual(m1.fields, { waistCm: 83.5, chestCm: 102, armCm: 38.5, notes: 'Jejum' });
+  assert.equal(m2.deduplicated, true);
+
+  // foods.seed inserts only non-existing valid foods
+  const seedRes = ok(ctx.api('foods.seed', {
+    foods: [
+      { name: 'Arroz branco cozido', baseUnit: 'g', baseQty: 100, kcal: 128, protein: 2.5, carbs: 28.1, fat: 0.2, fiber: 1.6 },
+      { name: 'Tilápia grelhada RU', baseUnit: 'g', baseQty: 100, kcal: 128, protein: 26, carbs: 0, fat: 2.7, fiber: 0, quality: 'TACO/fonte confiável' },
+    ],
+  }));
+  assert.equal(seedRes.added, 1);
+  assert.equal(seedRes.skipped, 1);
+  assert.ok(ok(ctx.api('catalog', {})).foods.includes('Tilápia grelhada RU'));
+});
+

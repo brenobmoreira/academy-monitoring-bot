@@ -17,7 +17,7 @@ from typing import Any, Protocol
 import httpx
 
 from agent.handler import build_handler
-from agent.settings import Settings
+from agent.settings import Settings, parse_env_arg
 from agent.telegram import TelegramClient, TelegramError, configure_logging
 
 log = logging.getLogger(__name__)
@@ -90,7 +90,8 @@ async def run(settings: Settings) -> None:
 
 def main() -> None:
     configure_logging()
-    settings = Settings.load()
+    env_file = parse_env_arg()
+    settings = Settings.load(env_file) if env_file else Settings.load()
     log.info("model %s, up to %s calls per message", settings.LLM_MODEL, settings.MAX_LLM_CALLS)
     try:
         asyncio.run(run(settings))

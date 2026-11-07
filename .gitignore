@@ -1,5 +1,7 @@
 # clasp: carries the scriptId of YOUR Apps Script project
 .clasp.json
+.clasp.*.json
+!.clasp.json.example
 .clasprc.json
 
 # local-only files

@@ -21,7 +21,7 @@ from typing import Any, Protocol
 import httpx
 
 from agent.format import bold, escape
-from agent.settings import Settings
+from agent.settings import Settings, parse_env_arg
 from agent.summary import confirmation
 from agent.telegram import TelegramClient, configure_logging
 from agent.undo import undo_last
@@ -174,8 +174,51 @@ async def ficha(ctx: Context, args: str) -> Reply:
         return Reply(f"A ficha {plan.get('id')} não tem exercícios em {session}.")
     detail = ", ".join(filter(None, [f"ficha {plan.get('id')}", catalog.get("trainingPhase")]))
     header = f"{session} ({detail}){note}:"
-    lines = [f"• {r['exercise']} {r.get('prescription') or ''}".rstrip() for r in rows]
+    lines = [_plan_line(r) for r in rows]
     return Reply("\n".join([header, *lines]))
+
+
+def _plan_line(r: dict[str, Any]) -> str:
+    line = f"• {r['exercise']} {r.get('prescription') or ''}".rstrip()
+    last_work = r.get("lastWork")
+    if isinstance(last_work, dict) and last_work.get("text") and last_work.get("date"):
+        line += f" — última ({_ddmm(last_work['date'])}): {last_work['text']}"
+    return line
+
+
+@command("progressao", "Sugestões de progressão de carga e últimas cargas da ficha vigente")
+async def progressao(ctx: Context, args: str) -> Reply:
+    response = await ctx.api().catalog()
+    if not response.get("ok"):
+        return sheet_failure(response)
+    catalog = response["result"]
+    suggestions = list(catalog.get("progressionSuggestions") or [])
+    plan = list(catalog.get("plan") or [])
+    if args:
+        target = normalize(args)
+        suggestions = [
+            s
+            for s in suggestions
+            if normalize(s.get("session") or "") == target or target in normalize(s.get("exercise") or "")
+        ]
+        plan = [
+            r
+            for r in plan
+            if normalize(r.get("session") or "") == target or target in normalize(r.get("exercise") or "")
+        ]
+    lines: list[str] = []
+    if suggestions:
+        lines.append("Sugestões de progressão:")
+        lines.extend(f"• {s['text']}" for s in suggestions)
+    else:
+        lines.append("Nenhuma sugestão automática de progressão hoje.")
+    with_last = [r for r in plan if isinstance(r.get("lastWork"), dict) and r["lastWork"].get("text")]
+    if with_last:
+        lines.append("\nÚltimas cargas registradas na ficha:")
+        for r in with_last:
+            lw = r["lastWork"]
+            lines.append(f"• {r['exercise']} ({r['session']}, {_ddmm(lw['date'])}): {lw['text']}")
+    return Reply("\n".join(lines))
 
 
 @command("exercicios", "Nomes exatos dos exercícios por grupo; /exercicios peito filtra")
@@ -382,5 +425,7 @@ async def publish(settings: Settings) -> None:
 
 def main() -> None:
     configure_logging()
-    asyncio.run(publish(Settings.load()))
+    env_file = parse_env_arg()
+    settings = Settings.load(env_file) if env_file else Settings.load()
+    asyncio.run(publish(settings))
     log.info("command menu set: %s", ", ".join(f"/{name}" for name, _ in menu()))

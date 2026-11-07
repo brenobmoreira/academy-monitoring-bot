@@ -17,6 +17,13 @@ from agent.format import bold, escape
 LABELS = {
     "weightKg": "Peso kg",
     "waistCm": "Cintura cm",
+    "hipCm": "Quadril cm",
+    "chestCm": "Peito cm",
+    "armCm": "Braço cm",
+    "thighCm": "Coxa cm",
+    "photoFront": "Foto frente",
+    "photoSide": "Foto lado",
+    "photoBack": "Foto costas",
     "sleepH": "Sono h",
     "steps": "Passos",
     "cardioMin": "Cardio min",
@@ -43,25 +50,32 @@ def confirmation(writes: list[Write]) -> list[str]:
         if op == "diary.upsert":
             group = groups.setdefault(("diary", result["date"]), {"date": result["date"], "fields": {}})
             group["fields"].update(result.get("fields") or {})
+        elif op == "measures.upsert":
+            group = groups.setdefault(("measures", result["date"]), {"date": result["date"], "fields": {}})
+            group["fields"].update(result.get("fields") or {})
         elif op == "workout.upsert":
             key = ("workout", result["date"], result["session"])
             group = groups.setdefault(key, {**result, "exercises": {}})
             group.update({k: v for k, v in result.items() if k != "exercises"})
             for ex in result.get("exercises") or []:
                 group["exercises"][ex["name"]] = ex
-        elif op == "food.add":
-            key = ("food", result["date"], result["meal"])
-            group = groups.setdefault(key, {"date": result["date"], "meal": result["meal"], "items": []})
+        elif op in ("food.add", "food.copy"):
+            target_date = result.get("date") or result["to"]
+            meal_label = result.get("meal") or "Alimentação"
+            key = ("food", target_date, meal_label)
+            group = groups.setdefault(key, {"date": target_date, "meal": meal_label, "items": []})
             group["items"].extend(result.get("items") or [])
             # The day totals of the latest write of that date are the current ones.
             for other in groups.values():
-                if other.get("date") == result["date"] and "items" in other:
+                if other.get("date") == target_date and "items" in other:
                     other.pop("totals", None)
             group["totals"] = result.get("totals")
     lines: list[str] = []
     for key, group in groups.items():
         if key[0] == "diary":
             lines.extend(_diary(group))
+        elif key[0] == "measures":
+            lines.extend(_measures(group))
         elif key[0] == "workout":
             lines.extend(_workout(group))
         else:
@@ -69,7 +83,7 @@ def confirmation(writes: list[Write]) -> list[str]:
     return lines
 
 
-# ---- diary ---------------------------------------------------------------------------------
+# ---- diary & measures ----------------------------------------------------------------------
 
 
 def _diary(group: dict[str, Any]) -> list[str]:
@@ -78,6 +92,14 @@ def _diary(group: dict[str, Any]) -> list[str]:
         for k, v in group["fields"].items()
     ]
     return [" · ".join([bold(_day(group["date"])), *parts])]
+
+
+def _measures(group: dict[str, Any]) -> list[str]:
+    parts = [
+        f"{escape(LABELS.get(k, k))} {'apagado' if v is None else _value(v)}"
+        for k, v in group["fields"].items()
+    ]
+    return [" · ".join([bold(f"{_day(group['date'])} · Medidas"), *parts])]
 
 
 # ---- workout -------------------------------------------------------------------------------

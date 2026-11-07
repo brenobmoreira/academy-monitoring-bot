@@ -177,3 +177,18 @@ def test_media_max_bytes_stays_within_the_bot_api_limit(env, monkeypatch):
     monkeypatch.setenv("MEDIA_MAX_BYTES", "30000000")
     with pytest.raises(ConfigError, match="MEDIA_MAX_BYTES"):
         Settings.load()
+
+
+def test_custom_env_file_via_argument_or_env_variable(env, monkeypatch, tmp_path):
+    from agent.settings import parse_env_arg
+
+    monkeypatch.delenv("SHEET_API_KEY")
+    custom = tmp_path / ".env.luan"
+    custom.write_text("SHEET_API_KEY=luan-secret-key\n", encoding="utf-8")
+    assert Settings.load(custom).SHEET_API_KEY.get_secret_value() == "luan-secret-key"
+
+    monkeypatch.setenv("ENV_FILE", str(custom))
+    assert Settings.load().SHEET_API_KEY.get_secret_value() == "luan-secret-key"
+    assert parse_env_arg(["--env", ".env.luan"]) == ".env.luan"
+    assert parse_env_arg([]) is None
+

@@ -389,3 +389,35 @@ async def test_fase_on_a_past_date_asks_for_that_date():
     assert text == "Nenhum objetivo em vigor em 01/01/2026."
     text, calls = await run("fase", "amanhã")
     assert text.startswith("Data inválida") and calls == []
+
+
+async def test_ficha_and_progressao_show_last_work_and_progression_suggestions():
+    cat = catalog()
+    cat["result"]["plan"] = [
+        {
+            **PLAN[0],
+            "lastWork": {
+                "date": "2026-09-18",
+                "session": "Upper",
+                "text": "60 kg × 10 (RIR 1) · 60 kg × 10 (RIR 1)",
+            },
+        },
+        PLAN[1],
+    ]
+    cat["result"]["progressionSuggestions"] = [
+        {
+            "exercise": "Supino inclinado",
+            "session": "Upper",
+            "kind": "load",
+            "text": "Supino inclinado: 2×10 a 1 RIR em 1 sessão com 60 kg → sugerir 62,5 kg (+2,5 kg).",
+        }
+    ]
+    ficha_text, _ = await run("ficha", "upper", catalog=[cat])
+    assert "— última (18/09): 60 kg × 10 (RIR 1) · 60 kg × 10 (RIR 1)" in ficha_text
+
+    prog_text, _ = await run("progressao", "", catalog=[cat])
+    assert "Sugestões de progressão:" in prog_text
+    assert "sugerir 62,5 kg" in prog_text
+    assert "Últimas cargas registradas na ficha:" in prog_text
+    assert "Supino inclinado (Upper, 18/09): 60 kg × 10 (RIR 1)" in prog_text
+

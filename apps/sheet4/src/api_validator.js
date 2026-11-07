@@ -167,6 +167,70 @@ const ApiValidator = {
     return Object.assign({}, it, { kind });
   },
 
+  /* food.copy, measures.upsert, foods.seed ------------------------------------------------- */
+
+  foodCopy(args) {
+    const c = new ApiChecker_();
+    if (!c.object(args, 'args')) return c.result(null);
+    c.onlyKeys(args, 'args', ['from', 'to', 'meal']);
+    const fromOk = c.date(args.from, 'args.from');
+    const toOk = c.date(args.to, 'args.to');
+    if (fromOk && toOk && args.from === args.to) {
+      c.add('args.to', 'invalid_range', 'a data de destino deve ser diferente da data de origem');
+    }
+    let meal = FoodLog.ALL_MEALS;
+    if (args.meal !== undefined && args.meal !== null) {
+      if (c.value(args.meal, 'args.meal', { type: 'text', maxLength: 60 })) meal = args.meal.trim();
+    }
+    return c.result({ from: args.from, to: args.to, meal });
+  },
+
+  measuresUpsert(args) {
+    const c = new ApiChecker_();
+    if (!c.object(args, 'args')) return c.result(null);
+    c.onlyKeys(args, 'args', ['date', 'fields']);
+    c.date(args.date, 'args.date');
+    const fields = args.fields;
+    const names = Object.keys(Measures.FIELDS);
+    if (fields === undefined) c.add('args.fields', 'required', `campo obrigatório; aceitos: ${names.join(', ')}`);
+    else if (c.object(fields, 'args.fields')) {
+      const keys = Object.keys(fields);
+      if (!keys.length) c.add('args.fields', 'empty', `informe ao menos um campo: ${names.join(', ')}`);
+      keys.forEach((name) => {
+        const spec = Measures.FIELDS[name];
+        const path = `args.fields.${name}`;
+        if (!spec) { c.add(path, 'unknown_field', `campo desconhecido; aceitos: ${names.join(', ')}`); return; }
+        if (fields[name] === null) return;
+        if (spec.type === 'text') c.value(fields[name], path, { type: 'text', maxLength: 500 });
+        else c.value(fields[name], path, { type: spec.type, min: spec.min, max: spec.max });
+      });
+    }
+    return c.result({ date: args.date, fields });
+  },
+
+  foodsSeed(args) {
+    const c = new ApiChecker_();
+    if (!c.object(args, 'args')) return c.result(null);
+    c.onlyKeys(args, 'args', ['foods']);
+    const list = args.foods;
+    const allowed = ['name', 'baseUnit', 'baseQty', 'kcal', 'protein', 'carbs', 'fat', 'fiber',
+      'reference', 'howToMeasure', 'sourceLink', 'householdUnit', 'perHousehold', 'quality'];
+    const out = [];
+    if (list === undefined) c.add('args.foods', 'required', 'campo obrigatório (lista de alimentos)');
+    else if (!Array.isArray(list)) c.add('args.foods', 'wrong_type', `esperado lista, recebido ${ApiChecker_.show(list)}`);
+    else if (c.count(list, 'args.foods', 1, 250)) {
+      list.forEach((f, i) => {
+        const path = `args.foods[${i}]`;
+        if (!c.object(f, path)) return;
+        c.onlyKeys(f, path, allowed);
+        const problems = Foods.problems(f);
+        if (problems.length) c.add(path, 'incomplete_food', problems.join('; '));
+        else out.push(f);
+      });
+    }
+    return c.result({ foods: out });
+  },
+
   /* reads ---------------------------------------------------------------------------------- */
 
   /** {date}; future dates refused unless allowFuture. */

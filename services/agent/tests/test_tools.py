@@ -29,6 +29,8 @@ def test_exposes_the_tools_with_docstrings(sheet):
         "save_diary",
         "save_workout",
         "save_food",
+        "copy_food",
+        "save_measures",
         "get_exercise_history",
         "get_diary_history",
         "get_phase",
@@ -271,3 +273,49 @@ async def test_undone_replay_is_not_journaled_and_warns_the_model():
     assert journal.writes == []
     assert journal.write_ids == []
     assert "desfeita" in res["result"]["message"]
+
+
+async def test_copy_food_and_save_measures_journal_writes():
+    from agent.summary import confirmation
+    from agent.tools import MeasureFields
+    from agent.undo import undone_line
+
+    copy_res = {
+        "ok": True,
+        "result": {
+            "from": "2026-09-20",
+            "to": "2026-09-21",
+            "meal": "Almoço",
+            "items": [{"food": "Arroz branco cozido", "qty": 150, "unit": "g", "kcal": 192, "protein": 3.8}],
+            "totals": {"kcal": 192, "protein": 3.8},
+            "writeId": "cp1",
+        },
+    }
+    meas_res = {
+        "ok": True,
+        "result": {
+            "date": "2026-09-21",
+            "row": 6,
+            "fields": {"waistCm": 83.5, "armCm": 38.0},
+            "writeId": "m1",
+        },
+    }
+    sheet = FakeSheet(food_copy=[copy_res], measures_upsert=[meas_res])
+    journal = Journal()
+    t = tools(sheet, journal)
+    await t["copy_food"]("2026-09-20", "2026-09-21", "Almoço")
+    await t["save_measures"]("2026-09-21", MeasureFields(waistCm=83.5, armCm=38.0))
+    assert sheet.calls == [
+        ("food.copy", {"from": "2026-09-20", "to": "2026-09-21", "meal": "Almoço"}),
+        ("measures.upsert", {"date": "2026-09-21", "fields": {"waistCm": 83.5, "armCm": 38.0}}),
+    ]
+    lines = confirmation(journal.writes)
+    assert any("Almoço" in line for line in lines)
+    assert any("Medidas" in line and "Braço cm 38" in line for line in lines)
+    assert "Medidas (Cintura cm, Braço cm)" in undone_line(
+        {"op": "measures.upsert", "date": "2026-09-21", "fields": ["waistCm", "armCm"]}
+    )
+    assert "Cópia (Almoço de 20/09)" in undone_line(
+        {"op": "food.copy", "from": "2026-09-20", "to": "2026-09-21", "meal": "Almoço"}
+    )
+

@@ -3,8 +3,8 @@
   "private": true,
   "description": "Telegram fitness-log bot: Python ADK agent plus an Apps Script sheet API",
   "scripts": {
-    "test": "TZ=America/Sao_Paulo node --test \"apps/**/test/*.test.js\"",
-    "check": "for f in apps/*/src/*.js; do node --check \"$f\" || exit 1; done"
+    "test": "node -e \"const {spawnSync}=require('node:child_process'),fs=require('node:fs'),path=require('node:path');const files=fs.readdirSync('apps').flatMap(a=>{const d=path.join('apps',a,'test');return fs.existsSync(d)?fs.readdirSync(d).filter(f=>f.endsWith('.test.js')).map(f=>path.join(d,f)):[];});process.exit(spawnSync(process.execPath,['--test',...files],{stdio:'inherit',env:{...process.env,TZ:'America/Sao_Paulo'}}).status??1)\"",
+    "check": "node -e \"const {execFileSync}=require('node:child_process'),fs=require('node:fs'),path=require('node:path');for(const a of fs.readdirSync('apps')){const d=path.join('apps',a,'src');if(!fs.existsSync(d))continue;for(const f of fs.readdirSync(d).filter(x=>x.endsWith('.js')))execFileSync(process.execPath,['--check',path.join(d,f)],{stdio:'inherit'})}\""
   },
   "engines": { "node": ">=22" }
 }

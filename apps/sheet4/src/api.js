@@ -103,6 +103,24 @@ const SheetApi = {
       validate: (a) => ApiValidator.date(a, false),
       run: (v) => SheetApi.week_(Dates.fromKey(v.date)),
     },
+    'food.copy': {
+      write: true,
+      validate: (a) => ApiValidator.foodCopy(a),
+      meta: (v) => ({ op: 'food.copy', from: v.from, to: v.to, meal: v.meal }),
+      run: (v) => SheetApi.foodCopy_(v),
+    },
+    'measures.upsert': {
+      write: true,
+      validate: (a) => ApiValidator.measuresUpsert(a),
+      meta: (v) => ({ op: 'measures.upsert', date: v.date, fields: Object.keys(v.fields) }),
+      run: (v) => SheetApi.measuresUpsert_(v),
+    },
+    'foods.seed': {
+      write: true,
+      logged: false,
+      validate: (a) => ApiValidator.foodsSeed(a),
+      run: (v) => SheetApi.foodsSeed_(v),
+    },
   },
 
   /* Entry points ------------------------------------------------------------------------------ */
@@ -360,8 +378,28 @@ const SheetApi = {
       if (existing.undone) out.undone = true;
       return out;
     }
+    if (op === 'measures.upsert') {
+      const m = !existing.undone && SheetApi.has_('measures') ? Measures.on(value.date) : null;
+      const measuresName = Tabs.get('measures').name;
+      const fromLog = {};
+      existing.changes.filter((c) => c.tab === measuresName && c.after).forEach((c) => {
+        Object.assign(fromLog, SheetApi.rowFromAfter_('measures', c.after));
+      });
+      const source = m || fromLog;
+      const out = {
+        date: value.date,
+        row: m ? m._row : null,
+        fields: SheetApi.pick_(source, Object.keys(value.fields)),
+        objective: (source && source.objective) || Measures.objectiveOn_(Dates.fromKey(value.date)),
+        writeId: existing.id,
+        deduplicated: true,
+      };
+      if (existing.undone) out.undone = true;
+      return out;
+    }
+    const targetDate = op === 'food.copy' ? value.to : value.date;
     const foodName = Tabs.get('food').name;
-    const dayRows = !existing.undone && SheetApi.has_('food') ? FoodLog.rows(value.date) : [];
+    const dayRows = !existing.undone && SheetApi.has_('food') ? FoodLog.rows(targetDate) : [];
     const items = existing.changes
       .filter((c) => c.tab === foodName && c.kind === 'append' && c.after)
       .map((c) => {
@@ -369,8 +407,17 @@ const SheetApi = {
         const live = fromLog.entryId ? dayRows.find((r) => r.entryId === fromLog.entryId) : null;
         return SheetApi.foodItem_(live || fromLog);
       });
-    const totals = FoodLog.dayTotals(value.date);
-    const out = {
+    const totals = FoodLog.dayTotals(targetDate);
+    const out = op === 'food.copy' ? {
+      from: value.from,
+      to: value.to,
+      meal: value.meal,
+      items,
+      totals: totals ? SheetApi.pick_(totals, SheetApi.TOTAL_KEYS) : null,
+      dayState: Diary.dayState(targetDate),
+      writeId: existing.id,
+      deduplicated: true,
+    } : {
       date: value.date,
       meal: value.meal,
       items,
@@ -408,10 +455,12 @@ const SheetApi = {
   /* Action labels (Log "Ação"): readable text + the op summary as JSON ------------------------- */
 
   label_(meta) {
-    const day = Dates.format(meta.date);
+    const day = Dates.format(meta.date || meta.to);
     const text = meta.op === 'diary.upsert' ? `Diário ${day}`
       : meta.op === 'workout.upsert' ? `treino ${meta.session} ${day}`
-        : `alimentação ${meta.meal} ${day}`;
+        : meta.op === 'measures.upsert' ? `Medidas ${day}`
+          : meta.op === 'food.copy' ? `cópia alimentação ${Dates.format(meta.from)} → ${day}`
+            : `alimentação ${meta.meal} ${day}`;
     return `${SheetApi.LABEL_PREFIX} ${text} ${JSON.stringify(meta)}`;
   },
 
@@ -524,6 +573,7 @@ const SheetApi = {
     const plan = SheetApi.has_('plans') ? Plans.on(today) : null;
     const trainingPhase = Sessions.phaseOn(today, plan);
     const all = Workouts.rows();
+    const idx = Progression.index(all);
     let next = null;
     try { next = Sessions.nextSession(today, all); } catch (err) { next = null; }
     let lastWorkout = null;
@@ -531,6 +581,12 @@ const SheetApi = {
       const last = all.slice().sort((a, b) => Dates.compare(a.date, b.date) || a._row - b._row)[all.length - 1];
       const s = Workouts.sessionsOn(all, last.date).find((x) => Exercises.normalize(x.session) === Exercises.normalize(last.session));
       lastWorkout = { date: Dates.key(last.date), session: s.session, state: s.state };
+    }
+    const todayRow = SheetApi.has_('diary') ? Days.get(today) : null;
+    let todayDiary = null;
+    if (todayRow) {
+      todayDiary = SheetApi.compact_(SheetApi.pick_(todayRow, Object.keys(Diary.FIELDS)));
+      if (!Object.keys(todayDiary).length) todayDiary = null;
     }
     return {
       today: Dates.key(today),
@@ -543,10 +599,22 @@ const SheetApi = {
       rotationMode: Sessions.mode(),
       nextSession: next,
       lastWorkout,
+      todayDiary,
+      progressionSuggestions: SheetApi.has_('plans') ? Progression.suggestions(today) : [],
       exercises: Exercises.known(today).map((e) => ({ name: e.name, group: e.group })),
       plan: (plan ? plan.rows : []).filter((r) => r.exercise !== null).map((r) => {
         const p = Sessions.prescription(r, trainingPhase);
-        return Object.assign({ session: r.session, exercise: r.exercise, group: r.group }, p, { prescription: Sessions.prescriptionText(p) });
+        const prev = Progression.previous(idx[Exercises.normalize(r.exercise)] || [], today);
+        const lastWork = prev ? {
+          date: Dates.key(prev.date),
+          session: prev.session,
+          work: SheetApi.work_(prev.sets),
+          text: Progression.setsText(prev.sets),
+        } : null;
+        return Object.assign({ session: r.session, exercise: r.exercise, group: r.group }, p, {
+          prescription: Sessions.prescriptionText(p),
+          lastWork,
+        });
       }),
       foods: SheetApi.has_('foods') ? Foods.names() : [],
       favorites: SheetApi.has_('favorites') && SheetApi.has_('ingredients') ? Favorites.names() : [],
@@ -760,6 +828,50 @@ const SheetApi = {
       items: rows.map((row) => SheetApi.foodItem_(Tabs.readRow('food', row))),
       totals: totals ? SheetApi.pick_(totals, SheetApi.TOTAL_KEYS) : null,
       dayState: Diary.dayState(v.date),
+    };
+  },
+
+  foodCopy_(v) {
+    const r = FoodLog.copy({ from: v.from, to: v.to, meal: v.meal });
+    const totals = FoodLog.dayTotals(v.to);
+    return {
+      from: v.from,
+      to: v.to,
+      meal: v.meal,
+      items: r.rows.map((row) => SheetApi.foodItem_(Tabs.readRow('food', row))),
+      totals: totals ? SheetApi.pick_(totals, SheetApi.TOTAL_KEYS) : null,
+      dayState: Diary.dayState(v.to),
+    };
+  },
+
+  foodsSeed_(v) {
+    const existing = Foods.all();
+    const seen = {};
+    existing.forEach((f) => { seen[Foods.key_(f.name)] = true; });
+    const toInsert = [];
+    v.foods.forEach((f) => {
+      const k = Foods.key_(f.name);
+      if (!k || seen[k]) return;
+      seen[k] = true;
+      toInsert.push(Object.assign({}, f, { valid: Foods.validity(f) }));
+    });
+    if (toInsert.length) {
+      Tabs.appendMany('foods', toInsert);
+      if (typeof Setup !== 'undefined' && Setup.refreshValidationLists) Setup.refreshValidationLists();
+    }
+    return { added: toInsert.length, skipped: v.foods.length - toInsert.length, total: existing.length + toInsert.length };
+  },
+
+  /* measures -------------------------------------------------------------------------------------- */
+
+  measuresUpsert_(v) {
+    const row = Measures.save(v.date, v.fields);
+    const saved = Measures.on(v.date);
+    return {
+      date: v.date,
+      row,
+      fields: SheetApi.pick_(saved, Object.keys(v.fields)),
+      objective: saved ? saved.objective : Measures.objectiveOn_(Dates.fromKey(v.date)),
     };
   },
 

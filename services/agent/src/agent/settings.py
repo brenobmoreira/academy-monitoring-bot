@@ -157,12 +157,13 @@ class Settings(BaseSettings):
         return init_settings, env_settings, dotenv_settings, yaml_source
 
     @classmethod
-    def load(cls) -> Settings:
+    def load(cls, env_file: str | Path | None = None) -> Settings:
         """Builds the settings, turning missing or invalid values into one readable ConfigError."""
         path = settings_file()
         check_no_secrets(path)
+        dotenv = Path(env_file or os.environ.get("ENV_FILE") or ".env")
         try:
-            settings = cls()
+            settings = cls(_env_file=dotenv)  # type: ignore[call-arg]
         except ValidationError as err:
             problems = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in err.errors()]
             raise ConfigError(f"Invalid settings ({path}): " + "; ".join(problems)) from err
@@ -190,6 +191,16 @@ def _provider(model: str) -> str:
 
 def settings_file() -> Path:
     return Path(os.environ.get("SETTINGS_FILE") or DEFAULT_SETTINGS_FILE)
+
+
+def parse_env_arg(argv: list[str] | None = None) -> str | None:
+    """Parses optional `--env <path>` from CLI arguments for multi-client runs."""
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument("--env", dest="env_file", default=None, help="Path to .env file (or set ENV_FILE)")
+    args, _ = parser.parse_known_args(argv)
+    return args.env_file
 
 
 def check_no_secrets(path: Path) -> None:

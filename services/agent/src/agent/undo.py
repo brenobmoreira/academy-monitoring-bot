@@ -65,12 +65,18 @@ def undone_line(undone: dict[str, Any]) -> str:
     op = undone.get("op")
     if op == "diary.upsert":
         what, items = "Diário", [LABELS.get(f, f) for f in undone.get("fields") or []]
+    elif op == "measures.upsert":
+        what, items = "Medidas", [LABELS.get(f, f) for f in undone.get("fields") or []]
     elif op == "workout.upsert":
         what, items = str(undone.get("session") or "Treino"), list(undone.get("exercises") or [])
     elif op == "food.add":
         what, items = str(undone.get("meal") or "Alimentação"), list(undone.get("items") or [])
+    elif op == "food.copy":
+        src = str(undone.get("from") or "")
+        src_ddmm = f"{src[8:10]}/{src[5:7]}" if len(src) >= 10 else src
+        what, items = f"Cópia ({undone.get('meal') or 'Todas'} de {src_ddmm})", []
     else:
         return f"↩️ Desfeito: {undone.get('action') or 'última alteração'}"
     detail = f" ({', '.join(items)})" if items else ""
-    date = str(undone["date"])
+    date = str(undone.get("date") or undone.get("to"))
     return f"↩️ Desfeito: {date[8:10]}/{date[5:7]} · {what}{detail}"

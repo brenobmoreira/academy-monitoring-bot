@@ -46,6 +46,10 @@ class SheetApi(Protocol):
         complete: bool | None = None,
     ) -> dict[str, Any]: ...
     async def add_food(self, date: str, meal: str, items: list[dict[str, Any]]) -> dict[str, Any]: ...
+    async def copy_food(
+        self, date_from: str, date_to: str, meal: str | None = None
+    ) -> dict[str, Any]: ...
+    async def upsert_measures(self, date: str, fields: dict[str, Any]) -> dict[str, Any]: ...
     async def exercise_history(self, name: str, limit: int | None = None) -> dict[str, Any]: ...
     async def diary_range(self, date_from: str, date_to: str) -> dict[str, Any]: ...
     async def workout_range(self, date_from: str, date_to: str) -> dict[str, Any]: ...
@@ -68,6 +72,31 @@ DiaryKey = Literal[
     "notes",
     "waterL",
 ]
+
+
+MeasureKey = Literal[
+    "waistCm",
+    "hipCm",
+    "chestCm",
+    "armCm",
+    "thighCm",
+    "photoFront",
+    "photoSide",
+    "photoBack",
+    "notes",
+]
+
+
+class MeasureFields(BaseModel):
+    waistCm: float | None = Field(None, description="cintura no umbigo em cm")
+    hipCm: float | None = Field(None, description="quadril em cm")
+    chestCm: float | None = Field(None, description="peito/tórax em cm")
+    armCm: float | None = Field(None, description="braço direito em cm")
+    thighCm: float | None = Field(None, description="coxa direita em cm")
+    photoFront: str | None = Field(None, description="link da foto de frente")
+    photoSide: str | None = Field(None, description="link da foto de lado")
+    photoBack: str | None = Field(None, description="link da foto de costas")
+    notes: str | None = Field(None, description="condições da medição (ex.: jejum) ou observações")
 
 
 class DiaryFields(BaseModel):
@@ -307,6 +336,43 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
             response = await sheet.add_food(date, meal, plain_items)
         return journal.record("food.add", response, token)
 
+    async def copy_food(date_from: str, date_to: str, meal: str | None = None) -> dict[str, Any]:
+        """Copia uma refeição (ou todas as refeições do dia, se meal for omitido) de date_from para
+        date_to na aba Alimentação (ex.: "almocei igual a ontem", "repete o café da manhã de ontem").
+
+        Args:
+            date_from: data de origem, yyyy-MM-dd.
+            date_to: data de destino, yyyy-MM-dd.
+            meal: nome da refeição (ex.: Almoço) ou None para copiar o dia inteiro.
+        """
+        args: dict[str, Any] = {"from": date_from, "to": date_to}
+        if meal is not None:
+            args["meal"] = meal
+        req_id, token = journal.request_id_for("food.copy", args)
+        with request_id_scope(req_id), journal.writing():
+            response = await sheet.copy_food(date_from, date_to, meal)
+        return journal.record("food.copy", response, token)
+
+    async def save_measures(
+        date: str, fields: MeasureFields, clear: list[MeasureKey] | None = None
+    ) -> dict[str, Any]:
+        """Grava medidas corporais (circunferências de cintura, quadril, peito, braço, coxa e links
+        de fotos) na aba Medidas. Quando a pessoa informar quadril, peito, braço ou coxa, use esta
+        ferramenta.
+
+        Args:
+            date: dia da medição, yyyy-MM-dd.
+            fields: campos informados na mensagem.
+            clear: campos que a pessoa pediu para apagar.
+        """
+        values = _plain(fields)
+        for key in clear or []:
+            values[key] = None
+        req_id, token = journal.request_id_for("measures.upsert", {"date": date, "fields": values})
+        with request_id_scope(req_id), journal.writing():
+            response = await sheet.upsert_measures(date, values)
+        return journal.record("measures.upsert", response, token)
+
     async def get_exercise_history(name: str, limit: int | None = None) -> dict[str, Any]:
         """Sessões anteriores de um exercício (só work sets), da mais recente para a mais antiga.
 
@@ -351,6 +417,8 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         save_diary,
         save_workout,
         save_food,
+        copy_food,
+        save_measures,
         get_exercise_history,
         get_diary_history,
         get_phase,

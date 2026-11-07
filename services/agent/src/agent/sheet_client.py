@@ -122,6 +122,25 @@ class SheetClient:
             "food.add", {"date": date, "meal": meal, "items": items}, request_id=request_id
         )
 
+    async def copy_food(
+        self,
+        date_from: str,
+        date_to: str,
+        meal: str | None = None,
+        *,
+        request_id: str | None = None,
+    ) -> Response:
+        """Copies a meal (or all meals when `meal` is None) from `date_from` to `date_to`."""
+        args: dict[str, Any] = {"from": date_from, "to": date_to}
+        if meal is not None:
+            args["meal"] = meal
+        return await self.call("food.copy", args, request_id=request_id)
+
+    async def upsert_measures(
+        self, date: str, fields: dict[str, Any], *, request_id: str | None = None
+    ) -> Response:
+        return await self.call("measures.upsert", {"date": date, "fields": fields}, request_id=request_id)
+
     async def exercise_history(self, name: str, limit: int | None = None) -> Response:
         args: dict[str, Any] = {"name": name}
         if limit is not None:

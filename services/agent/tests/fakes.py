@@ -42,6 +42,15 @@ class FakeSheet:
     async def add_food(self, date, meal, items):
         return self._next("food.add", {"date": date, "meal": meal, "items": items})
 
+    async def copy_food(self, date_from, date_to, meal=None):
+        args = {"from": date_from, "to": date_to}
+        if meal is not None:
+            args["meal"] = meal
+        return self._next("food.copy", args)
+
+    async def upsert_measures(self, date, fields):
+        return self._next("measures.upsert", {"date": date, "fields": fields})
+
     async def exercise_history(self, name, limit=None):
         args = {"name": name} if limit is None else {"name": name, "limit": limit}
         return self._next("exercise.history", args)

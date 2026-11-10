@@ -73,8 +73,8 @@ FORMULA_FREE = "=+-@"  # a cell starting with one of these may be run as a formu
 FORMULA_NAME = "=+@"  # catalogue names: the sheet matches them, so only the sure formulas are refused
 
 
-def _text(max_length: int, *, name: bool = False):
-    """Non-empty text of at most `max_length` characters that cannot be read as a formula.
+def _text(max_length: int, *, name: bool = False) -> Callable[[str], str]:
+    """Check for non-empty text of at most `max_length` characters that cannot be read as a formula.
     `name`: a catalogue name or session (the sheet also matches it); a leading "-" is left to it."""
     bad = FORMULA_NAME if name else FORMULA_FREE
 
@@ -87,7 +87,7 @@ def _text(max_length: int, *, name: bool = False):
             raise ValueError(f"texto não pode começar com {_listing(bad)}")
         return value
 
-    return Annotated[str, AfterValidator(check)]
+    return check
 
 
 def _listing(chars: str) -> str:
@@ -105,18 +105,23 @@ def _range(low: float, high: float):
     return check
 
 
-def _number(low: float, high: float):
-    """A JSON number (no bool, no string) in [low, high]; ints stay ints."""
-    return Annotated[int | float, AfterValidator(_range(low, high))]
-
-
-def _integer(low: int, high: int):
+def _whole(value: Any) -> Any:
     """A whole JSON number: 8.0 counts as 8 (Number.isInteger in the validator)."""
+    return int(value) if isinstance(value, float) and value.is_integer() else value
 
-    def whole(value: Any) -> Any:
-        return int(value) if isinstance(value, float) and value.is_integer() else value
 
-    return Annotated[int, BeforeValidator(whole), AfterValidator(_range(low, high))]
+# Numbers are JSON numbers (no bool, no string); ints stay ints.
+Name = Annotated[str, AfterValidator(_text(10_000, name=True))]  # the sheet matches it; no length limit there
+Meal = Annotated[str, AfterValidator(_text(60))]
+Note = Annotated[str, AfterValidator(_text(200))]
+Equipment = Annotated[str, AfterValidator(_text(100))]
+Unit = Annotated[str, AfterValidator(_text(20))]
+Kg = Annotated[int | float, AfterValidator(_range(0, 1000))]
+Reps = Annotated[int, BeforeValidator(_whole), AfterValidator(_range(1, 100))]
+Rir = Annotated[int | float, AfterValidator(_range(0, 10))]
+Pain = Annotated[int, BeforeValidator(_whole), AfterValidator(_range(0, 10))]
+Qty = Annotated[int | float, AfterValidator(_range(0.001, 100000))]
+Portions = Annotated[int | float, AfterValidator(_range(0.01, 50))]
 
 
 class _Model(BaseModel):
@@ -135,24 +140,24 @@ class _Model(BaseModel):
 
 
 class WarmupSet(_Model):
-    kg: _number(0, 1000)
-    reps: _integer(1, 100)
+    kg: Kg
+    reps: Reps
 
 
 class WorkSet(WarmupSet):
     # The validator checks rir as a number (0..10), not an integer; null means "not informed".
     NULLABLE: ClassVar[frozenset[str]] = frozenset({"rir"})
-    rir: _number(0, 10) | None = None
+    rir: Rir | None = None
 
 
 class Exercise(_Model):
-    name: _text(10_000, name=True)  # the sheet matches it against the catalogue; no length limit there
+    name: Name
     work: Annotated[list[WorkSet], Field(min_length=1, max_length=2)]
     warmup: WarmupSet | None = None
     feeder: WarmupSet | None = None
-    pain: _integer(0, 10) | None = None
-    note: _text(200) | None = None
-    equipment: _text(100) | None = None
+    pain: Pain | None = None
+    note: Note | None = None
+    equipment: Equipment | None = None
 
 
 def _check_date(value: str, info: ValidationInfo) -> str:
@@ -175,7 +180,7 @@ Day = Annotated[str, AfterValidator(_check_date)]
 
 class WorkoutArgs(_Model):
     date: Day
-    session: _text(10_000, name=True)
+    session: Name
     exercises: list[Exercise]
     complete: bool = False
 
@@ -196,23 +201,23 @@ class WorkoutArgs(_Model):
 
 
 class FoodItem(_Model):
-    food: _text(10_000, name=True)
-    qty: _number(0.001, 100000)
-    unit: _text(20) | None = None
+    food: Name
+    qty: Qty
+    unit: Unit | None = None
     measure: Literal["Pesada", "Rótulo", "Estimada"] | None = None
-    note: _text(200) | None = None
+    note: Note | None = None
 
 
 class FavoriteItem(_Model):
-    favorite: _text(10_000, name=True)
-    portions: _number(0.01, 50) | None = None
+    favorite: Name
+    portions: Portions | None = None
 
 
 class DescriptionItem(_Model):
-    description: _text(200)
-    qty: _number(0.001, 100000) | None = None
-    unit: _text(20) | None = None
-    note: _text(200) | None = None
+    description: Note
+    qty: Qty | None = None
+    unit: Unit | None = None
+    note: Note | None = None
 
 
 def _item_tag(value: Any) -> str | None:
@@ -233,7 +238,7 @@ Item = Annotated[
 
 class FoodArgs(_Model):
     date: Day
-    meal: _text(60)
+    meal: Meal
     items: Annotated[list[Item], Field(min_length=1, max_length=20)]
 
     @field_validator("meal")

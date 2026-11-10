@@ -3,11 +3,12 @@ import copy
 import json
 import zlib
 from datetime import date
+from typing import Any
 
 import pytest
 
 from agent import miniapp
-from agent.commands import COMMANDS, Context
+from agent.commands import COMMANDS, Context, Reply
 from agent.handler import Handler
 from agent.miniapp import (
     EXPIRED,
@@ -38,7 +39,13 @@ TODAY = date(2026, 11, 9)
 URL = "https://example.github.io/app/"
 SID = "0123456789abcdef0123456789abcdef"  # the page's submission id (random per draft)
 
-WORKOUT = {
+
+def markup(reply: Reply) -> dict[str, Any]:
+    assert reply.reply_markup is not None
+    return reply.reply_markup
+
+
+WORKOUT: dict[str, Any] = {
     "v": 1,
     "t": "workout",
     "id": SID,
@@ -57,7 +64,7 @@ WORKOUT = {
         ],
     },
 }
-FOOD = {
+FOOD: dict[str, Any] = {
     "v": 1,
     "t": "food",
     "id": SID,
@@ -204,7 +211,8 @@ def test_request_id_depends_on_chat_draft_and_op_and_not_on_the_args():
     assert a != request_id(8, SID, "food.add")
     assert a != request_id(7, "f" * 32, "food.add")
     assert a != request_id(7, SID, "workout.upsert")
-    assert len(request_id(-1001234567890, SID, "workout.upsert")) <= 120  # the sheet's MAX_REQUEST_ID
+    long = request_id(-1001234567890, SID, "workout.upsert")
+    assert long is not None and len(long) <= 120  # the sheet's MAX_REQUEST_ID
     assert request_id(None, SID, "food.add") is None
 
 
@@ -254,7 +262,7 @@ def test_the_expired_retry_message_points_to_a_safe_resend():
 # ---- handle ---------------------------------------------------------------------------------
 
 
-WORKOUT_OK = {
+WORKOUT_OK: dict[str, Any] = {
     "ok": True,
     "result": {
         "writeId": "w1",
@@ -274,7 +282,7 @@ async def test_handle_writes_a_workout_with_a_request_id_and_confirms_from_the_r
     assert sheet.request_ids[0] == request_id(5, SID, "workout.upsert")
     assert reply.html and not reply.transient and not reply.failed
     assert "Push A" in reply.text and "80×8" in reply.text and "82,5" not in reply.text  # sheet's data only
-    assert [b["callback_data"] for b in reply.reply_markup["inline_keyboard"][0]] == ["ok", "undo:w1", "fix"]
+    assert [b["callback_data"] for b in markup(reply)["inline_keyboard"][0]] == ["ok", "undo:w1", "fix"]
 
 
 async def test_handle_writes_food():
@@ -285,7 +293,7 @@ async def test_handle_writes_food():
     sheet = FakeSheet(food_add=[ok])
     reply = await handle(sheet, raw(FOOD), 6, TODAY)
     assert sheet.calls[0][0] == "food.add" and sheet.calls[0][1]["items"] == FOOD["args"]["items"]
-    assert reply.reply_markup["inline_keyboard"][0][1]["callback_data"] == "undo:w2"
+    assert markup(reply)["inline_keyboard"][0][1]["callback_data"] == "undo:w2"
 
 
 async def test_a_confirmation_without_write_id_has_no_buttons():
@@ -509,7 +517,7 @@ async def test_app_without_miniapp_url_says_it_is_not_configured():
 async def test_app_sends_the_reply_keyboard():
     sheet = FakeSheet(catalog=[{"ok": True, "result": CATALOG}])
     reply = await COMMANDS["app"].run(Context(sheet=sheet, today=TODAY, miniapp_url=URL), "")
-    assert reply.reply_markup["is_persistent"] is True
+    assert markup(reply)["is_persistent"] is True
     assert "deixei de fora" not in reply.text
 
 
@@ -619,7 +627,7 @@ async def test_handle_retries_up_to_three_times_with_the_same_request_id():
     reply = await handle(sheet, raw(FOOD), 5, TODAY, PendingStore())
     assert len(sheet.calls) == 3 and len(set(sheet.request_ids)) == 1
     assert sheet.request_ids[0] == request_id(5, SID, "food.add")
-    assert reply.reply_markup["inline_keyboard"][0][1]["callback_data"] == "undo:w9"
+    assert markup(reply)["inline_keyboard"][0][1]["callback_data"] == "undo:w9"
 
 
 async def test_a_validation_refusal_is_not_retried():
@@ -634,7 +642,7 @@ async def test_a_persistent_outage_keeps_the_write_and_offers_the_retry_button()
     reply = await handle(sheet, raw(FOOD), 5, TODAY, store)
     assert len(sheet.calls) == 3 and reply.transient
     assert reply.text.startswith("⚠ Planilha indisponível, nada confirmado")
-    [[button]] = reply.reply_markup["inline_keyboard"]
+    [[button]] = markup(reply)["inline_keyboard"]
     assert button["text"] == "🔁 Tentar de novo"
     assert button["callback_data"].startswith("retry:") and len(button["callback_data"].encode()) <= 64
 
@@ -711,7 +719,9 @@ def test_the_pending_store_is_bounded_and_expires():
     store = PendingStore(max_size=20, ttl_s=100, clock=lambda: now[0])
     keys = [store.put(miniapp.Pending("food.add", {"n": i}, f"r{i}", 42)) for i in range(25)]
     assert store.get(keys[0], 42) is None and store.get(keys[4], 42) is None
-    assert store.get(keys[5], 42).args == {"n": 5} and store.get(keys[24], 42).request_id == "r24"
+    fifth, last = store.get(keys[5], 42), store.get(keys[24], 42)
+    assert fifth is not None and fifth.args == {"n": 5}
+    assert last is not None and last.request_id == "r24"
     assert store.get(keys[24], 43) is None  # another chat never gets it
     now[0] = 101
     assert store.get(keys[24], 42) is None

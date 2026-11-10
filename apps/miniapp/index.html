@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>Shape</title>
+  <link rel="icon" href="assets/shape.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <p class="preview-banner" id="preview-banner" hidden>Modo prévia: catálogo de exemplo, nada vai para o bot. O JSON aparece na revisão.</p>
+
+    <header class="coach" id="coach">
+      <div class="shape" id="shape" data-state="idle" aria-hidden="true">
+        <!-- filled by src/avatar.js (ShapeAvatar.mount) -->
+      </div>
+      <div class="bubble" role="status" aria-live="polite">
+        <span class="bubble-name">Shape</span>
+        <p class="bubble-text" id="say">Carregando a ficha…</p>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist" aria-label="O que registrar">
+      <button type="button" role="tab" class="tab" id="tab-workout" data-view="workout" aria-selected="true">Treino</button>
+      <button type="button" role="tab" class="tab" id="tab-food" data-view="food" aria-selected="false">Refeição</button>
+    </nav>
+
+    <div class="dates" id="dates" role="radiogroup" aria-label="Data do registro"></div>
+
+    <main id="view" class="view"></main>
+
+    <section id="review" class="review" hidden></section>
+
+    <div class="dock" id="dock" hidden>
+      <button type="button" class="dock-secondary" id="dock-secondary" hidden></button>
+      <button type="button" class="dock-primary" id="dock-primary"></button>
+    </div>
+
+    <div class="sheet-backdrop" id="sheet-backdrop" hidden></div>
+    <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" hidden></div>
+  </div>
+
+  <script src="src/core.js"></script>
+  <script src="src/avatar.js"></script>
+  <script src="src/motion.js"></script>
+  <script src="src/app.js"></script>
+  <script>
+    // Runs right after app.js: if it never started (a WebView too old for it), say so plainly.
+    if (!window.__shapeStarted) {
+      document.getElementById('shape').setAttribute('data-state', 'alert');
+      document.getElementById('say').textContent = 'Este Telegram está desatualizado. Atualize o app ou registre pelo chat do bot.';
+    }
+  </script>
+</body>
+</html>

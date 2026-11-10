@@ -192,3 +192,38 @@ def test_custom_env_file_via_argument_or_env_variable(env, monkeypatch, tmp_path
     assert parse_env_arg(["--env", ".env.luan"]) == ".env.luan"
     assert parse_env_arg([]) is None
 
+
+def test_miniapp_is_off_by_default(env):
+    assert Settings.load().MINIAPP_URL == ""
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://luan.github.io/app/", "https://example.com", "https://a.b.c:8443/x?y=1", " https://ok.dev/ "],
+)
+def test_miniapp_url_accepts_https_addresses(env, monkeypatch, url):
+    monkeypatch.setenv("MINIAPP_URL", url)
+    assert Settings.load().MINIAPP_URL == url.strip()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.com/",
+        "https://",
+        "https://?x",
+        "https:///path",
+        "https://exa mple.com/",
+        "https://example.com/#v=1",
+        "https://example.com/#",
+        "https://user:pw@example.com/",
+        "https://-bad-.com/",
+        "https://example.com:notaport/",
+        "ftp://example.com/",
+        "example.com",
+    ],
+)
+def test_miniapp_url_must_be_a_real_https_address(env, monkeypatch, url):
+    monkeypatch.setenv("MINIAPP_URL", url)
+    with pytest.raises(ConfigError, match="MINIAPP_URL"):
+        Settings.load()

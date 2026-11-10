@@ -30,6 +30,7 @@ commands='[
   {"command": "exercicios", "description": "Nomes exatos dos exercícios por grupo; /exercicios peito filtra"},
   {"command": "semana", "description": "Análise da semana (seg–dom): situação e recomendação; /semana 1 é a passada"},
   {"command": "fase", "description": "Objetivo em vigor, desde quando, metas e última recomendação; /fase 01/08 numa data"},
+  {"command": "app", "description": "Abrir formulários de treino e refeição"},
   {"command": "desfazer", "description": "Desfaz a última gravação na planilha (do bot ou do menu)"},
   {"command": "help", "description": "Exemplos de mensagem e esta lista de comandos"}
 ]'

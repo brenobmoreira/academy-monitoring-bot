@@ -36,7 +36,8 @@ EXAMPLES = (
     "• almoço: arroz 150 g, frango 120 g, salada\n"
     "• ontem fome 3 cansaço 4, dieta completa\n"
     "• como foi meu supino inclinado nas últimas semanas?\n"
-    "Eu gravo na planilha e confirmo o que foi gravado."
+    "Eu gravo na planilha e confirmo o que foi gravado.\n"
+    "Prefere um formulário? Envie /app para abrir os de treino e refeição."
 )
 SHEET_DOWN = "⚠ A planilha não respondeu. Tente de novo em alguns minutos."
 MAX_WEEKS_BACK = 12
@@ -66,6 +67,7 @@ class Context:
     sheet: CommandSheet | None
     today: date
     chat_id: int = 0
+    miniapp_url: str = ""  # empty: the Mini App is not configured
 
     def api(self) -> CommandSheet:
         if self.sheet is None:
@@ -337,6 +339,30 @@ def goal_text(goal: dict[str, Any]) -> str:
     if _is_number(goal.get("stepsPerDay")):
         parts.append(f"{_fmt(goal['stepsPerDay'])} passos/dia")
     return " · ".join(parts) or "sem alvos numéricos"
+
+
+@command("app", "Abrir formulários de treino e refeição")
+async def app(ctx: Context, args: str) -> Reply:
+    from agent import miniapp  # imported here: miniapp imports Reply from this module
+
+    if not ctx.miniapp_url:
+        return Reply("O Mini App ainda não está configurado (falta MINIAPP_URL).")
+    response = await ctx.api().catalog()
+    if not response.get("ok"):
+        return sheet_failure(response)
+    try:
+        markup, dropped = miniapp.keyboard_markup(ctx.miniapp_url, response["result"])
+    except miniapp.CatalogTooLarge as err:
+        return Reply(
+            f"⚠ O catálogo ficou grande demais para o link do Mini App: {err.length} caracteres, "
+            f"o máximo é {err.max_len}, mesmo sem cargas, prescrições e alimentos. "
+            "Reduza o catálogo na planilha ou use uma MINIAPP_URL mais curta."
+        )
+    text = "Toque em 🏋️ Treino ou 🍽️ Refeição no teclado abaixo. Eu confirmo o que a planilha gravou."
+    if dropped:
+        names = ", ".join(miniapp.DROPPED_LABELS[k] for k in dropped)
+        text += f"\nPara caber no link, deixei de fora: {names}."
+    return Reply(text, reply_markup=markup)
 
 
 @command("desfazer", "Desfaz a última gravação na planilha (do bot ou do menu)")

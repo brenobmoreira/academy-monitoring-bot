@@ -9,12 +9,12 @@ import threading
 from collections import OrderedDict
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any, NamedTuple, Protocol
+from typing import Any, NamedTuple, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import httpx
 
-from agent import buttons
+from agent import buttons, miniapp
 from agent.bot import MEDIA_UNREADABLE, MESSAGE_DEADLINE_AT, Answer, Bot, Media
 from agent.commands import COMMANDS, CommandSheet, Context, Reply, parse_command
 from agent.format import escape, split
@@ -176,6 +176,8 @@ class Handler:
         deduplicator: UpdateDeduplicator | None = None,
         message_deadline_s: float | None = None,
         send_reserve_s: float = SEND_RESERVE_S,
+        miniapp_url: str = "",
+        pending: miniapp.PendingStore | None = None,
     ) -> None:
         self._allowed = allowed_chat_ids
         self._bot = bot
@@ -189,6 +191,8 @@ class Handler:
         self._deduplicator = deduplicator if deduplicator is not None else UpdateDeduplicator()
         self._message_deadline_s = message_deadline_s
         self._send_reserve_s = send_reserve_s
+        self._miniapp_url = miniapp_url
+        self._pending = pending if pending is not None else miniapp.PendingStore()
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         """Never raises: a webhook that errors makes Telegram resend the same update."""
@@ -252,7 +256,9 @@ class Handler:
         chat_id = (message.get("chat") or {}).get("id")
         if chat_id not in self._allowed:
             return True
-        if not isinstance(text, str) or not text.strip():
+        if "web_app_data" in message:
+            reply = await self._miniapp(message["web_app_data"], chat_id, update_id)
+        elif not isinstance(text, str) or not text.strip():
             reply = await self._media(message, chat_id, update_id)
             if reply is None:
                 return True
@@ -268,6 +274,24 @@ class Handler:
             log.exception("could not send the reply to chat %s", chat_id)
             return False
         return not reply.transient
+
+    async def _miniapp(self, web_app_data: Any, chat_id: int, update_id: int | None) -> Reply:
+        """The form of the Mini App: validated and written without the model or any download."""
+        raw = web_app_data.get("data") if isinstance(web_app_data, dict) else None
+        try:
+            if self._sheet is None:
+                raise RuntimeError("this handler has no sheet API")
+            sheet = cast(miniapp.MiniappSheet, self._sheet)
+            return await miniapp.handle(
+                sheet,
+                raw if isinstance(raw, str) else "",
+                chat_id,
+                self._clock().date(),
+                self._pending,
+            )
+        except Exception:
+            log.exception("mini app data failed on update %s", update_id)
+            return Reply(FAILURE, failed=True, transient=True)
 
     async def _run_bot(
         self, text: str, message: dict[str, Any], update_id: Any, media: list[Media] | None = None
@@ -334,7 +358,12 @@ class Handler:
 
     async def _command(self, name: str, args: str, chat_id: int) -> Reply:
         """Registered commands answer from the sheet alone; they never reach the model."""
-        ctx = Context(sheet=self._sheet, today=self._clock().date(), chat_id=chat_id)
+        ctx = Context(
+            sheet=self._sheet,
+            today=self._clock().date(),
+            chat_id=chat_id,
+            miniapp_url=self._miniapp_url,
+        )
         try:
             return await COMMANDS[name].run(ctx, args)
         except Exception:
@@ -375,6 +404,15 @@ class Handler:
                 await self._remove_keyboard(chat_id, message_id)
             await self._send(chat_id, Reply(text), reply_to=message_id)
             return not sheet_down
+        if verb == buttons.RETRY:
+            if self._sheet is None:
+                raise RuntimeError("this handler has no sheet API")
+            sheet = cast(miniapp.MiniappSheet, self._sheet)
+            reply = await miniapp.retry(sheet, ids[0] if ids else "", self._pending, chat_id)
+            if not reply.transient:  # otherwise keep the button for another try
+                await self._remove_keyboard(chat_id, message_id)
+            await self._send(chat_id, reply, reply_to=message_id)
+            return not reply.transient
         if verb == buttons.FIX:
             text, markup = buttons.fix_prompt(message.get("text"))
             await self._send(chat_id, Reply(text, reply_markup=markup), reply_to=message_id)
@@ -445,4 +483,5 @@ def build_handler(
         media_max_bytes=settings.MEDIA_MAX_BYTES,
         message_deadline_s=settings.MESSAGE_DEADLINE_S,
         deduplicator=deduplicator,
+        miniapp_url=settings.MINIAPP_URL,
     )

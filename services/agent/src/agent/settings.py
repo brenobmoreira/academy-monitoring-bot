@@ -12,8 +12,10 @@ rejected, so the YAML can be committed or mounted without leaking anything.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Annotated, Any, ClassVar
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
@@ -28,6 +30,27 @@ from pydantic_settings import (
 from agent import logs
 
 DEFAULT_SETTINGS_FILE = Path(__file__).resolve().parents[2] / "settings.yaml"
+
+
+_HOST = re.compile(r"(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*")
+
+
+def _valid_https_url(value: str) -> bool:
+    """https, a real host name (no userinfo), a valid port, no fragment and no whitespace."""
+    if "#" in value or any(c.isspace() for c in value):
+        return False
+    try:
+        parts = urlsplit(value)
+        parts.port  # noqa: B018 - raises ValueError for a bad port
+    except ValueError:
+        return False
+    host = parts.hostname or ""
+    return (
+        parts.scheme == "https"
+        and parts.username is None
+        and parts.password is None
+        and _HOST.fullmatch(host.lower()) is not None
+    )
 
 
 class ConfigError(RuntimeError):
@@ -91,6 +114,20 @@ class Settings(BaseSettings):
     MEDIA_ENABLED: bool = True
     # Largest file downloaded and sent to the model; the Bot API's getFile stops at 20 MB.
     MEDIA_MAX_BYTES: int = Field(5_000_000, ge=1, le=20_000_000)
+
+    # --- Mini App (treino and refeição forms; see docs/specs/2026-11-09-miniapp-design.md) --------
+    # HTTPS address of the static page; empty = /app answers that it is not configured.
+    MINIAPP_URL: str = ""
+
+    @field_validator("MINIAPP_URL", mode="after")
+    @classmethod
+    def _miniapp_url_is_https(cls, value: str) -> str:
+        value = value.strip()
+        if value and not _valid_https_url(value):
+            raise ValueError(
+                "must be an https://host/... address without '#' or spaces (or empty to disable)"
+            )
+        return value
 
     @field_validator("ALLOWED_CHAT_IDS", mode="before")
     @classmethod

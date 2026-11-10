@@ -318,4 +318,3 @@ async def test_copy_food_and_save_measures_journal_writes():
     assert "Cópia (Almoço de 20/09)" in undone_line(
         {"op": "food.copy", "from": "2026-09-20", "to": "2026-09-21", "meal": "Almoço"}
     )
-

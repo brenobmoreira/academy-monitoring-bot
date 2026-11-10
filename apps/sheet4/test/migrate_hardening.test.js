@@ -109,6 +109,22 @@ test('F1: without hand edits the same kill is recovered and the migration finish
   assert.equal(comparable(ctx), original);
 });
 
+test('a recovery refuses an old-format {$f} snapshot and writes nothing (it may have been literal text)', () => {
+  const ctx = boot();
+  killAtFirstInsert(ctx);
+  // One of the body's cell changes, rewritten the way the previous format recorded "=..." text.
+  const logged = ctx.Tabs.read('log').filter((r) => !r.undone && r.before && String(r.before) !== 'null' && !String(r.before).includes('$f')).pop();
+  const before = JSON.parse(logged.before);
+  const a1 = Object.keys(before)[0];
+  before[a1] = { $f: '=1+1' };
+  ctx.Tabs.update('log', logged._row, { before: JSON.stringify(before) });
+  freshExecution(ctx);
+  const cell = ctx.SpreadsheetApp.getActive().getSheetByName(logged.tab).getRange(a1);
+  const shown = cell.getValue();
+  assert.throws(() => ctx.wizardStatus(), /antes da proteção contra fórmulas/);
+  assert.deepEqual([cell.getFormula(), cell.getValue()], ['', shown], 'no formula was written');
+});
+
 test('F1: a tab the migration created, with something typed in it after the kill, is not deleted', () => {
   const ctx = boot();
   ctx.__args = { json: clientText('zoio') };

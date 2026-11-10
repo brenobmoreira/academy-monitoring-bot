@@ -487,6 +487,26 @@ test('requestId idempotency: retrying food.add, diary.upsert and workout.upsert 
   assert.equal(recent[0].sig, undefined);
 });
 
+test('requestId idempotency holds for the retry window however many Log rows came after the write', () => {
+  const ctx = setup();
+  const args = { date: '2026-10-20', meal: 'Almoço', items: [{ food: 'Arroz branco cozido', qty: 150 }] };
+  const first = ok(ctx.api('food.add', args, 'tg:42:food.add:late'));
+  const filler = [];
+  for (let i = 0; i < 450; i++) filler.push({ severity: 'Info', code: `f${i}`, tab: 'T', cell: 'A1', finding: 'x', action: '', state: 'Aberto' });
+  ctx.Tabs.ensure('audit');
+  ctx.ChangeLog.run('Outras gravações', () => ctx.Tabs.appendMany('audit', filler));
+  assert.ok(ctx.Tabs.read('log').length > 400, 'the write is far beyond the last 200 Log rows');
+  const retry = ok(ctx.api('food.add', args, 'tg:42:food.add:late'));
+  assert.equal(retry.deduplicated, true);
+  assert.equal(retry.writeId, first.writeId);
+  assert.equal(ctx.Tabs.read('food').length, 1, 'the meal is not appended twice');
+  // The window is time based: a write older than it (and beyond the last rows) is no longer looked up.
+  const old = new Date(Date.parse(NOW) - (ctx.SheetApi.REQUEST_ID_WINDOW_HOURS + 1) * 3600 * 1000);
+  ctx.Tabs.read('log').filter((r) => r.action !== 'Outras gravações').forEach((r) => ctx.Tabs.update('log', r._row, { at: old }));
+  ctx.Tabs.read('log').filter((r) => r.action === 'Outras gravações').slice(0, 300).forEach((r) => ctx.Tabs.update('log', r._row, { at: old }));
+  assert.equal(ctx.SheetApi.findByRequestId_('tg:42:food.add:late'), null);
+});
+
 test('requestId conflict, user undo vs rolled-back partial failure, entryId lookup and log scan', () => {
   const ctx = setup({
     tabs: {
@@ -606,3 +626,30 @@ test('catalog includes lastWork per plan row, todayDiary, and progressionSuggest
   assert.ok(ok(ctx.api('catalog', {})).foods.includes('Tilápia grelhada RU'));
 });
 
+
+/* User text starting with = + - @ stays literal ---------------------------------------------------- */
+
+test('api writes: description, meal, item note and workout note starting with = + - @ round-trip as text', () => {
+  const ctx = setup();
+  const r = ok(ctx.api('food.add', {
+    date: '2026-10-20', meal: '-Lanche',
+    items: [{ description: '=1+1', note: '+5kg' }, { food: 'Arroz branco cozido', qty: 100, note: '@mae' }, { description: 'Pastel normal' }],
+  }));
+  assert.deepEqual(r.items.map((i) => i.food), ['=1+1', 'Arroz branco cozido', 'Pastel normal']);
+  const w = ok(ctx.api('workout.upsert', {
+    date: '2026-10-20', session: 'Upper',
+    exercises: [{ name: 'Supino inclinado', note: '-dor leve no ombro', work: [{ kg: 60, reps: 8, rir: 2 }] }],
+  }));
+  assert.equal(w.exercises[0].note, '-dor leve no ombro');
+  const d = ok(ctx.api('day.get', { date: '2026-10-20' }));
+  assert.deepEqual(d.food.map((i) => [i.meal, i.food, i.note || null]), [
+    ['-Lanche', '=1+1', '+5kg'], ['-Lanche', 'Arroz branco cozido', '@mae'], ['-Lanche', 'Pastel normal', null],
+  ]);
+  assert.equal(d.workout[0].exercises[0].note, '-dor leve no ombro');
+  assert.equal(d.totals.kcal, 128, 'numbers untouched');
+  const sheets = ctx.SpreadsheetApp.getActive().getSheets();
+  sheets.forEach((s) => {
+    const rng = s.getDataRange();
+    assert.equal(rng.getFormulas().flat().filter((f) => /1\+1/.test(f)).length, 0, `no stray formula in ${s.getName()}`);
+  });
+});

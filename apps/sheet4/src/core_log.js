@@ -255,13 +255,16 @@ const ChangeLog = {
     });
   },
 
-  /** JSON with dates and formulas tagged. */
+  /**
+   * JSON with dates and formulas tagged. Only snapshot formulas ({$f}, Tabs.snapCell) are tagged:
+   * a string that starts with "=" is literal text and stays a string.
+   */
   encode(obj) {
     const out = {};
     Object.keys(obj).forEach((k) => {
       const v = obj[k];
       if (v instanceof Date) out[k] = { $d: v.toISOString() };
-      else if (typeof v === 'string' && v.charAt(0) === '=') out[k] = { $f: v };
+      else if (Tabs.isSnapFormula(v)) out[k] = v.legacy ? { $f: v.$f } : { $f: v.$f, $v: 2 };
       else out[k] = v === undefined ? null : v;
     });
     return JSON.stringify(out);
@@ -274,7 +277,11 @@ const ChangeLog = {
     Object.keys(obj).forEach((k) => {
       const v = obj[k];
       if (v && typeof v === 'object' && v.$d !== undefined) out[k] = new Date(v.$d);
-      else if (v && typeof v === 'object' && v.$f !== undefined) out[k] = v.$f;
+      else if (v && typeof v === 'object' && v.$f !== undefined) {
+        out[k] = Tabs.snapCell(String(v.$f), v.$f);
+        // Before $v: 2, any text starting with "=" was tagged {$f}, formula or not: undo refuses these.
+        if (v.$v !== 2 && Tabs.isSnapFormula(out[k])) out[k].legacy = true;
+      }
       else out[k] = v === null ? '' : v;
     });
     return out;
@@ -419,6 +426,9 @@ const Undo = {
 
   conflict_(c, skip) {
     if (c.kind === 'structure') return Undo.structureConflict_(c.after || {});
+    // What undo would write back: an old-format {$f} may have been literal text, so it is refused.
+    const old = c.kind === 'append' ? [] : Object.keys(c.before || {}).filter((k) => Tabs.isSnapFormula(c.before[k]) && c.before[k].legacy);
+    if (old.length) return `"${c.tab}" (${old.join(', ')}) foi registrada antes da proteção contra fórmulas, e o registro não distingue texto de fórmula`;
     const sheet = SpreadsheetApp.getActive().getSheetByName(c.tab);
     if (!sheet) return `aba "${c.tab}" não existe mais`;
     if (c.kind === 'delete') return null;
@@ -510,17 +520,17 @@ const Undo = {
   },
 
   cellValue_(range) {
-    const f = range.getFormulas()[0][0];
-    return f || range.getValue();
+    return Tabs.snapCell(range.getFormulas()[0][0], range.getValue());
   },
 
+  /** Writes a snapshot cell back: a formula only when it was recorded as one, text as text. */
   setCell_(range, value) {
-    if (typeof value === 'string' && value.charAt(0) === '=') { range.setFormula(value); return; }
+    if (Tabs.isSnapFormula(value)) { range.setFormula(value.$f); return; }
     const v = value === null || value === undefined ? '' : value;
     // The value being restored may predate a strict validation added later (the 4.0 layout after a
     // migration). Apps Script would reject the write, and only at the next read, so drop that rule first.
     if (Undo.rejects_(range.getDataValidation(), v)) range.clearDataValidations();
-    range.setValue(Tabs.input(v));
+    range.setValue(Tabs.text(v));
   },
 
   /** True when a strict list or range validation would refuse v (other criteria are not checked). */
@@ -551,6 +561,7 @@ const Undo = {
   },
 
   same_(a, b) {
+    if (Tabs.isSnapFormula(a) || Tabs.isSnapFormula(b)) return Tabs.isSnapFormula(a) && Tabs.isSnapFormula(b) && a.$f === b.$f;
     return Tabs.sameCell(a, b);
   },
 

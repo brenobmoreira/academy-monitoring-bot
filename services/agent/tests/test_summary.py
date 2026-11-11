@@ -189,6 +189,12 @@ def test_food_sums_split_carbs_and_fat_for_this_write_and_for_the_day_when_the_s
     # one item: the line is still there, because the item line shows only kcal and protein
     one = write([item("Arroz", 128, 2.6, 28.1, 0.2)], day)
     assert confirmation([one])[-2] == "Lançado agora: 128 kcal · P 3 g · C 28 g · G 0 g"
+    # an item without carbs/fat: a partial sum is never shown as the total
+    bare = {"food": "Pão", "qty": 50, "unit": "g", "calc": "Calculado", "kcal": 150, "protein": 4.0}
+    mixed = write([item("Arroz", 128, 2.6, 28.1, 0.2), bare], day)
+    assert confirmation([mixed])[-2] == "Lançado agora: 278 kcal · P 7 g"
+    half = write([item("Arroz", 128, 2.6, 28.1, 0.2), {**bare, "carbs": 25.0}], day)
+    assert confirmation([half])[-2] == "Lançado agora: 278 kcal · P 7 g · C 53 g"
 
 
 def test_one_item_without_carbs_or_fat_gets_no_sum_line():

@@ -212,13 +212,14 @@ def _entry(items: list[dict[str, Any]]) -> str | None:
     """The sum of what this message wrote to the meal (not the whole meal: earlier writes are
     not in it). Shown only when it adds something to the item lines: carbs or fat, or a sum."""
     counted = [i for i in items if i.get("calc") != NO_CALC and i.get("kcal") is not None]
-    has_split = any(i.get(k) is not None for i in counted for k in ("carbs", "fat"))
-    if not counted or (len(counted) < 2 and not has_split):
-        return None
+    # A macro some item lacks would be a partial sum shown as the total: leave it out.
     total: dict[str, Any] = {}
     for key in ("kcal", "protein", "carbs", "fat"):
-        values = [i[key] for i in counted if i.get(key) is not None]
-        total[key] = sum(values) if values else None
+        values: list[Any] = [i.get(key) for i in counted]
+        total[key] = sum(values) if values and all(v is not None for v in values) else None
+    has_split = total["carbs"] is not None or total["fat"] is not None
+    if not counted or (len(counted) < 2 and not has_split):
+        return None
     return "Lançado agora: " + " · ".join(_macros(total))
 
 

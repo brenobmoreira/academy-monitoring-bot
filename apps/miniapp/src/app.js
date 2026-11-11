@@ -1505,7 +1505,7 @@
       if (draft) say('idle', 'Rascunho recuperado. Continue de onde parou.');
       if (catalog.ft) {
         var timeout = new Promise(function (resolve) {
-          setTimeout(function () { resolve(Object.assign({}, catalog, { tableStatus: 'unavailable' })); }, 8000);
+          setTimeout(function () { resolve(Object.assign({}, catalog, { tableStatus: 'unavailable', freeFoods: true })); }, 8000);
         });
         Promise.race([C.loadFoodTable(catalog), timeout]).then(function (loaded) {
           S.catalog = loaded;

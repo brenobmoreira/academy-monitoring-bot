@@ -11,7 +11,16 @@ const pulsoSet = (kg, reps, rir = '') => ({ kg: String(kg), reps: String(reps), 
 
 test('Pulso only reads explicit set prescriptions, without guessing prose', () => {
   for (const p of ['2×6–8 RIR 1', ' 2 x 8 ', '2*8-10 RIR 2']) assert.equal(C.plannedSets(p), 2);
-  for (const p of ['', null, 'até 2×8', '2×8 + drop', '0×8', 'livre']) assert.equal(C.plannedSets(p), null);
+  for (const p of ['', null, 'até 2×8', '2×8 + drop', '0×8', 'livre', '?×8 · RIR 0', '2×? · 90 s', '2×8 · alt.:']) assert.equal(C.plannedSets(p), null);
+  // what the sheet really sends: Sessions.prescriptionText
+  const S = require('../../sheet4/test/harness').load().Sessions;
+  const p = { sets: 2, repsMin: 6, repsMax: 10, rirMax: 1, restS: 150, alternative: null, setModel: null };
+  for (const [over, sets] of [[{}, 2], [{ rirMax: 0 }, 2], [{ rirMax: null, restS: null }, 2], [{ repsMin: 8, repsMax: 8, sets: 3 }, 3],
+    [{ alternative: 'Supino máquina · 3×8' }, 2], [{ rirMax: 1.5 }, 2], [{ sets: null }, null], [{ repsMin: null, repsMax: null }, null]]) {
+    const text = S.prescriptionText({ ...p, ...over });
+    assert.equal(C.plannedSets(text), sets, text);
+  }
+  assert.equal(S.prescriptionText(p), '2×6–10 · RIR 0–1 · 150 s');
 });
 
 test('Pulso requires all sets of each planned exercise; extra sets do not fill another exercise', () => {

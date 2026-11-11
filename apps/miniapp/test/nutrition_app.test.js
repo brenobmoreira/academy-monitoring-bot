@@ -8,7 +8,7 @@ const { FOODS } = require('../../sheet4/test/food_helpers');
 const own = FOODS[0];
 const fv = [[0, 0, own.baseQty, own.kcal, own.protein, own.carbs, own.fat, 1, own.perHousehold]];
 const fu = [own.baseUnit, own.householdUnit];
-const fh = createHash('sha256').update(JSON.stringify(TABLE.foods.map((r) => ['g', 100, ...r.slice(1, 5), null, null]))).digest('hex');
+const fh = createHash('sha256').update(JSON.stringify(TABLE.foods.map((r) => [r[0].normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase(), 'g', 100, ...r.slice(1, 5), null, null]))).digest('hex');
 const digest = (text) => Promise.resolve(createHash('sha256').update(text).digest('hex'));
 const catalog = { ...SAMPLE, view: 'food', foods: [own.name], fv, fu, ft: 'taco4', fh };
 const tick = () => new Promise((resolve) => setImmediate(resolve));

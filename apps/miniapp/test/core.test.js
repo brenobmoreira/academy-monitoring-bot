@@ -30,6 +30,7 @@ test('Pulso gain compares the same numbered set and formats decimal deltas in Po
   assert.deepEqual(C.pulsoGain(pulsoCard([pulsoSet('62,5', 6)]), 0), { value: 2.5, unit: 'kg', line: '+2,5 kg em relação à última vez' });
   assert.equal(C.pulsoGain(pulsoCard([pulsoSet(60, 8), pulsoSet(60, 9)]), 1).line, '+2 reps em relação à última vez');
   assert.equal(C.pulsoGain(pulsoCard([pulsoSet('17,6', 8)], { l: '17,5×8' }), 0).value, 0.1);
+  assert.equal(C.pulsoGain(pulsoCard([pulsoSet('60,000001', 8)]), 0), null, 'never display a rounded +0 gain');
   for (const sets of [[pulsoSet(60, 8)], [pulsoSet(59, 20)], [pulsoSet(70, '')], [pulsoSet(70, '2,5')], [pulsoSet(1001, 8)], [pulsoSet(70, 8, '99')]]) {
     assert.equal(C.pulsoGain(pulsoCard(sets), 0), null);
   }
@@ -45,6 +46,7 @@ test('Pulso cycles applicable tips from the current exercise and plan', () => {
   assert.equal(tips[2], 'Depois de Supino: Remada.');
   assert.equal(C.pulsoTip(context, 3).line, tips[0]);
   assert.equal(C.pulsoTip(context, -1).line, tips[0]);
+  assert.equal(C.pulsoTip(Object.assign({}, context, { cardIndex: null }), 0).line, tips[0]);
   context.cardIndex = 1;
   assert.match(C.pulsoTip(context, 0).line, /^Remada/);
   const unknown = { view: 'workout', cards: [pulsoCard([], { p: 'livre', l: '' })] };
@@ -90,6 +92,25 @@ test('Pulso dozes at 45 seconds, except while busy', () => {
   assert.equal(C.pulsoDozing(44999, false), false);
   assert.equal(C.pulsoDozing(45000, false), true);
   assert.equal(C.pulsoDozing(90000, true), false);
+});
+
+test('Pulso counts current catalog prescriptions even when an older draft lacks a planned exercise', () => {
+  const rows = [{ e: 'Supino', p: '2×8' }, { e: 'Remada', p: '2×8' }];
+  const cards = [pulsoCard([pulsoSet(60, 8), pulsoSet(60, 8)])];
+  const plan = C.pulsoPlan(cards, rows);
+  assert.equal(plan.total, 4);
+  assert.equal(plan.remaining, 2);
+  assert.equal(plan.complete, false);
+  assert.equal(C.pulsoPlan(cards, []).complete, false);
+  assert.ok(C.pulsoTips({ cards, plan: rows }).includes('Faltam 2 séries planejadas.'));
+});
+
+test('Pulso acknowledges repeat-last unless that same action completes the current plan', () => {
+  const before = [pulsoCard([])];
+  const after = [pulsoCard([pulsoSet(60, 8), pulsoSet(60, 7)])];
+  assert.equal(C.pulsoReaction(before, after, 0, undefined, { action: 'repeat' }).pulse, 'full');
+  const rows = [{ e: 'Supino', p: '2×8' }, { e: 'Remada', p: '2×8' }];
+  assert.equal(C.pulsoReaction(before, after, 0, undefined, { action: 'repeat', plan: rows }).line, 'Última carga copiada. Ajuste o que mudou hoje.');
 });
 
 /** The bot's encoding: base64url_nopad(raw_deflate(utf8(json_compact(catalog)))), zlib wbits=-15. */

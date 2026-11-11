@@ -771,8 +771,11 @@
     return m && Number(m[1]) > 0 ? Number(m[1]) : null;
   }
 
-  function pulsoPlan(list) {
-    var plan = (list || []).filter(function (c) { return c.fromPlan; });
+  function pulsoPlan(list, rows) {
+    var plan = Array.isArray(rows) ? rows.map(function (row) {
+      var card = (list || []).filter(function (c) { return sameName(c.name, row.e); })[0];
+      return { p: row.p, sets: card ? card.sets : [] };
+    }) : (list || []).filter(function (c) { return c.fromPlan; });
     var total = 0, done = 0, known = plan.length > 0;
     plan.forEach(function (card) {
       var n = plannedSets(card.p);
@@ -795,7 +798,8 @@
     var delta = kg > ref.kg ? kg - ref.kg : kg === ref.kg && reps > ref.reps ? reps - ref.reps : 0;
     if (!delta) return null;
     // Avoid binary decimal noise in subtraction (e.g. 17.6 - 17.5).
-    delta = Math.round(delta * 1000000) / 1000000;
+    delta = round(delta, 3); // same precision as all other displayed form numbers
+    if (!delta) return null;
     var unit = kg > ref.kg ? 'kg' : 'reps';
     return { value: delta, unit: unit, line: '+' + formatBR(delta) + ' ' + unit + ' em relação à última vez' };
   }
@@ -811,7 +815,7 @@
       if (described) tips.push('A descrição sem quantidade entra no diário sem cálculo.');
     } else {
       var index = context.cardIndex;
-      if (!(index >= 0 && index < list.length)) {
+      if (!(Number.isInteger(index) && index >= 0 && index < list.length)) {
         index = -1;
         list.forEach(function (c, i) {
           var n = plannedSets(c.p);
@@ -821,7 +825,7 @@
       }
       var card = list[index], last = card && parseLastWork(card.l);
       if (last) tips.push(card.name + ', última vez: ' + last.map(describeSet).join(' · ') + '.');
-      var plan = pulsoPlan(list);
+      var plan = pulsoPlan(list, context.plan);
       if (plan.known) tips.push(plan.remaining ? 'Faltam ' + plan.remaining + (plan.remaining === 1 ? ' série planejada.' : ' séries planejadas.') : 'Todas as séries planejadas estão preenchidas.');
       if (card && list[index + 1]) tips.push('Depois de ' + card.name + ': ' + list[index + 1].name + '.');
     }
@@ -835,8 +839,9 @@
   }
 
   /** One reaction per action. Completion takes precedence and can include the gain. */
-  function pulsoReaction(before, after, cardIndex, setIndex) {
-    var full = !pulsoPlan(before).complete && pulsoPlan(after).complete;
+  function pulsoReaction(before, after, cardIndex, setIndex, options) {
+    var opts = options || {};
+    var full = !pulsoPlan(before, opts.plan).complete && pulsoPlan(after, opts.plan).complete;
     var gain = pulsoGain(after[cardIndex], setIndex);
     var old = before[cardIndex] && before[cardIndex].sets[setIndex];
     var now = after[cardIndex] && after[cardIndex].sets[setIndex];
@@ -844,7 +849,8 @@
         !(parseDecimal(now.kg) > parseDecimal(old.kg) ||
           (parseDecimal(now.kg) === parseDecimal(old.kg) && parseDecimal(now.reps) > parseDecimal(old.reps)))) gain = null;
     if (full) return { mood: 'happy', pulse: 'full', line: 'Todas as séries planejadas preenchidas!' + (gain ? ' ' + gain.line + '.' : '') };
-    return gain ? { mood: 'happy', pulse: 'celebrate', line: gain.line + '.' } : null;
+    if (gain) return { mood: 'happy', pulse: 'celebrate', line: gain.line + '.' };
+    return opts.action === 'repeat' ? { mood: 'idle', pulse: 'nod', line: 'Última carga copiada. Ajuste o que mudou hoje.' } : null;
   }
 
   function pulsoSummary(context) {

@@ -191,6 +191,8 @@
 .shape[data-state][data-dozing="true"] .pl-orb { animation: pl-breathe 7s ease-in-out infinite; }
 .shape[data-state][data-dozing="true"] .pl-core { animation: pl-glow 7s ease-in-out infinite; }
 .shape[data-state][data-dozing="true"] .pl-ring { animation: none; }
+.shape[data-state][data-dozing="true"] .pl-face { display: none; }
+.shape[data-state][data-dozing="true"] .pl-face.st-idle { display: inline; }
 
 .shape .st { display: none; }
 .shape[data-state="idle"] .st-idle,

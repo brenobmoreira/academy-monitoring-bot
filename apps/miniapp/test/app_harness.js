@@ -28,6 +28,15 @@ class FakeNode {
     c.parentNode = null;
     return c;
   }
+  replaceChild(next, old) {
+    const i = this.childNodes.indexOf(old);
+    if (i < 0) throw new Error('not a child');
+    if (next.parentNode) next.parentNode.removeChild(next);
+    this.childNodes[i] = next;
+    next.parentNode = this;
+    old.parentNode = null;
+    return old;
+  }
   get textContent() { return this.childNodes.map((c) => c.textContent).join(''); }
   set textContent(v) {
     this.childNodes.forEach((c) => { c.parentNode = null; });
@@ -97,10 +106,12 @@ class FakeElement extends FakeNode {
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
   removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] || []).filter((f) => f !== fn); }
   dispatchEvent(ev) {
+    ev.currentTarget = this;
     (this.listeners[ev.type] || []).slice().forEach((fn) => fn.call(this, ev));
+    if (ev.bubbles && this.parentNode) this.parentNode.dispatchEvent(ev);
     return true;
   }
-  click() { this.dispatchEvent({ type: 'click', target: this, preventDefault() {}, stopPropagation() {} }); }
+  click() { this.dispatchEvent({ type: 'click', bubbles: true, target: this, preventDefault() {}, stopPropagation() { this.bubbles = false; } }); }
   focus() { this.ownerDocument.activeElement = this; }
   blur() {}
   scrollIntoView() {}
@@ -141,7 +152,7 @@ function page(doc) {
     return e;
   };
   el('p', { id: 'preview-banner' }).hidden = true;
-  el('div', { id: 'shape' });
+  el('button', { id: 'shape', type: 'button', 'aria-label': 'Pulso: toque para uma dica', 'aria-describedby': 'say' });
   el('p', { id: 'say' });
   const nav = el('nav', { class: 'tabs' });
   el('button', { class: 'tab', id: 'tab-workout', 'data-view': 'workout' }, nav);
@@ -276,6 +287,16 @@ async function boot(opts = {}) {
     press() { if (tg.MainButton.params.is_active !== false) tg.MainButton.handler(); },
     tab(view) { doc.getElementById(`tab-${view}`).click(); },
     say() { return doc.getElementById('say').textContent; },
+    focus(field) {
+      const previous = doc.activeElement;
+      doc.activeElement = field;
+      if (previous) doc.dispatchEvent({ type: 'focusout', target: previous });
+      if (field) doc.dispatchEvent({ type: 'focusin', target: field });
+    },
+    input(field, value) {
+      field.value = value;
+      field.dispatchEvent({ type: 'input', target: field, bubbles: true });
+    },
   };
 }
 

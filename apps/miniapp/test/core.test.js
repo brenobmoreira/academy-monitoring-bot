@@ -88,6 +88,16 @@ test('muscleEntries resolves exercises to their group and adds the week on reque
   assert.equal(cat.week.length, 1, 'the catalog is not changed');
 });
 
+test('an exercise without a group in the catalogue takes the group of its plan row', () => {
+  const cat = C.normalizeCatalog({
+    v: 1,
+    ex: [['Supino', ''], ['Remada', 'Costas']],
+    plan: [{ s: 'Upper', e: 'Supino', g: 'Peito' }, { s: 'Upper', e: 'Remada', g: 'Dorsal' }],
+  });
+  assert.deepEqual(cat.ex, [{ name: 'Supino', group: 'Peito' }, { name: 'Remada', group: 'Costas' }]);
+  assert.deepEqual(C.muscleEntries(cat, [{ name: 'Supino', sets: 2 }], false), [{ group: 'Peito', sets: 2 }]);
+});
+
 test('normalizeCatalog reads the week (wk) and drops malformed rows', () => {
   const wk = [['Peito', 6], ['  Costas ', 2], ['Ombros', 0], ['', 3], ['Bíceps', '2'], 'x', ['Tríceps', Infinity]];
   assert.deepEqual(C.normalizeCatalog({ v: 1, wk }).week, [{ group: 'Peito', sets: 6 }, { group: 'Costas', sets: 2 }]);

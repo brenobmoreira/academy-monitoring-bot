@@ -408,7 +408,10 @@
 
     var ex = [];
     var addEx = function (name, group) {
-      if (!name || ex.some(function (e) { return sameName(e.name, name); })) return;
+      if (!name) return;
+      var have = ex.filter(function (e) { return sameName(e.name, name); })[0];
+      // The catalogue's group wins; a plan row only fills one the catalogue left empty.
+      if (have) { if (!have.group && group) have.group = group; return; }
       ex.push({ name: name, group: group || '' });
     };
     (Array.isArray(raw.ex) ? raw.ex : []).forEach(function (x) {

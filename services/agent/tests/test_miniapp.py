@@ -389,6 +389,15 @@ CATALOG = {
     "nextSession": "Push A",
     "sessions": ["Push A", "Pull A"],
     "exercises": [{"name": "Supino reto", "group": "Peito"}, {"name": "Remada", "group": None}],
+    "recentGroups": [
+        {"group": "Peito", "sets": 6},
+        {"group": "Costas", "sets": 0},
+        {"group": "", "sets": 2},
+        {"group": "Ombros", "sets": True},
+        {"group": "Tríceps", "sets": "3"},
+        "junk",
+        {"group": "Bíceps", "sets": 2},
+    ],
     "plan": [
         {
             "session": "Push A",
@@ -425,6 +434,7 @@ def test_catalog_v1_uses_short_keys_and_omits_empty_fields():
             {"s": "Pull A", "e": "Remada"},
         ],
         "ex": [["Supino reto", "Peito"], ["Remada", ""]],
+        "wk": [["Peito", 6], ["Bíceps", 2]],  # only well-formed rows with sets > 0
         "foods": ["Arroz branco cozido", "Frango grelhado"],
         "meals": ["Café da manhã", "Almoço"],
         "units": ["g", "ml", "un"],
@@ -445,6 +455,7 @@ def test_keyboard_markup_round_trips_the_catalog():
 
 def big_catalog():
     cat = copy.deepcopy(CATALOG)
+    del cat["recentGroups"]
     cat["foods"] = [f"Alimento número {i} com nome longo {i * 7919}" for i in range(400)]
     cat["plan"] = [
         {
@@ -488,6 +499,18 @@ def test_trimming_drops_last_work_first_then_prescriptions_then_foods():
     size, dropped, markup = url_len(cat, max_len=floor)
     assert dropped == ["l", "p", "foods"]
     assert "foods" not in decode(markup["keyboard"][0][0]["web_app"]["url"])
+
+
+def test_the_weeks_map_is_dropped_before_anything_the_form_needs():
+    cat = big_catalog()
+    cat["recentGroups"] = [{"group": f"Grupo muscular {i}", "sets": i + 1} for i in range(14)]
+    full, dropped, markup = url_len(cat, max_len=10**6)
+    assert dropped == [] and len(decode(markup["keyboard"][0][0]["web_app"]["url"])["wk"]) == 14
+
+    size, dropped, markup = url_len(cat, max_len=full - 1)
+    page = decode(markup["keyboard"][0][0]["web_app"]["url"])
+    assert dropped == ["wk"] and size <= full - 1
+    assert "wk" not in page and "l" in page["plan"][0] and "foods" in page
 
 
 def test_a_url_that_still_does_not_fit_after_all_trims_raises():

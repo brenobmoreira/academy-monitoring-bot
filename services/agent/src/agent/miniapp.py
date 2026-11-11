@@ -60,7 +60,12 @@ MEASUREMENTS = ("Pesada", "Rótulo", "Estimada")
 WORKOUT_BUTTON = "🏋️ Treino"
 FOOD_BUTTON = "🍽️ Refeição"
 NOTHING_SAVED = "⚠ Não gravei nada:"
-DROPPED_LABELS = {"l": "últimas cargas", "p": "prescrições", "foods": "lista de alimentos"}
+DROPPED_LABELS = {
+    "wk": "mapa da semana",
+    "l": "últimas cargas",
+    "p": "prescrições",
+    "foods": "lista de alimentos",
+}
 
 _STRICT = ConfigDict(extra="forbid", strict=True)
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -576,6 +581,21 @@ def _names(values: Any) -> list[str]:
     return [v for v in values if isinstance(v, str) and v] if isinstance(values, list) else []
 
 
+WEEK_GROUPS_MAX = 20
+
+
+def _week(values: Any) -> list[list[Any]]:
+    """`recentGroups` as [[group, work sets]] for the body map; anything malformed is left out."""
+    out: list[list[Any]] = []
+    for row in values if isinstance(values, list) else []:
+        if not isinstance(row, dict):
+            continue
+        group, sets = row.get("group"), row.get("sets")
+        if isinstance(group, str) and group and type(sets) is int and sets > 0:
+            out.append([group, sets])
+    return out[:WEEK_GROUPS_MAX]
+
+
 def catalog_v1(result: dict[str, Any]) -> dict[str, Any]:
     """The catalog the page receives (short keys, empty fields omitted) from `catalog` result."""
     out: dict[str, Any] = {"v": 1}
@@ -610,6 +630,7 @@ def catalog_v1(result: dict[str, Any]) -> dict[str, Any]:
     ]
     for key, value in (
         ("ex", exercises),
+        ("wk", _week(result.get("recentGroups"))),
         ("foods", _names(result.get("foods"))),
         ("fav", _names(result.get("favorites"))),
         ("meals", _names(result.get("meals"))),
@@ -628,9 +649,9 @@ def encode_catalog(catalog: dict[str, Any]) -> str:
 
 
 def _trim(catalog: dict[str, Any], key: str) -> bool:
-    """Drops `key` (`l`/`p` of every plan row, or the top-level `foods`); True if it changed."""
-    if key == "foods":
-        return catalog.pop("foods", None) is not None
+    """Drops `key` (`l`/`p` of every plan row, or the top-level `wk`/`foods`); True if it changed."""
+    if key in ("wk", "foods"):
+        return catalog.pop(key, None) is not None
     changed = False
     for row in catalog.get("plan") or []:
         changed = row.pop(key, None) is not None or changed
@@ -650,7 +671,7 @@ def keyboard_markup(
     miniapp_url: str, catalog_result: dict[str, Any], max_len: int = MINIAPP_URL_MAX
 ) -> tuple[dict[str, Any], list[str]]:
     """(reply keyboard, dropped): the two web_app buttons with the catalog in the fragment, trimmed
-    (last works, then prescriptions, then foods) until the longest URL fits `max_len`;
+    (the week's map, then last works, then prescriptions, then foods) until the longest URL fits `max_len`;
     raises CatalogTooLarge when it still does not."""
     catalog = catalog_v1(catalog_result)
     dropped: list[str] = []
@@ -659,7 +680,7 @@ def keyboard_markup(
         blob = encode_catalog(catalog)
         return f"{miniapp_url}#v=workout&c={blob}", f"{miniapp_url}#v=food&c={blob}"
 
-    for key in ("l", "p", "foods"):
+    for key in ("wk", "l", "p", "foods"):
         if max(len(u) for u in urls()) <= max_len:
             break
         if _trim(catalog, key):

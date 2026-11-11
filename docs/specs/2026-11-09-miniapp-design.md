@@ -62,12 +62,15 @@ browser). The fragment never reaches the web server.
   "sessions": ["Push A", "Pull A", "Legs A"],
   "plan": [{"s": "Push A", "e": "Supino reto", "g": "Peito", "p": "2×6–8 RIR 1", "l": "80×8, 80×7"}],
   "ex": [["Supino reto", "Peito"]],
+  "wk": [["Peito", 6], ["Tríceps", 4]],
   "foods": ["Arroz branco cozido"],
   "fav": ["Café da manhã padrão"],
   "meals": ["Café da manhã", "Almoço"],
   "units": ["g", "ml", "un"]
 }
 ```
+
+`wk` is the body map's data: work sets per muscle group over the last 7 days (today included), from the sheet's `catalog.recentGroups`. It is optional: a sheet deploy that does not send it leaves the map with the current form only. The page resolves group names to muscles in `src/body.js` (`ShapeBody.keysOf`).
 
 `p` = the plan row's prescription text, `l` = the last work text (`plan[].lastWork.text`). The
 bot keeps the full URL under `MINIAPP_URL_MAX` characters (constant, default 4096) by dropping, in

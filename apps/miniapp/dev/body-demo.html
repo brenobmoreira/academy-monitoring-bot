@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Mapa muscular · ShapeBody</title>
+  <link rel="stylesheet" href="../styles.css">
+  <style>
+    .shape-body-demo { max-width: 400px; margin: 0 auto; padding: 20px; }
+    .shape-body-demo h1 { margin: 0 0 12px; font-size: 22px; letter-spacing: -.5px; }
+    .shape-body-demo button { padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+    .shape-body-demo button:focus-visible { outline: 2px solid var(--accent); }
+    .shape-body-demo section { padding: 16px 0; border-bottom: 1px solid var(--line); }
+    .shape-body-demo h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
+    .shape-body-demo .shape-body { background: var(--surface); border-radius: 8px; padding: 8px 0; }
+  </style>
+</head>
+<body>
+  <main class="shape-body-demo">
+    <h1>Mapa muscular</h1>
+    <button id="shape-body-theme" type="button" aria-pressed="false">Tema escuro</button>
+    <section id="shape-body-empty"><h2>Sem músculos marcados</h2></section>
+    <section id="shape-body-push"><h2>Treino de empurrar</h2></section>
+    <section id="shape-body-legs"><h2>Treino de pernas</h2></section>
+    <section id="shape-body-all"><h2>Todos os músculos</h2></section>
+  </main>
+  <script src="../src/body.js"></script>
+  <script>
+    (function () {
+      'use strict';
+      var button = document.getElementById('shape-body-theme');
+      var preference = window.matchMedia('(prefers-color-scheme: dark)');
+      var manual = false;
+      function theme(dark) {
+        document.documentElement.setAttribute('data-scheme', dark ? 'dark' : 'light');
+        button.textContent = dark ? 'Tema claro' : 'Tema escuro';
+        button.setAttribute('aria-pressed', dark ? 'true' : 'false');
+      }
+      theme(preference.matches);
+      button.onclick = function () {
+        manual = true;
+        theme(document.documentElement.getAttribute('data-scheme') !== 'dark');
+      };
+      function changed(e) { if (!manual) theme(e.matches); }
+      if (preference.addEventListener) preference.addEventListener('change', changed);
+      else if (preference.addListener) preference.addListener(changed);
+      var examples = [
+        ['empty', {}, 'Sem músculos marcados'],
+        ['push', { peito: 3, ombros: 2, triceps: 2 }, 'Treino de empurrar'],
+        ['legs', { quadriceps: 3, posteriores: 2, gluteos: 2, panturrilhas: 1 }, 'Treino de pernas']
+      ];
+      var all = {};
+      for (var i = 0; i < ShapeBody.MUSCLES.length; i++) all[ShapeBody.MUSCLES[i]] = 3;
+      examples.push(['all', all, 'Todos os músculos']);
+      for (var j = 0; j < examples.length; j++) {
+        document.getElementById('shape-body-' + examples[j][0]).appendChild(
+          ShapeBody.create(examples[j][1], { title: examples[j][2] })
+        );
+      }
+    })();
+  </script>
+</body>
+</html>

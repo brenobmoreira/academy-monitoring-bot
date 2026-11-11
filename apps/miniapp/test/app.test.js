@@ -2,7 +2,7 @@
 /** src/app.js driven through a fake DOM and Telegram (test/app_harness.js). */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { boot, storageWith, doneWorkoutDraft, foodDraft, today, SAMPLE } = require('./app_harness');
+const { boot, storageWith, doneWorkoutDraft, foodDraft, today, SAMPLE, C } = require('./app_harness');
 
 const ID = /^[0-9a-f]{32}$/;
 const button = (root, text) => root.querySelectorAll('button').find((b) => b.textContent === text);
@@ -109,4 +109,45 @@ test('a draft keeps its id across reopening; a fresh or cleared draft gets a new
   const saved = JSON.parse([...storage.map.entries()].find(([k]) => k.indexOf(':f:') > 0)[1]);
   assert.match(saved.id, ID);
   assert.notEqual(saved.id, kept, 'a cleared meal is a new draft');
+});
+
+/* body map ------------------------------------------------------------------------------------- */
+
+/** A ShapeBody stand-in: levels are the summed sets per group; every create/update is recorded. */
+function fakeBody(log) {
+  return (ctx) => ({
+    ShapeBody: {
+      levels(entries) {
+        const out = {};
+        entries.forEach((e) => { out[e.group] = (out[e.group] || 0) + e.sets; });
+        return out;
+      },
+      describe: (levels) => Object.keys(levels).join(', ') || 'nada',
+      create(levels, opts) { log.push(['create', opts.title, { ...levels }]); return ctx.document.createElement('div'); },
+      update(el, levels) { log.push(['update', { ...levels }]); },
+    },
+  });
+}
+
+function workoutDraftWith(date, session, name, group) {
+  const card = Object.assign(C.newCard(name, group), { sets: [{ kg: '60', reps: '8', rir: '' }, { kg: '60', reps: '7', rir: '' }] });
+  const key = `shape-miniapp:v2:w:${encodeURIComponent(SAMPLE.client)}:${date}:${encodeURIComponent(session)}`;
+  return { [key]: { v: 1, savedAt: 1, date, session, complete: false, cards: [card] } };
+}
+
+test('body map: the form shows the last 7 days plus the valid sets typed; the review shows this workout only', async () => {
+  const log = [];
+  const catalog = { ...SAMPLE, wk: [['Costas', 5], ['Peito', 1]] };
+  const [name, group] = SAMPLE.ex[0];
+  const p = await boot({ catalog, globals: fakeBody(log), storage: storageWith(workoutDraftWith(today(), SAMPLE.next, name, group)) });
+  assert.deepEqual(log[0], ['create', 'Músculos nos últimos 7 dias', { Costas: 5, [group]: 3 }]);
+  p.press();
+  p.timers.run(1000);
+  assert.equal(p.review.hidden, false);
+  assert.deepEqual(log[log.length - 1], ['create', 'Músculos deste treino', { [group]: 2 }]);
+});
+
+test('body map: without the component the page works as before', async () => {
+  const p = await inReview(storageWith(doneWorkoutDraft(today(), SAMPLE.next)));
+  assert.equal(p.review.hidden, false);
 });

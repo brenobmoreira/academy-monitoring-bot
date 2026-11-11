@@ -365,6 +365,28 @@
   }
 
   /**
+   * Entries for the body map ([{group, sets}]): `items` ([{name, sets}]) resolved to the group the
+   * catalogue gives each exercise, after the last 7 days' sets when `withWeek`. An exercise
+   * without a group, or with no sets, adds nothing.
+   */
+  function muscleEntries(catalog, items, withWeek) {
+    var out = withWeek ? catalog.week.slice() : [];
+    (items || []).forEach(function (it) {
+      if (!it || !(it.sets > 0)) return;
+      var hit = catalog.ex.filter(function (e) { return sameName(e.name, it.name); })[0];
+      if (hit && hit.group) out.push({ group: hit.group, sets: it.sets });
+    });
+    return out;
+  }
+
+  /** `wk` ([[group, work sets]], the last 7 days) → [{group, sets}]; malformed rows are dropped. */
+  function weekList(raw) {
+    return (Array.isArray(raw) ? raw : []).filter(function (x) {
+      return Array.isArray(x) && str(x[0]) && typeof x[1] === 'number' && isFinite(x[1]) && x[1] > 0;
+    }).map(function (x) { return { group: str(x[0]), sets: x[1] }; });
+  }
+
+  /**
    * catalog_v1 (short keys) → the shape the page uses. Unknown keys are ignored; missing lists
    * become []. `foods` stays null when absent: the bot dropped it to fit the URL, so the page
    * accepts free food names (the sheet still validates them).
@@ -386,7 +408,10 @@
 
     var ex = [];
     var addEx = function (name, group) {
-      if (!name || ex.some(function (e) { return sameName(e.name, name); })) return;
+      if (!name) return;
+      var have = ex.filter(function (e) { return sameName(e.name, name); })[0];
+      // The catalogue's group wins; a plan row only fills one the catalogue left empty.
+      if (have) { if (!have.group && group) have.group = group; return; }
       ex.push({ name: name, group: group || '' });
     };
     (Array.isArray(raw.ex) ? raw.ex : []).forEach(function (x) {
@@ -406,6 +431,7 @@
       sessions: sessions,
       plan: plan,
       ex: ex,
+      week: weekList(raw.wk),
       foods: Array.isArray(raw.foods) ? strList(raw.foods) : null,
       fav: strList(raw.fav),
       meals: meals.length ? meals : DEFAULT_MEALS.slice(),
@@ -871,6 +897,7 @@
     inflateRawBrowser: inflateRawBrowser,
     decodeCatalog: decodeCatalog,
     normalizeCatalog: normalizeCatalog,
+    muscleEntries: muscleEntries,
     parseHash: parseHash,
     parseLastWork: parseLastWork,
     describeSet: describeSet,

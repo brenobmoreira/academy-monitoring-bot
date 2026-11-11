@@ -48,6 +48,7 @@
     workout: { date: '', session: '', forms: {} },
     food: { date: '', meal: '', items: [], mode: 'food', compose: null },
     sheetOpen: false,
+    bodyOpen: false, // the week's muscle map on the workout form
   };
 
   /* helpers ---------------------------------------------------------------------------------- */
@@ -110,6 +111,7 @@
 
   // The avatar is a swappable component (src/avatar.js); the app only sets mood and text.
   var Avatar = window.ShapeAvatar;
+  var Body = window.ShapeBody || null; // the muscle map (src/body.js); the page works without it
   if (Avatar) Avatar.mount(els.shape, els.say);
   if (Avatar && Avatar.intro) Avatar.intro('Abrindo sua ficha'); // lands in the header on the first say()
 
@@ -340,6 +342,7 @@
     updateMainForForm();
     if (S.showErrors) refreshErrors();
     if (structural || S.showErrors) updateMood(); else syncProgress();
+    syncBody();
   }
 
   /* chrome: tabs and dates ------------------------------------------------------------------- */
@@ -410,6 +413,37 @@
 
   var cardEls = [];
 
+  /* body map ----------------------------------------------------------------------------------- */
+
+  var bodyEl = null;   // the map on the workout form
+  var bodyNote = null; // its sentence ("Músculos trabalhados: …")
+
+  /** Map levels for `items` ([{name, sets}]), on top of the last 7 days when `withWeek`. */
+  function bodyLevels(items, withWeek) {
+    return Body.levels(C.muscleEntries(S.catalog, items, withWeek));
+  }
+  function draftSets() {
+    return cards().map(function (c) { return { name: c.name, sets: doneSets(c) }; });
+  }
+  /** The week's map follows the form: a muscle lights up when its first valid set is typed. */
+  function syncBody() {
+    if (!bodyEl || S.view !== 'workout') return;
+    var levels = bodyLevels(draftSets(), true);
+    Body.update(bodyEl, levels);
+    bodyNote.textContent = Body.describe(levels);
+  }
+  function bodyPanel() {
+    bodyEl = bodyNote = null;
+    if (!Body) return null;
+    var levels = bodyLevels(draftSets(), true);
+    bodyEl = Body.create(levels, { title: 'Músculos nos últimos 7 dias' });
+    bodyNote = h('p', { class: 'body-note', text: Body.describe(levels) });
+    var box = h('details', { class: 'body-panel', ontoggle: function () { S.bodyOpen = !!box.open; } },
+      h('summary', { text: 'Músculos nos últimos 7 dias' }), bodyEl, bodyNote);
+    box.open = S.bodyOpen;
+    return box;
+  }
+
   function renderWorkout() {
     var w = S.workout;
     var list = cards();
@@ -459,7 +493,9 @@
 
     var reset = h('div', { class: 'foot-actions' }, restoreButton('workout'), h('button', { type: 'button', class: 'btn-text', onclick: resetWorkout, text: 'Limpar este treino' }));
 
-    els.view.replaceChildren.apply(els.view, [head, chips, cardsBox].concat(w.session ? [addBtn, complete, reset] : []));
+    els.view.replaceChildren.apply(els.view, [head, chips].concat(w.session ? [bodyPanel(), cardsBox, addBtn, complete, reset] : [cardsBox])
+      .filter(function (el) { return !!el; }));
+    if (!w.session) bodyEl = bodyNote = null;
   }
 
   function cardErrors(i) {
@@ -1074,6 +1110,16 @@
       }));
     }
 
+    var map = null;
+    if (view === 'workout' && Body) {
+      var levels = bodyLevels(args.exercises.map(function (ex) { return { name: ex.name, sets: ex.work.length }; }), false);
+      if (Object.keys(levels).length) {
+        map = h('div', { class: 'body-review' },
+          Body.create(levels, { title: 'Músculos deste treino' }),
+          h('p', { class: 'body-note', text: Body.describe(levels) }));
+      }
+    }
+
     var pct = Math.min(100, Math.round(p.bytes / C.LIMITS.PAYLOAD_BYTES * 100));
     var meter = h('div', { class: 'meter' + (p.ok ? '' : ' over') },
       h('div', { class: 'meter-bar' }, h('i', { style: 'width:' + pct + '%' })),
@@ -1089,7 +1135,7 @@
       h('div', { class: 'view-head', style: 'margin-top:12px' },
         h('h1', { class: 'view-title', text: 'Confira o envio' }),
         h('p', { class: 'view-sub', text: 'É exatamente isto que vai para o bot. A planilha confere de novo, e só a resposta do bot diz o que foi gravado.' })),
-      facts, list, meter, raw);
+      facts, map || '', list, meter, raw);
 
     if (inTelegram) {
       setMain('Enviar ao bot', function () { send(p.json); });

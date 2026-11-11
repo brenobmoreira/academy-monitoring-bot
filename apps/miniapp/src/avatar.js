@@ -112,19 +112,19 @@
           '<circle class="pl-core" cx="50" cy="50" r="28" fill="url(#pl-o-' + id + ')"/>' +
           '<circle class="pl-core-rim" cx="50" cy="50" r="28"/>' +
           '<g class="pl-gaze"><g class="pl-eyes">' +
-            '<path class="pl-eye st st-idle" d="M39 50H46.5M53.5 50H61"/>' +
-            '<path class="pl-eye st st-focused" d="M38.5 49.5L46.5 52M61.5 49.5L53.5 52"/>' +
+            '<path class="pl-eye pl-dot st st-idle" d="M42 49.5h.01M58 49.5h.01"/>' +
+            '<path class="pl-eye pl-dot st st-focused" d="M42 50.5h.01M58 50.5h.01"/>' +
             '<path class="pl-eye st st-happy" d="M38.5 53Q42.5 46.5 46.5 53M53.5 53Q57.5 46.5 61.5 53"/>' +
-            '<path class="pl-eye st st-alert" d="M43.5 46V53.5M56.5 46V53.5"/>' +
-            '<path class="pl-eye st st-thinking" d="M43 46.5H49M54 45.5H60"/>' +
+            '<path class="pl-eye st st-alert" d="M43 46.5V52M57 46.5V52"/>' +
+            '<path class="pl-eye pl-dot st st-thinking" d="M44.5 47.5h.01M60.5 47.5h.01"/>' +
           '</g>' +
           '<path class="pl-eye pl-sleep" d="M37 51Q42 54 47 51M53 51Q58 54 63 51"/>' +
           '</g>' +
-          '<g class="pl-face st st-idle"><path class="pl-brow" d="M36 39L46 38M54 38L64 39"/><path class="pl-mouth" d="M44 61Q50 65 56 61"/></g>' +
-          '<g class="pl-face st st-focused"><path class="pl-brow" d="M35 38L46 42M65 38L54 42"/><path class="pl-mouth" d="M45 63H55"/></g>' +
-          '<g class="pl-face st st-happy"><path class="pl-brow" d="M35 39Q41 34 47 39M53 39Q59 34 65 39"/><path class="pl-mouth" d="M41 59Q50 76 59 59Z"/></g>' +
-          '<g class="pl-face st st-alert"><path class="pl-brow" d="M35 38L46 35M54 35L65 38"/><ellipse class="pl-mouth" cx="50" cy="64" rx="4" ry="6"/></g>' +
-          '<g class="pl-face st st-thinking"><path class="pl-brow" d="M35 37L46 35M54 39H65"/><path class="pl-mouth" d="M48 65Q54 61 59 64"/></g>' +
+          '<g class="pl-face st st-idle"><path class="pl-mouth" d="M45 60Q50 63.5 55 60"/></g>' +
+          '<g class="pl-face st st-focused"><path class="pl-brow" d="M37 41L46 43.5M63 41L54 43.5"/><path class="pl-mouth" d="M46 61Q51 63.5 56 60"/></g>' +
+          '<g class="pl-face st st-happy"><path class="pl-mouth pl-open" d="M43 58.5Q50 70 57 58.5Z"/></g>' +
+          '<g class="pl-face st st-alert"><path class="pl-brow" d="M37 39.5L45.5 37.5M54.5 37.5L63 39.5"/><ellipse class="pl-mouth" cx="50" cy="63" rx="3" ry="4"/></g>' +
+          '<g class="pl-face st st-thinking"><path class="pl-brow" d="M55.5 40Q60 37.5 64.5 40"/><path class="pl-mouth" d="M47 62H54"/></g>' +
         '</g>' +
       '</g>' +
     '</svg>';
@@ -181,7 +181,11 @@
 .pl-sweep { fill: none; stroke: var(--pl-c); stroke-width: 10; stroke-dasharray: 16 84; opacity: 0; transform-origin: 50px 50px; }
 .pl-flash { fill: none; stroke: var(--pl-c); stroke-width: 3; opacity: 0; transform-origin: 50px 50px; }
 .pl-eye { fill: none; stroke: var(--pl-eye); stroke-width: 4.6; stroke-linecap: round; stroke-linejoin: round; }
-.pl-brow, .pl-mouth { fill: none; stroke: var(--pl-eye); stroke-width: 3.8; stroke-linecap: round; stroke-linejoin: round; }
+.pl-eye.pl-dot { stroke-width: 7.4; }
+.pl-brow, .pl-mouth { fill: none; stroke: var(--pl-eye); stroke-linecap: round; stroke-linejoin: round; }
+.pl-brow { stroke-width: 3; }
+.pl-mouth { stroke-width: 3.6; }
+.pl-mouth.pl-open { fill: var(--pl-eye); stroke-width: 2.4; }
 .pl-sleep { display: none; }
 .pl-gaze { transition: transform 0.2s ease-out; }
 .shape[data-state][data-reaction="celebrate"] .st { display: none; }

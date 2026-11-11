@@ -91,6 +91,22 @@ test('catalog foodTable: one food read, valid rows only, exact stored values and
   assert.equal(typeof c.timings.foodsRead, 'number');
 });
 
+test('catalog through the API equals the catalog computed without the read memory, with fewer sheet lookups', () => {
+  const ctx = setup();
+  const ss = ctx.SpreadsheetApp.getActive();
+  const real = ss.getSheetByName.bind(ss);
+  let lookups = 0;
+  ss.getSheetByName = (name) => { lookups++; return real(name); };
+  const strip = (c) => { const o = JSON.parse(JSON.stringify(c)); delete o.timings; return o; };
+  const served = strip(ok(ctx.api('catalog', {})));
+  const servedLookups = lookups;
+  lookups = 0;
+  const direct = strip(ctx.SheetApi.catalog_());
+  assert.deepEqual(served, direct);
+  assert.ok(servedLookups < lookups / 2, `${servedLookups} lookups served, ${lookups} without the memory`);
+  assert.equal(ctx.Tabs.snapshot_, null);
+});
+
 test('catalog: today, client, phase in force with targets, rotation, next session, plan, foods', () => {
   const ctx = setup();
   const c = ok(ctx.api('catalog', {}));

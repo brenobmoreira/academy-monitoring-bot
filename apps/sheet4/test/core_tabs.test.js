@@ -193,3 +193,40 @@ test('read asks the spreadsheet for the sheet a fixed number of times, not once 
   };
   assert.equal(lookups(200), lookups(2));
 });
+
+test('reading() reads each tab once, rebuilds rows on every read and forgets on a write', () => {
+  const ctx = boot({ tabs: { exercises: [{ name: 'A' }, { name: 'B' }] } });
+  const T = ctx.Tabs;
+  const ss = ctx.SpreadsheetApp.getActive();
+  const real = ss.getSheetByName.bind(ss);
+  let lookups = 0;
+  ss.getSheetByName = (name) => { lookups++; return real(name); };
+  const sheet = real('Exercícios');
+  const realRange = sheet.getRange.bind(sheet);
+  let ranges = 0;
+  sheet.getRange = (...args) => { ranges++; return realRange(...args); };
+
+  T.read('exercises');
+  lookups = 0; ranges = 0;
+  T.read('exercises');
+  const [oneLookups, oneRanges] = [lookups, ranges];
+  assert.ok(oneRanges >= 1, 'a plain read goes to the sheet every time');
+
+  lookups = 0; ranges = 0;
+  T.reading(() => {
+    const first = T.read('exercises');
+    assert.ok(T.findSheet('exercises'));
+    const second = T.reading(() => T.read('exercises'));
+    eq(second.map((r) => r.name), ['A', 'B']);
+    assert.notEqual(first[0], second[0], 'rows are not shared between reads');
+    assert.ok(lookups <= oneLookups && ranges <= oneRanges, 'three uses cost no more than one read');
+    T.append('exercises', { name: 'C' });
+    eq(T.read('exercises').map((r) => r.name), ['A', 'B', 'C']);
+  });
+  assert.equal(T.snapshot_, null);
+  assert.throws(() => T.reading(() => { throw new Error('boom'); }), /boom/);
+  assert.equal(T.snapshot_, null, 'the memory ends with the call even when it throws');
+  lookups = 0;
+  T.read('exercises');
+  assert.equal(lookups, oneLookups, 'outside reading() nothing is remembered');
+});

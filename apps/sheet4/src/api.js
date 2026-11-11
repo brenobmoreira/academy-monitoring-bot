@@ -50,7 +50,7 @@ const SheetApi = {
     catalog: {
       write: false,
       validate: (a) => ApiValidator.empty(a),
-      run: () => SheetApi.catalog_(),
+      run: () => Tabs.reading(() => SheetApi.catalog_()),
     },
     'diary.upsert': {
       write: true,

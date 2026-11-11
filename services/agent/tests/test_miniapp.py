@@ -389,6 +389,15 @@ CATALOG = {
     "nextSession": "Push A",
     "sessions": ["Push A", "Pull A"],
     "exercises": [{"name": "Supino reto", "group": "Peito"}, {"name": "Remada", "group": None}],
+    "recentGroups": [
+        {"group": "Peito", "sets": 6},
+        {"group": "Costas", "sets": 0},
+        {"group": "", "sets": 2},
+        {"group": "Ombros", "sets": True},
+        {"group": "Tríceps", "sets": "3"},
+        "junk",
+        {"group": "Bíceps", "sets": 2},
+    ],
     "plan": [
         {
             "session": "Push A",
@@ -425,6 +434,7 @@ def test_catalog_v1_uses_short_keys_and_omits_empty_fields():
             {"s": "Pull A", "e": "Remada"},
         ],
         "ex": [["Supino reto", "Peito"], ["Remada", ""]],
+        "wk": [["Peito", 6], ["Bíceps", 2]],  # only well-formed rows with sets > 0
         "foods": ["Arroz branco cozido", "Frango grelhado"],
         "meals": ["Café da manhã", "Almoço"],
         "units": ["g", "ml", "un"],

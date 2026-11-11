@@ -576,6 +576,21 @@ def _names(values: Any) -> list[str]:
     return [v for v in values if isinstance(v, str) and v] if isinstance(values, list) else []
 
 
+WEEK_GROUPS_MAX = 20
+
+
+def _week(values: Any) -> list[list[Any]]:
+    """`recentGroups` as [[group, work sets]] for the body map; anything malformed is left out."""
+    out: list[list[Any]] = []
+    for row in values if isinstance(values, list) else []:
+        if not isinstance(row, dict):
+            continue
+        group, sets = row.get("group"), row.get("sets")
+        if isinstance(group, str) and group and type(sets) is int and sets > 0:
+            out.append([group, sets])
+    return out[:WEEK_GROUPS_MAX]
+
+
 def catalog_v1(result: dict[str, Any]) -> dict[str, Any]:
     """The catalog the page receives (short keys, empty fields omitted) from `catalog` result."""
     out: dict[str, Any] = {"v": 1}
@@ -610,6 +625,7 @@ def catalog_v1(result: dict[str, Any]) -> dict[str, Any]:
     ]
     for key, value in (
         ("ex", exercises),
+        ("wk", _week(result.get("recentGroups"))),
         ("foods", _names(result.get("foods"))),
         ("fav", _names(result.get("favorites"))),
         ("meals", _names(result.get("meals"))),

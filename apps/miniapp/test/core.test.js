@@ -79,6 +79,22 @@ test('base64url decodes with and without padding, including the URL alphabet', (
   assert.deepEqual(Buffer.from(C.base64UrlToBytes(bytes.toString('base64'))), bytes);
 });
 
+test('muscleEntries resolves exercises to their group and adds the week on request', () => {
+  const cat = C.normalizeCatalog({ v: 1, ex: [['Supino reto', 'Peito'], ['Prancha', '']], wk: [['Costas', 4]] });
+  const items = [{ name: 'supino RETO', sets: 2 }, { name: 'Prancha', sets: 3 }, { name: 'Desconhecido', sets: 1 }, { name: 'Supino reto', sets: 0 }, null];
+  assert.deepEqual(C.muscleEntries(cat, items, false), [{ group: 'Peito', sets: 2 }]);
+  assert.deepEqual(C.muscleEntries(cat, items, true), [{ group: 'Costas', sets: 4 }, { group: 'Peito', sets: 2 }]);
+  assert.deepEqual(C.muscleEntries(cat, [], true), [{ group: 'Costas', sets: 4 }]);
+  assert.equal(cat.week.length, 1, 'the catalog is not changed');
+});
+
+test('normalizeCatalog reads the week (wk) and drops malformed rows', () => {
+  const wk = [['Peito', 6], ['  Costas ', 2], ['Ombros', 0], ['', 3], ['Bíceps', '2'], 'x', ['Tríceps', Infinity]];
+  assert.deepEqual(C.normalizeCatalog({ v: 1, wk }).week, [{ group: 'Peito', sets: 6 }, { group: 'Costas', sets: 2 }]);
+  assert.deepEqual(C.normalizeCatalog({ v: 1 }).week, []);
+  assert.deepEqual(C.normalizeCatalog({ v: 1, wk: 'x' }).week, []);
+});
+
 test('normalizeCatalog fills defaults, keeps foods null when dropped, merges plan into lists', () => {
   const cat = C.normalizeCatalog({
     v: 1, tz: 'Not/AZone', next: 'Upper',

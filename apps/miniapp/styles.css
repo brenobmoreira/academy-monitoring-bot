@@ -550,6 +550,17 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 }
 details.raw summary { min-height: 44px; display: flex; align-items: center; color: var(--accent-text); font-weight: 650; font-size: 15px; cursor: pointer; }
 
+/* Body map ------------------------------------------------------------------------------ */
+.body-panel { margin: 12px 0 4px; border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+.body-panel summary { min-height: 48px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; font-size: 15px; font-weight: 650; cursor: pointer; list-style: none; }
+.body-panel summary::-webkit-details-marker { display: none; }
+.body-panel summary::after { content: ""; width: 8px; height: 8px; border-right: 2px solid var(--hint); border-bottom: 2px solid var(--hint); transform: rotate(45deg); transition: transform 0.18s ease; }
+.body-panel[open] summary::after { transform: rotate(225deg); }
+.body-panel .shape-body, .body-review .shape-body { padding: 4px 14px 0; }
+.body-review { margin: 12px 0; padding-top: 10px; border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+.body-note { margin: 0; padding: 8px 14px 14px; font-size: 14px; color: var(--hint); text-align: center; }
+@media (prefers-reduced-motion: reduce) { .body-panel summary::after { transition: none; } }
+
 /* Dock (preview / no MainButton) ------------------------------------------------------- */
 
 .dock {

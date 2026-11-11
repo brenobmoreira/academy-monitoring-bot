@@ -233,7 +233,8 @@ function blob(catalog) {
 }
 
 /**
- * Starts the page inside "Telegram". opts: {view: 'workout'|'food', storage, catalog}.
+ * Starts the page inside "Telegram". opts: {view: 'workout'|'food', storage, catalog, globals}
+ * (`globals`: extra page globals, or a function of the page context returning them).
  * Resolves once the catalog is decoded and the form rendered.
  */
 async function boot(opts = {}) {
@@ -259,6 +260,7 @@ async function boot(opts = {}) {
     ShapeCore: C,
     Telegram: { WebApp: tg },
   };
+  Object.assign(ctx, typeof opts.globals === 'function' ? opts.globals(ctx) : opts.globals || {});
   ctx.window = ctx;
   vm.createContext(ctx);
   vm.runInContext(APP, ctx, { filename: 'app.js' });

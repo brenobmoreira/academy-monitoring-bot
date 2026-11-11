@@ -85,7 +85,7 @@ def number(cell: str | None, decimals: int) -> float | int | None:
         return None
     if value < 0:
         return None
-    return int(round(value)) if decimals == 0 else round(value, decimals)
+    return round(value) if decimals == 0 else round(value, decimals)
 
 
 def build(rows: list[dict[str, str]]) -> tuple[list[dict], list[str]]:

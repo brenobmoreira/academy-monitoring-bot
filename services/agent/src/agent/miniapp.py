@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -28,6 +29,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
+from importlib.resources import files
 from typing import Annotated, Any, ClassVar, Literal, Protocol
 
 from pydantic import (
@@ -61,6 +63,7 @@ WORKOUT_BUTTON = "🏋️ Treino"
 FOOD_BUTTON = "🍽️ Refeição"
 NOTHING_SAVED = "⚠ Não gravei nada:"
 DROPPED_LABELS = {
+    "fv": "valores dos alimentos próprios",
     "wk": "mapa da semana",
     "l": "últimas cargas",
     "p": "prescrições",
@@ -582,6 +585,57 @@ def _names(values: Any) -> list[str]:
 
 
 WEEK_GROUPS_MAX = 20
+TACO_NAMES: list[str] = json.loads(files("agent").joinpath("data/foods.taco.names.json").read_text("utf-8"))
+
+
+def _food_key(text: str) -> str:
+    """Foods.key_ / Tabs.normalize_: NFC, whitespace, case; accents are significant."""
+    return " ".join(unicodedata.normalize("NFC", text).lower().split())
+
+
+def _food_values(result: dict[str, Any], out: dict[str, Any]) -> None:
+    names = _names(result.get("foods"))
+    keys = [_food_key(n) for n in names]
+    shared_keys = [_food_key(n) for n in TACO_NAMES]
+    shared = set(shared_keys)
+    has_table = shared.issubset(keys)
+    own = [n for n in names if not has_table or _food_key(n) not in shared]
+    # Keep an explicit empty names list: on the old page this safely offers zero own foods.
+    if has_table:
+        out["ft"] = "taco4"
+        out["foods"] = own
+    rows: dict[str, list[Any]] = {}
+    for row in result.get("foodTable") or []:
+        if not isinstance(row, list) or len(row) != 9 or not isinstance(row[0], str):
+            continue
+        if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in row[2:7]):
+            continue
+        base = unicodedata.normalize("NFC", str(row[1])).strip().lower()
+        base = {"grama": "g", "gramas": "g", "gr": "g", "mililitro": "ml", "mililitros": "ml"}.get(base, base)
+        if row[2] <= 0 or base not in ("g", "ml"):
+            continue
+        if (row[7] is not None or row[8] is not None) and (
+            not isinstance(row[7], str)
+            or not row[7].strip()
+            or type(row[8]) not in (int, float)
+            or not math.isfinite(row[8])
+            or row[8] <= 0
+        ):
+            continue
+        key = _food_key(row[0])
+        if keys.count(key) == 1:
+            rows[key] = [row[0], base, *row[2:]]
+    values = [[i, *rows[_food_key(n)][1:]] for i, n in enumerate(own) if _food_key(n) in rows]
+    if values:
+        out["fv"] = values
+    if has_table and all(k in rows for k in shared_keys):
+        # Names alone cannot prove the sheet still has TACO values: foods.seed skips existing
+        # names. The page checks this digest before using the shared file for arithmetic.
+        data = [
+            [int(v) if type(v) is float and v.is_integer() else v for v in rows[k][1:]] for k in shared_keys
+        ]
+        canonical = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        out["fh"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _week(values: Any) -> list[list[Any]]:
@@ -638,6 +692,7 @@ def catalog_v1(result: dict[str, Any]) -> dict[str, Any]:
     ):
         if value:
             out[key] = value
+    _food_values(result, out)
     return out
 
 
@@ -650,7 +705,9 @@ def encode_catalog(catalog: dict[str, Any]) -> str:
 
 def _trim(catalog: dict[str, Any], key: str) -> bool:
     """Drops `key` (`l`/`p` of every plan row, or the top-level `wk`/`foods`); True if it changed."""
-    if key in ("wk", "foods"):
+    if key in ("fv", "wk", "foods"):
+        if key == "foods":
+            catalog.pop("fv", None)  # indices only make sense with the matching own names
         return catalog.pop(key, None) is not None
     changed = False
     for row in catalog.get("plan") or []:
@@ -670,20 +727,38 @@ class CatalogTooLarge(ValueError):
 def keyboard_markup(
     miniapp_url: str, catalog_result: dict[str, Any], max_len: int = MINIAPP_URL_MAX
 ) -> tuple[dict[str, Any], list[str]]:
-    """(reply keyboard, dropped): the two web_app buttons with the catalog in the fragment, trimmed
-    (the week's map, then last works, then prescriptions, then foods) until the longest URL fits `max_len`;
-    raises CatalogTooLarge when it still does not."""
+    """Separate view catalogs in two buttons. Trim only an oversized view, in this order:
+    own values, week map, last works, prescriptions, own names. Raise if either still cannot fit.
+    The old page ignores the new keys and still has everything its launched view needs.
+    """
     catalog = catalog_v1(catalog_result)
+    common = {k: v for k, v in catalog.items() if k in ("v", "today", "tz", "client")}
+    workout = {
+        **common,
+        "view": "workout",
+        **{k: v for k, v in catalog.items() if k in ("next", "sessions", "plan", "ex", "wk")},
+    }
+    food = {
+        **common,
+        "view": "food",
+        **{k: v for k, v in catalog.items() if k in ("foods", "fav", "meals", "units", "ft", "fv", "fh")},
+    }
     dropped: list[str] = []
 
     def urls() -> tuple[str, str]:
-        blob = encode_catalog(catalog)
-        return f"{miniapp_url}#v=workout&c={blob}", f"{miniapp_url}#v=food&c={blob}"
+        return (
+            f"{miniapp_url}#v=workout&c={encode_catalog(workout)}",
+            f"{miniapp_url}#v=food&c={encode_catalog(food)}",
+        )
 
-    for key in ("wk", "l", "p", "foods"):
+    for key in ("fv", "wk", "l", "p", "foods"):
         if max(len(u) for u in urls()) <= max_len:
             break
-        if _trim(catalog, key):
+        changed = False
+        for page, url in zip((workout, food), urls(), strict=True):
+            if len(url) > max_len:
+                changed = _trim(page, key) or changed
+        if changed:
             dropped.append(key)
     workout_url, food_url = urls()
     longest = max(len(workout_url), len(food_url))

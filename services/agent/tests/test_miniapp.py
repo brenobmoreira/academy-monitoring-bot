@@ -1,8 +1,10 @@
 import base64
 import copy
 import json
+import runpy
 import zlib
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -450,7 +452,13 @@ def test_keyboard_markup_round_trips_the_catalog():
     workout, food = (b["web_app"]["url"] for b in row)
     assert workout.startswith(URL + "#v=workout&c=") and food.startswith(URL + "#v=food&c=")
     assert "=" not in workout.split("&c=", 1)[1]  # base64url without padding
-    assert decode(workout) == decode(food) == catalog_v1(CATALOG)
+    w, f = decode(workout), decode(food)
+    assert w["view"] == "workout" and f["view"] == "food"
+    assert "foods" not in w and "plan" not in f
+    for key in ("v", "today", "tz", "client"):
+        assert w[key] == f[key] == catalog_v1(CATALOG)[key]
+    assert w["plan"] == catalog_v1(CATALOG)["plan"]
+    assert f["foods"] == CATALOG["foods"]
 
 
 def big_catalog():
@@ -477,6 +485,7 @@ def url_len(cat, **kw):
 
 def test_trimming_drops_last_work_first_then_prescriptions_then_foods():
     cat = big_catalog()
+    cat["foods"] = CATALOG["foods"]  # workout budget is now independent from meal names
     full, dropped, _ = url_len(cat, max_len=10**6)
     assert dropped == []
     without_l = url_len(
@@ -492,17 +501,21 @@ def test_trimming_drops_last_work_first_then_prescriptions_then_foods():
     size, dropped, markup = url_len(cat, max_len=size_l - 1)
     assert dropped == ["l", "p"]
     page = decode(markup["keyboard"][0][0]["web_app"]["url"])
-    assert "p" not in page["plan"][0] and "foods" in page
+    assert "p" not in page["plan"][0]
+    assert "foods" in decode(markup["keyboard"][0][1]["web_app"]["url"])
 
-    bare = {**cat, "foods": [], "plan": [{**r, "lastWork": None, "prescription": ""} for r in cat["plan"]]}
+    cat = big_catalog()
+    cat["plan"] = CATALOG["plan"]
+    bare = {**cat, "foods": []}
     floor = url_len(bare, max_len=10**6)[0]
     size, dropped, markup = url_len(cat, max_len=floor)
-    assert dropped == ["l", "p", "foods"]
-    assert "foods" not in decode(markup["keyboard"][0][0]["web_app"]["url"])
+    assert dropped == ["foods"]
+    assert "foods" not in decode(markup["keyboard"][0][1]["web_app"]["url"])
 
 
 def test_the_weeks_map_is_dropped_before_anything_the_form_needs():
     cat = big_catalog()
+    cat["foods"] = CATALOG["foods"]
     cat["recentGroups"] = [{"group": f"Grupo muscular {i}", "sets": i + 1} for i in range(14)]
     full, dropped, markup = url_len(cat, max_len=10**6)
     assert dropped == [] and len(decode(markup["keyboard"][0][0]["web_app"]["url"])["wk"]) == 14
@@ -510,7 +523,55 @@ def test_the_weeks_map_is_dropped_before_anything_the_form_needs():
     size, dropped, markup = url_len(cat, max_len=full - 1)
     page = decode(markup["keyboard"][0][0]["web_app"]["url"])
     assert dropped == ["wk"] and size <= full - 1
-    assert "wk" not in page and "l" in page["plan"][0] and "foods" in page
+    assert "wk" not in page and "l" in page["plan"][0]
+    assert "foods" in decode(markup["keyboard"][0][1]["web_app"]["url"])
+
+
+def realistic_catalog(shared=True):
+    module = runpy.run_path(str(Path(__file__).resolve().parents[3] / "tools/taco/catalog_fixture.py"))
+    return module["catalog_fixture"](shared)
+
+
+def test_shared_table_activation_uses_sheet_normalization_and_requires_every_name():
+    cat = realistic_catalog()
+    compact = catalog_v1(cat)
+    assert compact["ft"] == "taco4" and len(compact["fh"]) == 64
+    assert len(miniapp.TACO_NAMES) == 575
+    assert len(compact["foods"]) == 110
+    assert all(len(row) == 9 for row in compact["fv"])
+    cat["foods"] = ["  " + n.upper().replace(" ", "  ") + "  " for n in cat["foods"]]
+    assert catalog_v1(cat)["ft"] == "taco4"
+    cat["foods"].pop()
+    assert "ft" not in catalog_v1(cat)
+    cat = realistic_catalog()
+    accented = next(n for n in miniapp.TACO_NAMES if miniapp._normalize(n) != miniapp._food_key(n))
+    cat["foods"][cat["foods"].index(accented)] = miniapp._normalize(accented)
+    assert "ft" not in catalog_v1(cat), "accents are significant to Foods.key_"
+
+
+def test_realistic_110_own_food_values_fit_and_are_trimmed_before_names():
+    cat = realistic_catalog()
+    markup, dropped = keyboard_markup(URL, cat)
+    assert dropped == []
+    assert all(len(b["web_app"]["url"]) <= 4096 for b in markup["keyboard"][0])
+    meal = decode(markup["keyboard"][0][1]["web_app"]["url"])
+    assert len(meal["foods"]) == len(meal["fv"]) == 110
+    full = len(markup["keyboard"][0][1]["web_app"]["url"])
+    markup, dropped = keyboard_markup(URL, cat, full - 1)
+    trimmed = decode(markup["keyboard"][0][1]["web_app"]["url"])
+    assert dropped == ["fv"]
+    assert "fv" not in trimmed and trimmed["foods"] == meal["foods"]
+    assert trimmed["ft"] == "taco4" and trimmed["fh"] == meal["fh"]
+
+
+def test_food_values_without_taco_and_invalid_or_ambiguous_rows_degrade_safely():
+    cat = realistic_catalog(False)
+    assert "ft" not in catalog_v1(cat)
+    assert len(catalog_v1(cat)["fv"]) == 110
+    cat["foodTable"][0][3] = float("nan")
+    cat["foods"].append(cat["foods"][1])
+    values = catalog_v1(cat)["fv"]
+    assert 0 not in [r[0] for r in values] and 1 not in [r[0] for r in values]
 
 
 def test_a_url_that_still_does_not_fit_after_all_trims_raises():

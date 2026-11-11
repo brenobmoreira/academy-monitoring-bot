@@ -994,6 +994,12 @@ const Migrate = {
     // created, which header texts were written and each cell's value before the body, so the
     // rest is found where it is now and put back to the original, not to an intermediate value.
     const plan = Migrate.recoveryPlan_(ss, changes, all);
+    // An old-format {$f} may have been literal text (see Undo.conflict_): never written back.
+    plan.cells.forEach((x) => {
+      if (Tabs.isSnapFormula(x.target) && x.target.legacy && !Undo.same_(Migrate.gridValue_(plan.grids, x), x.target)) {
+        plan.conflicts.push(`${x.sheet}!${Audit.a1_(x.row, x.col)} foi registrada antes da proteção contra fórmulas, e o registro não distingue texto de fórmula`);
+      }
+    });
     if (plan.conflicts.length) {
       throw Undo.error_('interrupted_conflict', `A migração foi interrompida no meio e ${plan.conflicts.slice(0, 5).join('; ')}; nada foi desfeito. Confira a planilha (ou restaure a versão anterior pelo histórico de versões) antes de migrar de novo.`);
     }
@@ -1013,7 +1019,7 @@ const Migrate = {
   /** Current value (formula text or value) of a planned cell, from the grids read by the plan. */
   gridValue_(grids, x) {
     const g = grids[x.sheet];
-    return g.formulas[x.row - 1][x.col - 1] || g.values[x.row - 1][x.col - 1];
+    return Tabs.snapCell(g.formulas[x.row - 1][x.col - 1], g.values[x.row - 1][x.col - 1]);
   },
 
   /** 1-based column of letters ("AH" → 34). */
@@ -1379,7 +1385,11 @@ const Migrate = {
     if (!changed.length) return 0;
     const before = {};
     const after = {};
-    changed.forEach((x) => { const a1 = Audit.a1_(x.r, x.c); before[a1] = x.old; after[a1] = x.v; });
+    changed.forEach((x) => {
+      const a1 = Audit.a1_(x.r, x.c);
+      before[a1] = Tabs.snapCell(formulas[x.r - r1][x.c - c1], x.old);
+      after[a1] = Tabs.snapCell(typeof x.v === 'string' && x.v.charAt(0) === '=' ? x.v : '', x.v);
+    });
     ChangeLog.track({ kind: 'cells', tab: sheet.getName(), row: null, before, after });
     // One setValues per run of adjacent cells in a row (each call is a round trip on a real
     // spreadsheet); formulas are set one by one so they are never written as text.

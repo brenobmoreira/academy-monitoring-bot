@@ -342,8 +342,8 @@ const Style = {
       const next = v === null || v === undefined ? '' : v;
       if (Tabs.sameCell(old, next)) return;
       const a1 = `${Style.col(col + j)}${row + i}`;
-      before[a1] = old;
-      after[a1] = next;
+      before[a1] = Tabs.snapCell(formulas[i][j], old);
+      after[a1] = Tabs.snapCell(typeof next === 'string' && next.charAt(0) === '=' ? next : '', next);
     }));
     const keys = Object.keys(after);
     if (!keys.length) return 0;

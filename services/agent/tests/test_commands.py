@@ -420,4 +420,3 @@ async def test_ficha_and_progressao_show_last_work_and_progression_suggestions()
     assert "sugerir 62,5 kg" in prog_text
     assert "Últimas cargas registradas na ficha:" in prog_text
     assert "Supino inclinado (Upper, 18/09): 60 kg × 10 (RIR 1)" in prog_text
-

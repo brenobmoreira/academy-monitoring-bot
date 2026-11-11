@@ -12,6 +12,7 @@ from typing import Any
 OK = "ok"
 UNDO = "undo"
 FIX = "fix"
+RETRY = "retry"  # `retry:<id>`: replays a Mini App write the sheet could not take
 MAX_DATA = 64  # bytes, Telegram's limit for callback_data
 
 FIX_PROMPT = "✏️ Envie a correção para esta mensagem"

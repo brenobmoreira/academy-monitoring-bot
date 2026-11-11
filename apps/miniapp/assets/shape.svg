@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <title>Shape</title>
+  <style>
+    .sh-shadow{fill:#1c1917;opacity:.1}.sh-face-mid{fill:#3a3532}.sh-face-side{fill:#1c1917}
+    .sh-collar{fill:#e04e14}.sh-grip{fill:#f5f4f2;stroke:#1c1917;stroke-width:2.4}
+    .sh-knurl{stroke:#a8a29e;stroke-width:1.2}.sh-ink{fill:#1c1917}
+    .sh-line{fill:none;stroke:#1c1917;stroke-width:2.6;stroke-linecap:round}
+  </style>
+  <ellipse class="sh-shadow" cx="60" cy="108" rx="44" ry="3.2"/>
+  <g class="sh-figure">
+    <!-- hex heads, seen from the side: three faces (side, front, side) -->
+    <g class="sh-head sh-head-l">
+      <rect class="sh-face-mid" x="5" y="20" width="29" height="80" rx="4"/>
+      <rect class="sh-face-side" x="5" y="20" width="7" height="80" rx="3"/>
+      <rect class="sh-face-side" x="27" y="20" width="7" height="80" rx="3"/>
+    </g>
+    <g class="sh-head sh-head-r">
+      <rect class="sh-face-mid" x="86" y="20" width="29" height="80" rx="4"/>
+      <rect class="sh-face-side" x="86" y="20" width="7" height="80" rx="3"/>
+      <rect class="sh-face-side" x="108" y="20" width="7" height="80" rx="3"/>
+    </g>
+    <!-- collars: the accent; they turn to the warning colour on alert -->
+    <rect class="sh-collar" x="34" y="38" width="5" height="44" rx="1.5"/>
+    <rect class="sh-collar" x="81" y="38" width="5" height="44" rx="1.5"/>
+    <!-- grip: carries the face; knurled bands near each collar -->
+    <rect class="sh-grip" x="39" y="42" width="42" height="36" rx="5"/>
+    <path class="sh-knurl" d="M43.5 51v18M46.5 51v18M73.5 51v18M76.5 51v18"/>
+
+    <!-- idle: level bars, neutral mouth -->
+    <g >
+      <g class="sh-blink">
+        <rect class="sh-ink" x="50" y="56" width="7" height="3.2" rx="1.4"/>
+        <rect class="sh-ink" x="63" y="56" width="7" height="3.2" rx="1.4"/>
+      </g>
+      <path class="sh-line" d="M50 51h7M63 51h7"/>
+      <path class="sh-line" d="M55.5 68h9"/>
+    </g>
+  </g>
+</svg>

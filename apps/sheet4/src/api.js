@@ -33,7 +33,10 @@ function doPost(e) {
 const SheetApi = {
   ENVELOPE: ['key', 'op', 'args', 'requestId'],
   MAX_REQUEST_ID: 120,
+  /** Rows a request-id lookup always reads; the lookup widens to cover REQUEST_ID_WINDOW_HOURS. */
   REQUEST_ID_SCAN_ROWS: 200,
+  /** A request id is recognised at least this long (the bot keeps a retry for 24 h; margin for clocks). */
+  REQUEST_ID_WINDOW_HOURS: 48,
   /** How far back catalog.recent looks. */
   RECENT_MINUTES: 30,
   LABEL_PREFIX: 'Bot:',
@@ -234,6 +237,26 @@ const SheetApi = {
     return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
   },
 
+  /**
+   * First Log row a request-id lookup reads: the last REQUEST_ID_SCAN_ROWS rows, widened by
+   * doubling (one cell read per step) until the row probed is older than REQUEST_ID_WINDOW_HOURS.
+   * The Log is appended in time order, so every action of the window starts at or after that row,
+   * however many rows other writes logged since. The cost follows the rows logged inside the
+   * window, not the size of the Log. A row without a date keeps widening (never stops early).
+   */
+  requestScanStart_(sheet, atCol, first, last) {
+    const cutoff = Date.now() - SheetApi.REQUEST_ID_WINDOW_HOURS * 3600 * 1000;
+    let span = SheetApi.REQUEST_ID_SCAN_ROWS;
+    let start = Math.max(first, last - span + 1);
+    while (atCol && start > first) {
+      const at = sheet.getRange(start, atCol).getValue();
+      if (at && typeof at.getTime === 'function' && at.getTime() < cutoff) break;
+      span *= 2;
+      start = Math.max(first, last - span + 1);
+    }
+    return start;
+  },
+
   findByRequestId_(reqId) {
     if (!reqId || !SheetApi.has_('log')) return null;
     const spec = Tabs.get('log');
@@ -241,7 +264,7 @@ const SheetApi = {
     const first = spec.firstDataRow;
     const last = sheet.getLastRow();
     if (last < first || !lastCol || !map.action || !map.actionId) return null;
-    const start = Math.max(first, last - SheetApi.REQUEST_ID_SCAN_ROWS + 1);
+    const start = SheetApi.requestScanStart_(sheet, map.at, first, last);
     const values = sheet.getRange(start, 1, last - start + 1, lastCol).getValues();
     const needle = `"requestId":${JSON.stringify(reqId)}`;
     let targetId = null;
@@ -289,7 +312,7 @@ const SheetApi = {
     if (!after) return obj;
     Tabs.columns(tabId).forEach((col) => {
       obj[col.key] = Object.prototype.hasOwnProperty.call(after, col.header)
-        ? Tabs.fromCell(col, after[col.header])
+        ? Tabs.fromCell(col, Tabs.isSnapFormula(after[col.header]) ? after[col.header].$f : after[col.header])
         : null;
     });
     return obj;

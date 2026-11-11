@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Shape: movimentos</title>
+  <!-- Usa os arquivos reais do app (mesma pasta), para mostrar exatamente o que o app faz. Abre direto do disco. -->
+  <link rel="icon" href="assets/shape.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    .lab { max-width: 430px; margin: 0 auto; padding: 20px 16px 120px; }
+    .lab h1 { margin: 0; font-size: 28px; font-weight: 650; letter-spacing: -0.03em; }
+    .lab-sub { margin: 6px 0 14px; color: var(--hint); font-size: 14px; }
+    .lab-bar { position: sticky; top: 0; z-index: 9; display: flex; gap: 8px; margin: 0 -16px; padding: 10px 16px; background: var(--bg); }
+    .demo { margin-top: 28px; }
+    .demo-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .demo h2 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: -0.015em; }
+    .demo .spec { margin: 3px 0 0; color: var(--hint); font-size: 13px; line-height: 1.35; }
+    .stage { position: relative; margin-top: 12px; padding: 12px; border-radius: 20px; border: 1.5px dashed var(--line); overflow: hidden; }
+    .stage .coach { position: relative; margin: 0; padding: 12px 0 0; background: none; }
+    .stage .pl-bar { left: 0; right: 0; top: 0; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .replay { flex: none; }
+    .reduced-note { display: none; margin: 0 0 12px; padding: 9px 12px; border-radius: 12px; background: var(--amber-soft); font-size: 13px; }
+    @media (prefers-reduced-motion: reduce) { .reduced-note { display: block; } }
+  </style>
+</head>
+<body>
+  <div class="lab" id="lab">
+    <h1>Movimentos do Shape</h1>
+    <p class="lab-sub">Cada bloco mostra um movimento isolado, com o código real do app. Toque em "Repetir" quantas vezes quiser; os controles dentro dos blocos também funcionam.</p>
+    <p class="reduced-note">O sistema está com "reduzir movimento" ligado: aqui tudo troca na hora, sem animação. É o comportamento esperado.</p>
+    <div class="lab-bar">
+      <button type="button" class="chip" id="t-theme" aria-pressed="false">Tema escuro</button>
+      <button type="button" class="chip" id="t-slow" aria-pressed="false">Câmera lenta 4×</button>
+    </div>
+  </div>
+
+  <div class="sheet-backdrop" id="sheet-backdrop" hidden></div>
+  <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="Exemplo de folha" hidden>
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <h2 class="sheet-title">Adicionar exercício</h2>
+    <ul class="results">
+      <li><button type="button" class="result"><span>Rosca direta</span><span class="tag">Bíceps</span></button></li>
+      <li><button type="button" class="result"><span>Tríceps corda</span><span class="tag">Tríceps</span></button></li>
+      <li><button type="button" class="result"><span>Elevação lateral</span><span class="tag">Ombro</span></button></li>
+    </ul>
+  </div>
+
+  <script src="src/avatar.js"></script>
+  <script src="src/motion.js"></script>
+  <script>
+  (function () {
+    'use strict';
+    var M = window.ShapeMotion, A = window.ShapeAvatar;
+    var lab = document.getElementById('lab');
+    var html = document.documentElement;
+
+    /* controles da página --------------------------------------------------------------------- */
+    var dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    var themeBtn = document.getElementById('t-theme'), slowBtn = document.getElementById('t-slow');
+    function applyTheme() { html.setAttribute('data-scheme', dark ? 'dark' : 'light'); themeBtn.setAttribute('aria-pressed', String(dark)); }
+    themeBtn.onclick = function () { dark = !dark; applyTheme(); };
+    applyTheme();
+
+    // Câmera lenta: só nesta página, estica as animações JS (as transições CSS de toque seguem normais).
+    var rate = 1, nativeAnimate = Element.prototype.animate;
+    if (nativeAnimate) {
+      Element.prototype.animate = function (frames, o) {
+        var opts = typeof o === 'number' ? { duration: o } : Object.assign({}, o);
+        opts.duration = (opts.duration || 0) * rate;
+        if (opts.delay) opts.delay *= rate;
+        return nativeAnimate.call(this, frames, opts);
+      };
+    }
+    slowBtn.onclick = function () { rate = rate === 1 ? 4 : 1; slowBtn.setAttribute('aria-pressed', String(rate === 4)); };
+
+    /* peças ----------------------------------------------------------------------------------- */
+    function el(markup) { var t = document.createElement('template'); t.innerHTML = markup.trim(); return t.content.firstChild; }
+    var CHEV = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+    function stepper(value, unit, big, step) {
+      return '<div class="stepper' + (big ? ' big' : '') + '"><button type="button" class="step-btn" data-step="-' + step + '">' + (big ? '−' + String(step).replace('.', ',') : '−') + '</button>' +
+        '<label class="step-field"><input class="step-input" type="text" inputmode="decimal" value="' + value + '" aria-label="' + unit + '">' + (big ? '<span class="step-unit">' + unit + '</span>' : '') + '</label>' +
+        '<button type="button" class="step-btn" data-step="' + step + '">' + (big ? '+' + String(step).replace('.', ',') : '+') + '</button></div>';
+    }
+    function setBlock(kg, j) {
+      return '<div class="set"><div class="set-head"><span class="set-label"><span class="kind-dot"></span>Série ' + (j + 1) + '</span>' +
+        '<button type="button" class="btn-x" aria-label="Remover série ' + (j + 1) + '">×</button></div>' + stepper(kg, 'kg', true, 2.5) + '</div>';
+    }
+    function card(name, group, open, sets, status) {
+      var filled = sets.length && status !== 'empty';
+      var body = open ? '<div class="card-body"><div class="ref"><div class="ref-box"><small>Plano</small><b>3×8-10</b></div><div class="ref-box"><small>Última</small><b>80×8, 80×7</b></div></div>' +
+        sets.map(setBlock).join('') + '<div class="extras"><button type="button" class="extra">Série ' + (sets.length + 1) + '</button><button type="button" class="extra">Nota</button></div></div>' : '';
+      return el('<article class="card" data-status="' + (status || 'empty') + '"><button type="button" class="card-head" aria-expanded="' + open + '">' +
+        '<span class="dot" aria-hidden="true"></span><span><span class="card-name">' + name + '</span><span class="card-group">' + group + '</span></span>' +
+        '<span><span class="card-summary">' + (filled ? sets.map(function (k) { return k + '×8'; }).join('  ') : '') + '</span><span class="chev" aria-hidden="true">' + CHEV + '</span></span></button>' + body + '</article>');
+    }
+    function plateItem(name, meta, qty) {
+      return el('<li class="plate-item k-food"><span class="plate-bar" aria-hidden="true"></span><span><span class="plate-name">' + name + '</span><span class="plate-meta">' + meta + '</span></span>' +
+        '<div class="plate-right"><span class="plate-qty">' + qty + '</span><button type="button" class="btn-x" aria-label="Tirar ' + name + '">×</button></div></li>');
+    }
+    function fmt(n) { return String(Math.round(n * 100) / 100).replace('.', ','); }
+    /** Os steppers da demo funcionam de verdade; o motion.js rola o número sozinho ao ver o clique. */
+    function liveSteppers(stage, min, max) {
+      stage.addEventListener('click', function (e) {
+        var b = e.target.closest('.step-btn');
+        if (!b) return;
+        var input = b.parentNode.querySelector('input');
+        var v = parseFloat(input.value.replace(',', '.')) || 0;
+        input.value = fmt(Math.min(max, Math.max(min, v + parseFloat(b.getAttribute('data-step')))));
+      });
+    }
+
+    /* demos: {title, spec, build(stage) -> play} ------------------------------------------------ */
+    var DEMOS = [];
+    function demo(title, spec, build, label) { DEMOS.push({ title: title, spec: spec, build: build, label: label }); }
+
+    demo('Treino ↔ Refeição', 'Pílula desliza 260 ms; o conteúdo entra do lado da aba, em cascata: 220 ms + 20 ms por bloco, desacelerando.', function (stage) {
+      var view = 'workout';
+      var tabs = el('<nav class="tabs" data-view="workout"><button type="button" class="tab" aria-selected="true">Treino</button><button type="button" class="tab" aria-selected="false">Refeição</button></nav>');
+      var box = el('<div></div>');
+      function content() {
+        return view === 'workout'
+          ? [el('<div class="view-head"><h1 class="view-title">Upper A</h1><p class="view-sub">Próxima da rotação. 5 exercícios na ficha</p></div>'), card('Supino reto', 'Peito', false, [80], 'filled'), el('<div style="height:10px"></div>'), card('Remada curvada', 'Costas', false, [], 'empty')]
+          : [el('<div class="view-head"><h1 class="view-title">Almoço</h1><p class="view-sub">2 itens no prato</p></div>'), el('<ul class="plate"></ul>')];
+      }
+      function paint() {
+        tabs.setAttribute('data-view', view);
+        tabs.children[0].setAttribute('aria-selected', String(view === 'workout'));
+        tabs.children[1].setAttribute('aria-selected', String(view === 'food'));
+        var kids = content();
+        box.replaceChildren.apply(box, kids);
+        if (view === 'food') { kids[1].appendChild(plateItem('Arroz branco', 'catálogo, cozido', '150 g')); kids[1].appendChild(plateItem('Frango grelhado', 'catálogo', '120 g')); }
+      }
+      function go(v) { if (v === view) return; view = v; paint(); M.viewIn(box, v === 'food' ? 1 : -1); }
+      tabs.children[0].onclick = function () { go('workout'); };
+      tabs.children[1].onclick = function () { go('food'); };
+      stage.append(tabs, box);
+      paint();
+      return function () { go(view === 'workout' ? 'food' : 'workout'); };
+    }, 'Trocar de aba');
+
+    demo('Cartões de uma sessão entrando', 'Ao trocar de sessão: sobem 10 px com fade, 220 ms, 30 ms entre um e outro (até 6).', function (stage) {
+      var box = el('<div class="cards"></div>');
+      [['Supino reto', 'Peito', 'filled'], ['Remada curvada', 'Costas', 'filled'], ['Desenvolvimento', 'Ombro', 'empty'], ['Rosca direta', 'Bíceps', 'empty']].forEach(function (c) {
+        box.appendChild(card(c[0], c[1], false, c[2] === 'filled' ? [80, 80] : [], c[2]));
+      });
+      stage.appendChild(box);
+      return function () { M.stagger(box.children); };
+    });
+
+    demo('Abrir e fechar um cartão', 'Sem animar altura: o corpo aparece (220 ms), a seta gira e os cartões de baixo deslizam para o lugar novo (FLIP, 220 ms).', function (stage) {
+      var box = el('<div class="cards"></div>');
+      var open = false, mid;
+      function make() {
+        var c = card('Remada curvada', 'Costas', open, [60], 'filled');
+        c.firstChild.onclick = toggle;
+        return c;
+      }
+      function toggle() {
+        open = !open;
+        var fresh = make();
+        var after = M.snapshot(mid, null);
+        box.replaceChild(fresh, mid);
+        mid = fresh;
+        if (after) after(fresh, stage);
+      }
+      mid = make();
+      box.append(card('Supino reto', 'Peito', false, [80, 80], 'filled'), mid, card('Desenvolvimento', 'Ombro', false, [], 'empty'));
+      stage.appendChild(box);
+      liveSteppers(stage, 0, 500);
+      return toggle;
+    }, 'Abrir / fechar');
+
+    demo('Série adicionada e removida', 'A nova série aparece e empurra o resto; a removida sai como fantasma (180 ms, acelerando) enquanto o que estava abaixo sobe (220 ms).', function (stage) {
+      var sets = [80, 82.5], cur;
+      function make() {
+        var c = card('Supino reto', 'Peito', true, sets.map(fmt), 'filled');
+        c.querySelector('.extra').onclick = add;
+        Array.prototype.forEach.call(c.querySelectorAll('.set .btn-x'), function (b, j) { b.onclick = function () { remove(j, b.closest('.set')); }; });
+        return c;
+      }
+      function swap(leaving) {
+        var fresh = make();
+        var after = M.snapshot(cur, leaving);
+        cur.parentNode.replaceChild(fresh, cur);
+        cur = fresh;
+        if (after) after(fresh, stage);
+      }
+      function add() { if (sets.length < 4) { sets.push(sets[sets.length - 1] || 80); swap(null); } }
+      function remove(j, block) { if (sets.length > 1) { sets.splice(j, 1); swap(block); } }
+      cur = make();
+      stage.append(cur, el('<button type="button" class="btn-soft btn-block add-ex">Adicionar exercício</button>'));
+      liveSteppers(stage, 0, 500);
+      var adding = true;
+      return function () {
+        if (sets.length >= 3) adding = false; else if (sets.length <= 1) adding = true;
+        if (adding) add(); else remove(0, cur.querySelector('.set'));
+      };
+    }, 'Adicionar / remover série');
+
+    demo('Item no prato: entra e sai', 'Entra subindo de 97% (260 ms). Ao tirar, o fantasma some (180 ms) e a lista fecha o espaço (220 ms).', function (stage) {
+      var FOODS = [['Arroz branco', 'catálogo, cozido', '150 g'], ['Frango grelhado', 'catálogo', '120 g'], ['Feijão carioca', 'catálogo, cozido', '100 g'], ['Banana prata', 'catálogo', '1 un']];
+      var n = 2;
+      var ul = el('<ul class="plate"></ul>');
+      var foot = el('<div class="foot-actions"><button type="button" class="btn-text">Limpar refeição</button></div>');
+      function add() {
+        var li = plateItem.apply(null, FOODS[ul.children.length % FOODS.length]);
+        li.querySelector('.btn-x').onclick = function () { remove(li); };
+        ul.appendChild(li);
+        return li;
+      }
+      function remove(li) {
+        var after = M.leave(li, stage);
+        ul.removeChild(li);
+        if (after) after();
+      }
+      for (var i = 0; i < n; i++) add();
+      stage.append(ul, foot);
+      var adding = true;
+      return function () {
+        if (ul.children.length >= 4) adding = false; else if (ul.children.length <= 1) adding = true;
+        if (adding) M.enter(add()); else remove(ul.children[0]);
+      };
+    }, 'Pôr / tirar item');
+
+    demo('Stepper: o número muda de verdade', 'O botão cede no toque (120 ms). O número rola de baixo (+) ou de cima (−) em 150 ms; no limite, só balança de lado (180 ms).', function (stage) {
+      stage.appendChild(el('<div>' + stepper('80', 'kg', true, 2.5) + '<div class="pair"><div>' + stepper('8', 'reps', false, 1) + '<span class="step-label">reps</span></div><div>' + stepper('4', 'RIR', false, 1) + '<span class="step-label">RIR (máx. 5: toque + para ver o limite)</span></div></div></div>'));
+      stage.addEventListener('click', function (e) {
+        var b = e.target.closest('.step-btn');
+        if (!b) return;
+        var input = b.parentNode.querySelector('input');
+        var rir = input.getAttribute('aria-label') === 'RIR';
+        var v = parseFloat(input.value.replace(',', '.')) || 0;
+        input.value = fmt(Math.min(rir ? 5 : 500, Math.max(0, v + parseFloat(b.getAttribute('data-step')))));
+      });
+      var btns = stage.querySelectorAll('.step-btn');
+      var seq = [1, 1, 0, 5, 5], k = 0; // +kg, +kg, −kg, +RIR (chega a 5), +RIR (limite)
+      return function () { btns[seq[k++ % seq.length]].click(); };
+    }, 'Tocar no stepper');
+
+    demo('Chips: a escolha encaixa', 'Cede no toque (120 ms) e o chip escolhido encaixa com leve mola: 90% → 100% em 240 ms.', function (stage) {
+      var names = ['Upper A', 'Lower A', 'Upper B', 'Lower B'], cur = 0;
+      var row = el('<div class="chip-wrap" role="radiogroup" aria-label="Sessão"></div>');
+      function paint() {
+        row.replaceChildren.apply(row, names.map(function (s, i) {
+          var b = el('<button type="button" role="radio" class="chip" aria-checked="' + (i === cur) + '">' + s + '</button>');
+          b.onclick = function () { cur = i; paint(); };
+          return b;
+        }));
+      }
+      paint();
+      stage.appendChild(row);
+      return function () { row.children[(cur + 1) % names.length].click(); };
+    }, 'Escolher o próximo');
+
+    demo('Pulso e o progresso', 'Barra: 450 ms. Cada marca nova acende e Pulso pulsa (300 ms + anel 420 ms). Anel completo: uma volta de 700 ms. "Anotei": aceno de 260 ms. "Corrija": tremor de 320 ms.', function (stage) {
+      var coach = el('<header class="coach"><div class="shape" data-state="idle" aria-hidden="true"></div><div class="bubble"><span class="bubble-name">Shape</span><p class="bubble-text">Upper A: registre série por série.</p></div></header>');
+      stage.appendChild(coach);
+      A.mount(coach.firstChild, coach.querySelector('.bubble-text'));
+      var p = 0;
+      var acts = [
+        ['Série anotada', function () { A.pulse('nod'); }],
+        ['Erro de novo', function () { A.setMood('alert'); A.say('Supino reto: reps obrigatório'); A.pulse('no'); }],
+        ['Conferindo', function () { A.setMood('thinking'); A.say('Conferindo o registro'); }],
+        ['Pronto para revisar', function () { A.setMood('happy'); A.say('4 exercícios prontos. Pode revisar.'); }],
+        ['Parado', function () { A.setMood('idle'); A.say('Upper A: registre série por série.'); }],
+      ];
+      var row = el('<div class="row"></div>');
+      acts.forEach(function (a) { var b = el('<button type="button" class="chip">' + a[0] + '</button>'); b.onclick = a[1]; row.appendChild(b); });
+      stage.appendChild(row);
+      return function () {
+        p = p >= 1 ? 0 : Math.min(1, p + 0.25);
+        A.setProgress(p);
+        A.say(p === 0 ? 'Upper A: registre série por série.' : Math.round(p * 4) + ' de 4 exercícios com séries.');
+      };
+    }, 'Preencher mais um exercício');
+
+    function reviewBlock() {
+      var box = el('<section class="review"></section>');
+      var scene = el('<div class="mascot-scene"><p>Validado aqui. A confirmação vem do bot.</p></div>');
+      scene.insertBefore(A.create('happy'), scene.firstChild);
+      box.append(scene,
+        el('<div class="view-head" style="margin-top:12px"><h1 class="view-title">Confira o envio</h1><p class="view-sub">É exatamente isto que vai para o bot.</p></div>'),
+        el('<dl class="facts"><dt>Data</dt><dd>Hoje, seg 09/11</dd><dt>Sessão</dt><dd>Upper A</dd><dt>Status</dt><dd>parcial</dd></dl>'),
+        el('<ul class="review-list"><li class="review-item"><b>Supino reto</b><span>Série 1: 80 kg × 8</span><span>Série 2: 80 kg × 7</span></li><li class="review-item"><b>Remada curvada</b><span>Série 1: 60 kg × 10</span></li></ul>'),
+        el('<div class="meter"><div class="meter-bar"><i style="width:38%"></i></div><p>1556 de 4096 bytes do limite do Telegram</p></div>'));
+      return box;
+    }
+
+    demo('Entrando na revisão', 'Os blocos sobem 12 px em cascata (220 ms + 20 ms cada), Pulso cresce com mola (320 ms) e o medidor enche (420 ms).', function (stage) {
+      var box = reviewBlock();
+      stage.appendChild(box);
+      return function () { M.review(box); };
+    });
+
+    demo('Entrega ao Telegram', 'A revisão sobe 10 px e esmaece para 35% (260 ms, acelerando) enquanto Pulso "pensa". Sem check, sem "salvo": quem confirma é a resposta do bot. Aqui ela volta sozinha depois de 1,2 s.', function (stage) {
+      var box = reviewBlock();
+      stage.appendChild(box);
+      var big = box.querySelector('.shape'), timer = null, lift = null;
+      return function () {
+        clearTimeout(timer);
+        if (lift) lift.cancel();
+        big.setAttribute('data-state', 'thinking');
+        lift = M.handoff(box);
+        timer = setTimeout(function () { if (lift) lift.cancel(); lift = null; big.setAttribute('data-state', 'happy'); }, 1200 * rate);
+      };
+    }, 'Enviar');
+
+    demo('Campo com erro', 'O cartão que precisa de ajuste treme uma vez (300 ms) e Pulso entra em alerta. Nada trava: dá para corrigir na hora.', function (stage) {
+      var c = card('Supino reto', 'Peito', false, [80], 'error');
+      stage.appendChild(c);
+      return function () { M.shake(c); };
+    });
+
+    demo('Folha de baixo', 'Sobe 40 px com fade (240 ms). Ao fechar, o fundo libera os toques na hora e a folha desce 48 px (180 ms).', function () {
+      var sheet = document.getElementById('sheet'), back = document.getElementById('sheet-backdrop');
+      function close() { [sheet, back].forEach(function (x) { if (!x.hidden && !M.out(x, function () { x.hidden = true; })) x.hidden = true; }); }
+      function open() { M.keep(sheet); M.keep(back); sheet.hidden = false; back.hidden = false; }
+      back.onclick = close;
+      sheet.onclick = close;
+      return open;
+    }, 'Abrir (toque fora para fechar)');
+
+    DEMOS.forEach(function (d) {
+      var sec = el('<section class="demo"><div class="demo-head"><div><h2></h2><p class="spec"></p></div></div><div class="stage"></div><div class="row"><button type="button" class="btn-soft replay"></button></div></section>');
+      sec.querySelector('h2').textContent = d.title;
+      sec.querySelector('.spec').textContent = d.spec;
+      var stage = sec.querySelector('.stage');
+      lab.appendChild(sec);
+      var play = d.build(stage);
+      if (!stage.firstChild) stage.hidden = true;
+      var btn = sec.querySelector('.replay');
+      btn.textContent = d.label || 'Repetir';
+      btn.onclick = play;
+    });
+  })();
+  </script>
+</body>
+</html>

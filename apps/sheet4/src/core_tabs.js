@@ -44,6 +44,31 @@ const Tabs = {
     return typeof v === 'string' && v.charAt(0) === "'" ? `'${v}` : v;
   },
 
+  /**
+   * User free text for setValue(s): Sheets parses a string that starts with = as a formula (and
+   * + - @ as typed input), so those get the leading apostrophe that marks literal text; it is
+   * not part of the stored value. Numbers, dates, booleans and null pass through. Use this, not
+   * input(), for every cell that holds text a person or the bot typed. Not for intended formulas.
+   */
+  text(v) {
+    return typeof v === 'string' && /^['=+@-]/.test(v) ? `'${v}` : v;
+  },
+
+  /**
+   * A cell as change snapshots hold it: a real formula as {$f: text}, anything else as its
+   * value. Literal text that starts with "=" stays a string, so undo writes it back as text.
+   * @param {string} formula the cell's formula ('' when none)
+   * @param {*} value
+   */
+  snapCell(formula, value) {
+    return formula ? { $f: formula } : value;
+  },
+
+  /** True for a snapshot formula made by snapCell. */
+  isSnapFormula(v) {
+    return !!v && typeof v === 'object' && !(v instanceof Date) && typeof v.$f === 'string';
+  },
+
   TITLE_ROW: 2,
   HELP_ROW: 3,
   HEADER_ROW: 5,
@@ -367,7 +392,7 @@ const Tabs = {
     const rows = [];
     const values = lines.map((cells, i) => {
       const line = [];
-      for (let c = 1; c <= width; c++) line.push(c in cells ? Tabs.input(cells[c]) : '');
+      for (let c = 1; c <= width; c++) line.push(c in cells ? Tabs.text(cells[c]) : '');
       const after = {};
       Object.keys(cells).forEach((c) => { after[Tabs.cellName_(byCol, Number(c))] = cells[c]; });
       Tabs.track_(id, { kind: 'append', tab: spec.name, row: first + i, before: null, after });
@@ -398,13 +423,13 @@ const Tabs = {
       const formula = formulas[c - 1];
       const old = formula || values[c - 1];
       if (!formula && Tabs.sameCell(old, cells[c])) return false;
-      before[Tabs.cellName_(byCol, c)] = old;
+      before[Tabs.cellName_(byCol, c)] = Tabs.snapCell(formula, old);
       after[Tabs.cellName_(byCol, c)] = cells[c];
       return true;
     });
     if (!changed.length) return row;
     Tabs.track_(id, { kind: 'update', tab: spec.name, row, before, after });
-    changed.forEach((c) => sheet.getRange(row, c).setValue(Tabs.input(cells[c])));
+    changed.forEach((c) => sheet.getRange(row, c).setValue(Tabs.text(cells[c])));
     return row;
   },
 
@@ -419,7 +444,7 @@ const Tabs = {
     const before = {};
     values.forEach((v, i) => {
       const value = formulas[i] || v;
-      if (value !== '' && value !== null && value !== undefined) before[Tabs.cellName_(byCol, i + 1)] = value;
+      if (value !== '' && value !== null && value !== undefined) before[Tabs.cellName_(byCol, i + 1)] = Tabs.snapCell(formulas[i], v);
     });
     Tabs.track_(id, { kind: 'delete', tab: spec.name, row, before, after: null });
     sheet.deleteRow(row);
@@ -437,13 +462,14 @@ const Tabs = {
     Object.keys(cells).forEach((a1) => {
       const range = sheet.getRange(a1);
       const formula = range.getFormulas()[0][0];
-      before[a1] = formula || range.getValue();
-      after[a1] = cells[a1] === null || cells[a1] === undefined ? '' : cells[a1];
+      before[a1] = Tabs.snapCell(formula, range.getValue());
+      const v = cells[a1] === null || cells[a1] === undefined ? '' : cells[a1];
+      after[a1] = Tabs.snapCell(typeof v === 'string' && v.charAt(0) === '=' ? v : '', v);
     });
     Tabs.track_(id, { kind: 'cells', tab: spec.name, row: null, before, after });
     Object.keys(after).forEach((a1) => {
       const v = after[a1];
-      if (typeof v === 'string' && v.charAt(0) === '=') sheet.getRange(a1).setFormula(v);
+      if (Tabs.isSnapFormula(v)) sheet.getRange(a1).setFormula(v.$f);
       else sheet.getRange(a1).setValue(Tabs.input(v));
     });
   },

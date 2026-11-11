@@ -753,6 +753,128 @@
     return { args: errors.length ? null : args, errors: errors };
   }
 
+  /* Pulso: decisions only, no DOM or clocks ------------------------------------------------------- */
+
+  var PULSO_IDLE_MS = 45000;
+
+  /** A completed work set, using the same kg/reps bounds as the form. */
+  function workSetDone(s) {
+    if (!s) return false;
+    var kg = parseDecimal(s.kg), reps = parseDecimal(s.reps);
+    return kg !== null && kg >= LIMITS.KG_MIN && kg <= LIMITS.KG_MAX &&
+      Number.isInteger(reps) && reps >= LIMITS.REPS_MIN && reps <= LIMITS.REPS_MAX;
+  }
+
+  /** Only an explicit NxReps prescription supplies a set count; prose is not guessed. */
+  function plannedSets(text) {
+    var m = /^\s*(\d+)\s*[x×X*]\s*\d+(?:\s*[–-]\s*\d+)?(?:\s+RIR\s+\d+(?:[.,]\d+)?)?\s*$/i.exec(text || '');
+    return m && Number(m[1]) > 0 ? Number(m[1]) : null;
+  }
+
+  function pulsoPlan(list) {
+    var plan = (list || []).filter(function (c) { return c.fromPlan; });
+    var total = 0, done = 0, known = plan.length > 0;
+    plan.forEach(function (card) {
+      var n = plannedSets(card.p);
+      if (n === null) { known = false; return; }
+      total += n;
+      done += Math.min(n, card.sets.filter(workSetDone).length);
+    });
+    return { known: known, total: total, done: done, remaining: total - done, complete: known && done === total };
+  }
+
+  /** Compare the same numbered work set only (no invented reference for extra sets). */
+  function pulsoGain(card, index) {
+    if (!card || !workSetDone(card.sets[index])) return null;
+    var errors = [];
+    buildSet(errors, card.sets[index], '', true);
+    if (errors.length) return null;
+    var last = parseLastWork(card.l), ref = last && last[index];
+    if (!ref) return null;
+    var kg = parseDecimal(card.sets[index].kg), reps = parseDecimal(card.sets[index].reps);
+    var delta = kg > ref.kg ? kg - ref.kg : kg === ref.kg && reps > ref.reps ? reps - ref.reps : 0;
+    if (!delta) return null;
+    // Avoid binary decimal noise in subtraction (e.g. 17.6 - 17.5).
+    delta = Math.round(delta * 1000000) / 1000000;
+    var unit = kg > ref.kg ? 'kg' : 'reps';
+    return { value: delta, unit: unit, line: '+' + formatBR(delta) + ' ' + unit + ' em relação à última vez' };
+  }
+
+  function pulsoTips(context) {
+    var tips = [], list = context.cards || [];
+    if (context.view === 'food') {
+      var items = context.items || [];
+      if (items.length) tips.push('Seu prato tem ' + items.length + (items.length === 1 ? ' item.' : ' itens.'));
+      var described = items.concat(context.compose ? [context.compose] : []).some(function (it) {
+        return it.kind === 'description' && !blank(it.description) && blank(it.qty);
+      });
+      if (described) tips.push('A descrição sem quantidade entra no diário sem cálculo.');
+    } else {
+      var index = context.cardIndex;
+      if (!(index >= 0 && index < list.length)) {
+        index = -1;
+        list.forEach(function (c, i) {
+          var n = plannedSets(c.p);
+          if (index < 0 && (n === null || c.sets.filter(workSetDone).length < n)) index = i;
+        });
+        if (index < 0) index = 0;
+      }
+      var card = list[index], last = card && parseLastWork(card.l);
+      if (last) tips.push(card.name + ', última vez: ' + last.map(describeSet).join(' · ') + '.');
+      var plan = pulsoPlan(list);
+      if (plan.known) tips.push(plan.remaining ? 'Faltam ' + plan.remaining + (plan.remaining === 1 ? ' série planejada.' : ' séries planejadas.') : 'Todas as séries planejadas estão preenchidas.');
+      if (card && list[index + 1]) tips.push('Depois de ' + card.name + ': ' + list[index + 1].name + '.');
+    }
+    return tips.length ? tips : ['Tô por aqui. Um registro de cada vez.'];
+  }
+
+  function pulsoTip(context, tap) {
+    var tips = pulsoTips(context);
+    var index = Number.isInteger(tap) && tap >= 0 ? tap : 0;
+    return { mood: 'focused', pulse: 'nod', line: tips[index % tips.length] };
+  }
+
+  /** One reaction per action. Completion takes precedence and can include the gain. */
+  function pulsoReaction(before, after, cardIndex, setIndex) {
+    var full = !pulsoPlan(before).complete && pulsoPlan(after).complete;
+    var gain = pulsoGain(after[cardIndex], setIndex);
+    var old = before[cardIndex] && before[cardIndex].sets[setIndex];
+    var now = after[cardIndex] && after[cardIndex].sets[setIndex];
+    if (gain && old && workSetDone(old) &&
+        !(parseDecimal(now.kg) > parseDecimal(old.kg) ||
+          (parseDecimal(now.kg) === parseDecimal(old.kg) && parseDecimal(now.reps) > parseDecimal(old.reps)))) gain = null;
+    if (full) return { mood: 'happy', pulse: 'full', line: 'Todas as séries planejadas preenchidas!' + (gain ? ' ' + gain.line + '.' : '') };
+    return gain ? { mood: 'happy', pulse: 'celebrate', line: gain.line + '.' } : null;
+  }
+
+  function pulsoSummary(context) {
+    if (context.view === 'food') {
+      var n = (context.items || []).length;
+      return n ? n + (n === 1 ? ' item nesta refeição.' : ' itens nesta refeição.') : 'Refeição pronta para conferir.';
+    }
+    var count = 0, best = null, name = '';
+    (context.cards || []).forEach(function (card) {
+      card.sets.forEach(function (s, i) {
+        if (workSetDone(s)) count++;
+        var gain = pulsoGain(card, i);
+        if (gain && (!best || (gain.unit === 'kg' && best.unit !== 'kg') || (gain.unit === best.unit && gain.value > best.value))) {
+          best = gain; name = card.name;
+        }
+      });
+    });
+    var line = count ? count + (count === 1 ? ' série neste treino.' : ' séries neste treino.') : 'Sessão pronta para conferir.';
+    return line + (best ? ' ' + name + ': ' + best.line + '.' : '');
+  }
+
+  function pulsoError(errors) {
+    if (!errors || !errors.length) return null;
+    var e = errors[0];
+    return { mood: 'alert', pulse: 'no', line: e.message + (errors.length > 1 ? ' (e mais ' + (errors.length - 1) + (errors.length === 2 ? ' ajuste)' : ' ajustes)') : ''),
+      card: e.card, item: e.item, path: e.path };
+  }
+
+  function pulsoDozing(elapsed, busy) { return !busy && elapsed >= PULSO_IDLE_MS; }
+
   /* payload ------------------------------------------------------------------------------------ */
 
   var SUBMISSION_ID_RE = /^[0-9a-f]{32}$/;
@@ -921,6 +1043,17 @@
     pushSent: pushSent,
     draftStore: draftStore,
     SENT_MAX: SENT_MAX,
+    PULSO_IDLE_MS: PULSO_IDLE_MS,
+    workSetDone: workSetDone,
+    plannedSets: plannedSets,
+    pulsoPlan: pulsoPlan,
+    pulsoGain: pulsoGain,
+    pulsoTips: pulsoTips,
+    pulsoTip: pulsoTip,
+    pulsoReaction: pulsoReaction,
+    pulsoSummary: pulsoSummary,
+    pulsoError: pulsoError,
+    pulsoDozing: pulsoDozing,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

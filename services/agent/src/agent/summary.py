@@ -190,17 +190,42 @@ def _food(group: dict[str, Any]) -> list[str]:
         elif calc and calc != CALCULATED:
             tag = f" ({' · '.join(filter(None, [escape(calc), source]))})"
         lines.append(f"• {escape(item['food'])}{amount} · {what}{tag}")
+    entry = _entry(group["items"])
+    if entry:
+        lines.append(entry)
     totals = group.get("totals")
     if totals:
         lines.append(_totals(totals))
     return lines
 
 
+def _macros(t: dict[str, Any]) -> list[str]:
+    """kcal and protein, then carbs and fat when the sheet sent them."""
+    parts = [f"{_num(t['kcal'], 0)} kcal", f"P {_num(t.get('protein'), 0)} g"]
+    for key, label in (("carbs", "C"), ("fat", "G")):
+        if t.get(key) is not None:
+            parts.append(f"{label} {_num(t[key], 0)} g")
+    return parts
+
+
+def _entry(items: list[dict[str, Any]]) -> str | None:
+    """The sum of what this message wrote to the meal (not the whole meal: earlier writes are
+    not in it). Shown only when it adds something to the item lines: carbs or fat, or a sum."""
+    counted = [i for i in items if i.get("calc") != NO_CALC and i.get("kcal") is not None]
+    has_split = any(i.get(k) is not None for i in counted for k in ("carbs", "fat"))
+    if not counted or (len(counted) < 2 and not has_split):
+        return None
+    total: dict[str, Any] = {}
+    for key in ("kcal", "protein", "carbs", "fat"):
+        values = [i[key] for i in counted if i.get(key) is not None]
+        total[key] = sum(values) if values else None
+    return "Lançado agora: " + " · ".join(_macros(total))
+
+
 def _totals(t: dict[str, Any]) -> str:
     parts = []
     if t.get("kcal") is not None:
-        parts.append(f"{_num(t['kcal'], 0)} kcal")
-        parts.append(f"P {_num(t.get('protein'), 0)} g")
+        parts.extend(_macros(t))
     else:
         parts.append("sem itens calculáveis")
     if t.get("noCalcItems"):

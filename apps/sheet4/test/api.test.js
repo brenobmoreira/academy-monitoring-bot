@@ -76,6 +76,37 @@ test('doPost without the Script Property answers internal, never an HTML page', 
 
 /* catalog ---------------------------------------------------------------------------------------- */
 
+test('catalog foodTable: one food read, valid rows only, exact stored values and nullable household', () => {
+  const ctx = setup();
+  const read = ctx.Foods.all;
+  let reads = 0;
+  ctx.Foods.all = () => { reads++; return read(); };
+  const c = ok(ctx.api('catalog', {}));
+  assert.equal(reads, 1);
+  assert.deepEqual(c.foods, FOODS.map((f) => f.name));
+  assert.equal(c.foodTable.length, FOODS.length - 1);
+  assert.deepEqual(c.foodTable[0], ['Ovo inteiro cozido', 'g', 100, 146, 13.3, 0.6, 9.5, 'un', 50]);
+  assert.deepEqual(c.foodTable[1], ['Arroz branco cozido', 'g', 100, 128, 2.5, 28.1, 0.2, null, null]);
+  assert.equal(typeof c.timings.foodTable, 'number');
+  assert.equal(typeof c.timings.foodsRead, 'number');
+});
+
+test('catalog through the API equals the catalog computed without the read memory, with fewer sheet lookups', () => {
+  const ctx = setup();
+  const ss = ctx.SpreadsheetApp.getActive();
+  const real = ss.getSheetByName.bind(ss);
+  let lookups = 0;
+  ss.getSheetByName = (name) => { lookups++; return real(name); };
+  const strip = (c) => { const o = JSON.parse(JSON.stringify(c)); delete o.timings; return o; };
+  const served = strip(ok(ctx.api('catalog', {})));
+  const servedLookups = lookups;
+  lookups = 0;
+  const direct = strip(ctx.SheetApi.catalog_());
+  assert.deepEqual(served, direct);
+  assert.ok(servedLookups < lookups / 2, `${servedLookups} lookups served, ${lookups} without the memory`);
+  assert.equal(ctx.Tabs.snapshot_, null);
+});
+
 test('catalog: today, client, phase in force with targets, rotation, next session, plan, foods', () => {
   const ctx = setup();
   const c = ok(ctx.api('catalog', {}));
@@ -564,6 +595,27 @@ test('requestId conflict, user undo vs rolled-back partial failure, entryId look
   ctx.ChangeLog.decode = (t) => { decodeCalls += 1; return origDecode(t); };
   ok(ctx.api('diary.upsert', { date: '2026-10-20', fields: { sleepH: 8 } }, 'req-brand-new'));
   assert.equal(decodeCalls, 0, 'no Log JSON decoded on a fresh requestId');
+});
+
+test('catalog.recentGroups: work sets per muscle group over the last 7 days, most sets first', () => {
+  const ctx = setup();
+  assert.deepEqual(ok(ctx.api('catalog', {})).recentGroups, []);
+  const names = ok(ctx.api('catalog', {})).plan.filter((r) => r.session === 'Upper' && r.group);
+  const [first, second] = [names[0], names.find((r) => r.group !== names[0].group)];
+  const set = { kg: 20, reps: 10 };
+  // 8 days ago: outside the window. 6 days ago and today: inside.
+  ok(ctx.api('workout.upsert', { date: '2026-10-12', session: 'Upper', exercises: [{ name: first.exercise, work: [set, set] }] }));
+  ok(ctx.api('workout.upsert', { date: '2026-10-14', session: 'Upper', exercises: [{ name: first.exercise, work: [set] }] }));
+  ok(ctx.api('workout.upsert', {
+    date: '2026-10-20',
+    session: 'Upper',
+    exercises: [
+      { name: first.exercise, work: [set], warmup: { kg: 10, reps: 10 } },
+      { name: second.exercise, work: [set, set] },
+    ],
+  }));
+  const got = ok(ctx.api('catalog', {})).recentGroups;
+  assert.deepEqual(got, [first.group, second.group].sort().map((group) => ({ group, sets: 2 })));
 });
 
 test('catalog includes lastWork per plan row, todayDiary, and progressionSuggestions; food.copy, measures.upsert, foods.seed', () => {

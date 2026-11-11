@@ -144,7 +144,32 @@ const Tabs = {
 
   /** The tab's sheet under its 4.0 name, or null. */
   findSheet(id) {
-    return SpreadsheetApp.getActive().getSheetByName(Tabs.get(id).name);
+    const snap = Tabs.snapshot_;
+    if (snap && id in snap.sheets) return snap.sheets[id];
+    const sheet = SpreadsheetApp.getActive().getSheetByName(Tabs.get(id).name);
+    if (snap) snap.sheets[id] = sheet;
+    return sheet;
+  },
+
+  snapshot_: null,
+
+  /**
+   * Runs `fn` reading each tab from the spreadsheet at most once: inside it, findSheet and the
+   * cell values behind read() are remembered per tab. For read-only work that visits the same
+   * tabs many times (the API catalog). Rows are rebuilt from the remembered values on every
+   * read, so callers never share row objects. Any write through Tabs forgets everything
+   * (touched_), so a read after a write sees it; code that writes to a sheet without Tabs must
+   * not run inside. Nested calls share the outer memory.
+   */
+  reading(fn) {
+    if (Tabs.snapshot_) return fn();
+    Tabs.snapshot_ = { sheets: {}, values: {} };
+    try { return fn(); } finally { Tabs.snapshot_ = null; }
+  },
+
+  /** Forgets what reading() remembered; every Tabs write calls it. */
+  touched_() {
+    if (Tabs.snapshot_) Tabs.snapshot_ = { sheets: {}, values: {} };
   },
 
   /** The tab's sheet; throws a Portuguese message when it does not exist. */
@@ -159,6 +184,7 @@ const Tabs = {
    * missing. Setup styles it later; used for technical tabs such as Log and Auditoria.
    */
   ensure(id) {
+    Tabs.touched_();
     const spec = Tabs.get(id);
     let sheet = Tabs.findSheet(id);
     if (sheet) return sheet;
@@ -178,6 +204,7 @@ const Tabs = {
 
   /** Forgets cached header positions (all tabs, or one sheet name). */
   invalidate(name) {
+    Tabs.touched_();
     if (name) delete Tabs.cache_[name];
     else Tabs.cache_ = {};
   },
@@ -262,9 +289,13 @@ const Tabs = {
     }
   },
 
-  /** Row values (full width) → object keyed by column key, with _row. */
-  toObject_(id, line, row) {
-    const { map } = Tabs.layout(id);
+  /**
+   * Row values (full width) → object keyed by column key, with _row. `layout` is the tab's
+   * Tabs.layout(id) when the caller already has it: layout() asks the spreadsheet for the sheet
+   * on every call, so a loop over rows must fetch it once, not once per row.
+   */
+  toObject_(id, line, row, layout) {
+    const { map } = layout || Tabs.layout(id);
     const obj = { _row: row };
     Tabs.columns(id).forEach((c) => {
       obj[c.key] = map[c.key] ? Tabs.fromCell(c, line[map[c.key] - 1]) : null;
@@ -273,8 +304,8 @@ const Tabs = {
   },
 
   /** True when every mapped cell of the line is empty. */
-  isEmpty_(id, line) {
-    const { map } = Tabs.layout(id);
+  isEmpty_(id, line, layout) {
+    const { map } = layout || Tabs.layout(id);
     return Object.keys(map).every((k) => {
       const v = line[map[k] - 1];
       return v === '' || v === null || v === undefined;
@@ -288,14 +319,19 @@ const Tabs = {
    */
   read(id) {
     const spec = Tabs.get(id);
-    const { sheet, lastCol } = Tabs.layout(id);
+    const layout = Tabs.layout(id);
+    const { sheet, lastCol } = layout;
     const first = spec.firstDataRow;
-    const last = sheet.getLastRow();
-    if (last < first || !lastCol) return [];
-    const values = sheet.getRange(first, 1, last - first + 1, lastCol).getValues();
+    const snap = Tabs.snapshot_;
+    let values = snap ? snap.values[id] : undefined;
+    if (!values) {
+      const last = sheet.getLastRow();
+      values = last < first || !lastCol ? [] : sheet.getRange(first, 1, last - first + 1, lastCol).getValues();
+      if (Tabs.snapshot_) Tabs.snapshot_.values[id] = values;
+    }
     const out = [];
     values.forEach((line, i) => {
-      if (!Tabs.isEmpty_(id, line)) out.push(Tabs.toObject_(id, line, first + i));
+      if (!Tabs.isEmpty_(id, line, layout)) out.push(Tabs.toObject_(id, line, first + i, layout));
     });
     return out;
   },
@@ -377,11 +413,13 @@ const Tabs = {
    * @returns {number} the sheet row written
    */
   append(id, obj) {
+    Tabs.touched_();
     return Tabs.appendMany(id, [obj])[0];
   },
 
   /** Appends several rows in one write. @returns {number[]} rows */
   appendMany(id, objs) {
+    Tabs.touched_();
     if (!objs.length) return [];
     const { sheet, byCol } = Tabs.layout(id);
     const spec = Tabs.get(id);
@@ -408,6 +446,7 @@ const Tabs = {
    * @returns {number} row
    */
   update(id, row, patch) {
+    Tabs.touched_();
     const { sheet, byCol } = Tabs.layout(id);
     const spec = Tabs.get(id);
     if (row < spec.firstDataRow) throw new Error(`Row ${row} is above the data of ${spec.name}`);
@@ -435,6 +474,7 @@ const Tabs = {
 
   /** Deletes a data row (shifts the rows below up). */
   remove(id, row) {
+    Tabs.touched_();
     const { sheet, lastCol, byCol } = Tabs.layout(id);
     const spec = Tabs.get(id);
     if (row < spec.firstDataRow) throw new Error(`Row ${row} is above the data of ${spec.name}`);
@@ -455,6 +495,7 @@ const Tabs = {
    * @param {Object<string, *>} cells {A1: value}
    */
   setCells(id, cells) {
+    Tabs.touched_();
     const spec = Tabs.get(id);
     const sheet = Tabs.sheet(id);
     const before = {};

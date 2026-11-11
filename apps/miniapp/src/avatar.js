@@ -4,7 +4,7 @@
  * A new design drops in by replacing this file (keep the API below). Classic script; exposes
  * the browser global `ShapeAvatar` (and module.exports under Node, for the pure helpers' tests).
  *
- * Pulso is a flat, dark disc with an ember core and two short eye lines, inside a ring of 12
+ * Pulso is a flat, dark disc with an ember core, eyes, eyebrows and a mouth, inside a ring of 12
  * plate marks. The ring is also a plate-loading meter: setProgress(0..1) lights the marks one by
  * one, and a thin bar at the top of the header follows the same value.
  *
@@ -21,10 +21,15 @@
  *   ShapeAvatar.progress()               the current value (0..1)
  *   ShapeAvatar.pulse(kind)              a one-shot reaction that keeps the mood: 'nod' (noted),
  *                                        'tick' (progress gained), 'full' (ring complete), 'no' (needs a
- *                                        fix). setProgress plays 'tick'/'full' itself when the ring gains
+ *                                        fix), 'celebrate' (a brief smile/pop, visible even with reduced
+ *                                        motion). setProgress plays 'tick'/'full' itself when the ring gains
  *                                        a mark. Returns false when it did not play (no host, unknown
  *                                        kind, prefers-reduced-motion).
  *   ShapeAvatar.say(text)              replace the speech-bubble text (with a short fade)
+ *   ShapeAvatar.glance(fieldOrNull)      look toward a field's centre (up to 3 SVG units); null centres
+ *                                        the eyes. Call again if the field moves (scroll/resize).
+ *   ShapeAvatar.setDozing(bool)          closed eyes and slow breathing; preserves the current mood
+ *   ShapeAvatar.dozing()                 whether the header avatar is dozing
  *   ShapeAvatar.intro(text)              first-open intro: a large Pulso centred on the page; on the
  *                                        next say() (after a short hold) it glides and shrinks into
  *                                        the header slot. Returns false (and does nothing) under
@@ -40,6 +45,8 @@
  *   - all moods must read at 32-40 px; motion uses transform and opacity only and stops under
  *     prefers-reduced-motion (states and progress stay visible); the page sizes the ".shape" box.
  *   - colours may use the page tokens (--accent, --alert, --text...) and data-scheme="dark".
+ *   - mount preserves a button host's name/semantics; create returns decorative, aria-hidden art.
+ *     The page owns the button, tip selection, idle timer and live speech bubble.
  */
 (function (root) {
   'use strict';
@@ -87,7 +94,7 @@
   var LIT_TICKS = ticks('pl-t');
 
   function svg(id) {
-    return '<svg viewBox="0 0 100 100" focusable="false">' +
+    return '<svg viewBox="0 0 100 100" focusable="false" aria-hidden="true">' +
       '<defs>' +
         // a centred core light: a flat ember glow, not a lit sphere
         '<radialGradient id="pl-o-' + id + '" cx="50%" cy="50%" r="50%">' +
@@ -104,13 +111,20 @@
           '<circle class="pl-core-base" cx="50" cy="50" r="28"/>' +
           '<circle class="pl-core" cx="50" cy="50" r="28" fill="url(#pl-o-' + id + ')"/>' +
           '<circle class="pl-core-rim" cx="50" cy="50" r="28"/>' +
-          '<g class="pl-eyes">' +
-            '<path class="pl-eye st st-idle" d="M39 50H46.5M53.5 50H61"/>' +
-            '<path class="pl-eye st st-focused" d="M38.5 49.5L46.5 52M61.5 49.5L53.5 52"/>' +
+          '<g class="pl-gaze"><g class="pl-eyes">' +
+            '<path class="pl-eye pl-dot st st-idle" d="M42 49.5h.01M58 49.5h.01"/>' +
+            '<path class="pl-eye pl-dot st st-focused" d="M42 50.5h.01M58 50.5h.01"/>' +
             '<path class="pl-eye st st-happy" d="M38.5 53Q42.5 46.5 46.5 53M53.5 53Q57.5 46.5 61.5 53"/>' +
-            '<path class="pl-eye st st-alert" d="M43.5 46V53.5M56.5 46V53.5"/>' +
-            '<path class="pl-eye st st-thinking" d="M43 46.5H49M54 45.5H60"/>' +
+            '<path class="pl-eye st st-alert" d="M43 46.5V52M57 46.5V52"/>' +
+            '<path class="pl-eye pl-dot st st-thinking" d="M44.5 47.5h.01M60.5 47.5h.01"/>' +
           '</g>' +
+          '<path class="pl-eye pl-sleep" d="M37 51Q42 54 47 51M53 51Q58 54 63 51"/>' +
+          '</g>' +
+          '<g class="pl-face st st-idle"><path class="pl-mouth" d="M45 60Q50 63.5 55 60"/></g>' +
+          '<g class="pl-face st st-focused"><path class="pl-brow" d="M37 41L46 43.5M63 41L54 43.5"/><path class="pl-mouth" d="M46 61Q51 63.5 56 60"/></g>' +
+          '<g class="pl-face st st-happy"><path class="pl-mouth pl-open" d="M43 58.5Q50 70 57 58.5Z"/></g>' +
+          '<g class="pl-face st st-alert"><path class="pl-brow" d="M37 39.5L45.5 37.5M54.5 37.5L63 39.5"/><ellipse class="pl-mouth" cx="50" cy="63" rx="3" ry="4"/></g>' +
+          '<g class="pl-face st st-thinking"><path class="pl-brow" d="M55.5 40Q60 37.5 64.5 40"/><path class="pl-mouth" d="M47 62H54"/></g>' +
         '</g>' +
       '</g>' +
     '</svg>';
@@ -167,6 +181,22 @@
 .pl-sweep { fill: none; stroke: var(--pl-c); stroke-width: 10; stroke-dasharray: 16 84; opacity: 0; transform-origin: 50px 50px; }
 .pl-flash { fill: none; stroke: var(--pl-c); stroke-width: 3; opacity: 0; transform-origin: 50px 50px; }
 .pl-eye { fill: none; stroke: var(--pl-eye); stroke-width: 4.6; stroke-linecap: round; stroke-linejoin: round; }
+.pl-eye.pl-dot { stroke-width: 7.4; }
+.pl-brow, .pl-mouth { fill: none; stroke: var(--pl-eye); stroke-linecap: round; stroke-linejoin: round; }
+.pl-brow { stroke-width: 3; }
+.pl-mouth { stroke-width: 3.6; }
+.pl-mouth.pl-open { fill: var(--pl-eye); stroke-width: 2.4; }
+.pl-sleep { display: none; }
+.pl-gaze { transition: transform 0.2s ease-out; }
+.shape[data-state][data-reaction="celebrate"] .st { display: none; }
+.shape[data-state][data-reaction="celebrate"] .st-happy { display: inline; }
+.shape[data-state][data-dozing="true"] .pl-eyes { opacity: 0; animation: none; }
+.shape[data-state][data-dozing="true"] .pl-sleep { display: inline; }
+.shape[data-state][data-dozing="true"] .pl-orb { animation: pl-breathe 7s ease-in-out infinite; }
+.shape[data-state][data-dozing="true"] .pl-core { animation: pl-glow 7s ease-in-out infinite; }
+.shape[data-state][data-dozing="true"] .pl-ring { animation: none; }
+.shape[data-state][data-dozing="true"] .pl-face { display: none; }
+.shape[data-state][data-dozing="true"] .pl-face.st-idle { display: inline; }
 
 .shape .st { display: none; }
 .shape[data-state="idle"] .st-idle,
@@ -259,6 +289,7 @@
   var hostProgress = 0;
   var uid = 0;
   var introState = null;
+  var reactionTimer = null;
 
   function reducedMotion() {
     try { return !!(root.matchMedia && root.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { return false; }
@@ -270,6 +301,15 @@
     st.id = 'shape-avatar-style';
     st.textContent = CSS;
     document.head.appendChild(st);
+    // CSS stops its own animations; stop Web Animations too when the preference changes live.
+    var preference = root.matchMedia && root.matchMedia('(prefers-reduced-motion: reduce)');
+    var stop = function (e) {
+      if (!e.matches) return;
+      while (pulsing.length) pulsing.pop().cancel();
+      if (introState) finishIntro(introState);
+    };
+    if (preference && preference.addEventListener) preference.addEventListener('change', stop);
+    else if (preference && preference.addListener) preference.addListener(stop);
   }
 
   function makeDots() {
@@ -298,7 +338,7 @@
   function draw(el, mood, progress) {
     el.classList.add('shape');
     el.setAttribute('data-state', MOODS.indexOf(mood) >= 0 ? mood : 'idle');
-    el.setAttribute('aria-hidden', 'true');
+    if (el.tagName !== 'BUTTON') el.setAttribute('aria-hidden', 'true');
     el.innerHTML = svg(++uid); // constant markup, never user text
     paintProgress(el, progress);
     return el;
@@ -327,9 +367,16 @@
   var pulsing = [];
 
   function pulse(kind) {
-    var steps = PULSES[kind];
-    if (!host || !steps || reducedMotion()) return false;
+    var steps = PULSES[kind === 'celebrate' ? 'full' : kind];
+    if (!host || !steps) return false;
+    clearTimeout(reactionTimer);
+    host.removeAttribute('data-reaction');
+    if (kind === 'celebrate') {
+      host.setAttribute('data-reaction', kind);
+      reactionTimer = setTimeout(function () { host.removeAttribute('data-reaction'); }, 900);
+    }
     while (pulsing.length) pulsing.pop().cancel(); // the newest reaction wins
+    if (reducedMotion()) return false;
     for (var i = 0; i < steps.length; i++) {
       var part = host.querySelector(steps[i][0]);
       if (part && part.animate) pulsing.push(part.animate(steps[i][1], { duration: steps[i][2], easing: steps[i][3] }));
@@ -360,28 +407,37 @@
     return true;
   }
 
+  function finishIntro(s) {
+    if (s !== introState) return;
+    introState = null;
+    clearTimeout(s.fallback);
+    clearTimeout(s.landingTimer);
+    (s.animations || []).forEach(function (a) { a.cancel(); });
+    host.style.opacity = '';
+    if (s.layer.parentNode) s.layer.parentNode.removeChild(s.layer);
+  }
+
   function land() {
     var s = introState;
     if (!s || s.landing) return;
     s.landing = true;
     clearTimeout(s.fallback);
-    setTimeout(function () {
+    s.landingTimer = setTimeout(function () {
       s.big.setAttribute('data-state', host.getAttribute('data-state'));
       paintProgress(s.big, hostProgress);
       var m = flip(s.big.getBoundingClientRect(), host.getBoundingClientRect());
       var done = function () {
-        host.style.opacity = '';
-        if (s.layer.parentNode) s.layer.parentNode.removeChild(s.layer);
-        introState = null;
+        finishIntro(s);
       };
-      if (!s.big.animate) { done(); return; }
+      if (!s.big.animate || reducedMotion()) { done(); return; }
       var ease = 'cubic-bezier(0.2, 0.8, 0.2, 1)';
       var fly = s.big.animate(
         [{ transform: 'translate(0, 0) scale(1)' }, { transform: 'translate(' + m.x + 'px, ' + m.y + 'px) scale(' + m.s + ')' }],
         { duration: INTRO_MS, easing: ease, fill: 'forwards', id: 'pl-intro' });
-      s.bg.animate([{ opacity: 1 }, { opacity: 0 }], { duration: INTRO_MS, easing: 'ease-out', fill: 'forwards', id: 'pl-intro-bg' });
-      s.line.animate([{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: 'translateY(6px)' }],
+      var bgAnimation = s.bg.animate([{ opacity: 1 }, { opacity: 0 }], { duration: INTRO_MS, easing: 'ease-out', fill: 'forwards', id: 'pl-intro-bg' });
+      var lineAnimation = s.line.animate([{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: 'translateY(6px)' }],
         { duration: INTRO_MS * 0.6, easing: 'ease-out', fill: 'forwards', id: 'pl-intro-text' });
+      s.animations = [fly, bgAnimation, lineAnimation];
       fly.onfinish = done;
       fly.oncancel = done;
     }, Math.max(0, INTRO_HOLD - (Date.now() - s.t0)));
@@ -428,6 +484,27 @@
     },
     progress: function () { return hostProgress; },
     pulse: pulse,
+    glance: function (field) {
+      if (!host) return;
+      var gaze = host.querySelector('.pl-gaze');
+      if (!gaze) return;
+      var x = 0, y = 0;
+      if (field && field.getBoundingClientRect) {
+        var from = host.getBoundingClientRect(), to = field.getBoundingClientRect();
+        var dx = to.left + to.width / 2 - from.left - from.width / 2;
+        var dy = to.top + to.height / 2 - from.top - from.height / 2;
+        var length = Math.sqrt(dx * dx + dy * dy) || 1;
+        x = Math.round(dx / length * 3 * 100) / 100;
+        y = Math.round(dy / length * 3 * 100) / 100;
+      }
+      gaze.style.transform = 'translate(' + x + 'px, ' + y + 'px)';
+    },
+    setDozing: function (value) {
+      if (!host) return;
+      host.setAttribute('data-dozing', String(!!value));
+      if (value) api.glance(null);
+    },
+    dozing: function () { return !!host && host.getAttribute('data-dozing') === 'true'; },
     say: function (text) {
       if (introState) land();
       if (!textEl || !text || text === lastText) return;

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Expressões do Pulso</title>
+  <link rel="stylesheet" href="../styles.css">
+  <style>
+    main { max-width: 390px; margin: auto; padding: 16px; }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    p { font-size: 13px; color: var(--hint); }
+    button { padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+    section { display: grid; grid-template-columns: 76px 40px 32px 112px; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+    section b { font-size: 13px; }
+    section .shape { margin: 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Expressões do Pulso</h1>
+    <button type="button" id="theme">Trocar tema</button>
+    <p>Da esquerda para a direita: 40, 32 e 112 px.</p>
+    <div id="moods"></div>
+  </main>
+  <script src="../src/avatar.js"></script>
+  <script>
+    (function () {
+      'use strict';
+      var dark = location.search.indexOf('dark') >= 0;
+      function theme() { document.documentElement.setAttribute('data-scheme', dark ? 'dark' : 'light'); }
+      document.getElementById('theme').onclick = function () { dark = !dark; theme(); };
+      theme();
+      var names = ['À vontade', 'Foco', 'Alegria', 'Atenção', 'Pensando', 'Cochilo'];
+      ShapeAvatar.MOODS.concat(['dozing']).forEach(function (mood, i) {
+        var row = document.createElement('section');
+        var name = document.createElement('b');
+        name.textContent = names[i];
+        row.appendChild(name);
+        [40, 32, 112].forEach(function (size) {
+          var art = ShapeAvatar.create(mood === 'dozing' ? 'idle' : mood, 0.5);
+          if (mood === 'dozing') art.setAttribute('data-dozing', 'true');
+          art.style.width = size + 'px';
+          art.style.height = size + 'px';
+          row.appendChild(art);
+        });
+        document.getElementById('moods').appendChild(row);
+      });
+    })();
+  </script>
+</body>
+</html>

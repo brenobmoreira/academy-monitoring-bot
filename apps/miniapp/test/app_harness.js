@@ -28,6 +28,15 @@ class FakeNode {
     c.parentNode = null;
     return c;
   }
+  replaceChild(next, old) {
+    const i = this.childNodes.indexOf(old);
+    if (i < 0) throw new Error('not a child');
+    if (next.parentNode) next.parentNode.removeChild(next);
+    this.childNodes[i] = next;
+    next.parentNode = this;
+    old.parentNode = null;
+    return old;
+  }
   get textContent() { return this.childNodes.map((c) => c.textContent).join(''); }
   set textContent(v) {
     this.childNodes.forEach((c) => { c.parentNode = null; });
@@ -43,6 +52,10 @@ class FakeText extends FakeNode {
 }
 
 function matchesSimple(el, part) {
+  if (part.endsWith(':last-child')) {
+    if (!el.parentNode || el.parentNode.children.at(-1) !== el) return false;
+    part = part.slice(0, -11);
+  }
   const m = /^([a-z0-9-]*)((?:\.[\w-]+)*)(?:#([\w-]+))?$/i.exec(part);
   if (!m) throw new Error(`fake DOM: unsupported selector ${part}`);
   if (m[1] && el.tagName !== m[1].toUpperCase()) return false;
@@ -53,6 +66,10 @@ function matchesSimple(el, part) {
 }
 
 function matches(el, selector) {
+  if (selector.includes(' > ')) {
+    const [parent, child] = selector.split(' > ');
+    return matchesSimple(el, child) && el.parentNode instanceof FakeElement && matches(el.parentNode, parent);
+  }
   const parts = selector.trim().split(/\s+/);
   if (!matchesSimple(el, parts[parts.length - 1])) return false;
   let i = parts.length - 2;
@@ -97,15 +114,21 @@ class FakeElement extends FakeNode {
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
   removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] || []).filter((f) => f !== fn); }
   dispatchEvent(ev) {
+    ev.currentTarget = this;
     (this.listeners[ev.type] || []).slice().forEach((fn) => fn.call(this, ev));
+    if (ev.bubbles && this.parentNode) this.parentNode.dispatchEvent(ev);
     return true;
   }
-  click() { this.dispatchEvent({ type: 'click', target: this, preventDefault() {}, stopPropagation() {} }); }
+  click() { this.dispatchEvent({ type: 'click', bubbles: true, target: this, preventDefault() {}, stopPropagation() { this.bubbles = false; } }); }
   focus() { this.ownerDocument.activeElement = this; }
   blur() {}
   scrollIntoView() {}
   getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
   matches(selector) { return matches(this, selector); }
+  closest(selector) {
+    for (let el = this; el instanceof FakeElement; el = el.parentNode) if (matches(el, selector)) return el;
+    return null;
+  }
   querySelectorAll(selector) {
     const out = [];
     const walk = (n) => n.children.forEach((c) => { if (matches(c, selector)) out.push(c); walk(c); });
@@ -141,7 +164,7 @@ function page(doc) {
     return e;
   };
   el('p', { id: 'preview-banner' }).hidden = true;
-  el('div', { id: 'shape' });
+  el('button', { id: 'shape', type: 'button', 'aria-label': 'Pulso: toque para uma dica', 'aria-describedby': 'say' });
   el('p', { id: 'say' });
   const nav = el('nav', { class: 'tabs' });
   el('button', { class: 'tab', id: 'tab-workout', 'data-view': 'workout' }, nav);
@@ -233,7 +256,8 @@ function blob(catalog) {
 }
 
 /**
- * Starts the page inside "Telegram". opts: {view: 'workout'|'food', storage, catalog}.
+ * Starts the page inside "Telegram". opts: {view: 'workout'|'food', storage, catalog, globals}
+ * (`globals`: extra page globals, or a function of the page context returning them).
  * Resolves once the catalog is decoded and the form rendered.
  */
 async function boot(opts = {}) {
@@ -259,10 +283,14 @@ async function boot(opts = {}) {
     ShapeCore: C,
     Telegram: { WebApp: tg },
   };
+  Object.assign(ctx, typeof opts.globals === 'function' ? opts.globals(ctx) : opts.globals || {});
   ctx.window = ctx;
   vm.createContext(ctx);
   vm.runInContext(APP, ctx, { filename: 'app.js' });
-  for (let i = 0; i < 500 && !tg.MainButton.params.text; i++) await new Promise((r) => setImmediate(r));
+  // DecompressionStream completes off-thread. Count elapsed time rather than event-loop turns:
+  // 500 immediates could elapse before zlib got CPU when the sheet suite ran concurrently.
+  const deadline = Date.now() + 5000;
+  while (!tg.MainButton.params.text && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1));
   if (!tg.MainButton.params.text) throw new Error(`the page did not start: ${doc.getElementById('say').textContent}`);
   return {
     doc,
@@ -274,6 +302,16 @@ async function boot(opts = {}) {
     press() { if (tg.MainButton.params.is_active !== false) tg.MainButton.handler(); },
     tab(view) { doc.getElementById(`tab-${view}`).click(); },
     say() { return doc.getElementById('say').textContent; },
+    focus(field) {
+      const previous = doc.activeElement;
+      doc.activeElement = field;
+      if (previous) doc.dispatchEvent({ type: 'focusout', target: previous });
+      if (field) doc.dispatchEvent({ type: 'focusin', target: field });
+    },
+    input(field, value) {
+      field.value = value;
+      field.dispatchEvent({ type: 'input', target: field, bubbles: true });
+    },
   };
 }
 

@@ -26,3 +26,4 @@ __pycache__/
 
 # local end-to-end traces
 e2e/out/
+/apps/miniapp/dev/shots/

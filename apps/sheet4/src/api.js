@@ -50,7 +50,7 @@ const SheetApi = {
     catalog: {
       write: false,
       validate: (a) => ApiValidator.empty(a),
-      run: () => SheetApi.catalog_(),
+      run: () => Tabs.reading(() => SheetApi.catalog_()),
     },
     'diary.upsert': {
       write: true,
@@ -592,40 +592,51 @@ const SheetApi = {
   /* catalog ------------------------------------------------------------------------------------ */
 
   catalog_() {
+    // Milliseconds each step took, returned as `timings` so a slow catalog can be traced to a step.
+    const timings = {};
+    const started = Date.now();
+    const lap = (name, fn) => {
+      const t = Date.now();
+      const value = fn();
+      timings[name] = (timings[name] || 0) + (Date.now() - t);
+      return value;
+    };
     const today = Dates.today();
-    const plan = SheetApi.has_('plans') ? Plans.on(today) : null;
-    const trainingPhase = Sessions.phaseOn(today, plan);
-    const all = Workouts.rows();
-    const idx = Progression.index(all);
+    const plan = lap('plan', () => (SheetApi.has_('plans') ? Plans.on(today) : null));
+    const trainingPhase = lap('trainingPhase', () => Sessions.phaseOn(today, plan));
+    const all = lap('workouts', () => Workouts.rows());
+    const idx = lap('index', () => Progression.index(all));
     let next = null;
-    try { next = Sessions.nextSession(today, all); } catch (err) { next = null; }
+    try { next = lap('nextSession', () => Sessions.nextSession(today, all)); } catch (err) { next = null; }
     let lastWorkout = null;
     if (all.length) {
       const last = all.slice().sort((a, b) => Dates.compare(a.date, b.date) || a._row - b._row)[all.length - 1];
       const s = Workouts.sessionsOn(all, last.date).find((x) => Exercises.normalize(x.session) === Exercises.normalize(last.session));
       lastWorkout = { date: Dates.key(last.date), session: s.session, state: s.state };
     }
-    const todayRow = SheetApi.has_('diary') ? Days.get(today) : null;
+    const todayRow = lap('diary', () => (SheetApi.has_('diary') ? Days.get(today) : null));
     let todayDiary = null;
     if (todayRow) {
       todayDiary = SheetApi.compact_(SheetApi.pick_(todayRow, Object.keys(Diary.FIELDS)));
       if (!Object.keys(todayDiary).length) todayDiary = null;
     }
-    return {
+    const foodRows = lap('foodsRead', () => (SheetApi.has_('foods') ? Foods.all() : []));
+    const result = {
       today: Dates.key(today),
       timezone: Config.timezone(),
       client: { name: Config.get('client.name') },
-      phase: SheetApi.phase_(today),
+      phase: lap('phase', () => SheetApi.phase_(today)),
       trainingPhase,
-      sessions: Sessions.names(today),
-      rotation: Sessions.rotation(today),
+      sessions: lap('sessions', () => Sessions.names(today)),
+      rotation: lap('rotation', () => Sessions.rotation(today)),
       rotationMode: Sessions.mode(),
       nextSession: next,
       lastWorkout,
       todayDiary,
-      progressionSuggestions: SheetApi.has_('plans') ? Progression.suggestions(today) : [],
-      exercises: Exercises.known(today).map((e) => ({ name: e.name, group: e.group })),
-      plan: (plan ? plan.rows : []).filter((r) => r.exercise !== null).map((r) => {
+      progressionSuggestions: lap('suggestions', () => (SheetApi.has_('plans') ? Progression.suggestions(today) : [])),
+      recentGroups: lap('recentGroups', () => SheetApi.recentGroups_(all, today)),
+      exercises: lap('exercises', () => Exercises.known(today).map((e) => ({ name: e.name, group: e.group }))),
+      plan: lap('planRows', () => (plan ? plan.rows : []).filter((r) => r.exercise !== null).map((r) => {
         const p = Sessions.prescription(r, trainingPhase);
         const prev = Progression.previous(idx[Exercises.normalize(r.exercise)] || [], today);
         const lastWork = prev ? {
@@ -638,14 +649,50 @@ const SheetApi = {
           prescription: Sessions.prescriptionText(p),
           lastWork,
         });
-      }),
-      foods: SheetApi.has_('foods') ? Foods.names() : [],
-      favorites: SheetApi.has_('favorites') && SheetApi.has_('ingredients') ? Favorites.names() : [],
+      })),
+      foods: lap('foods', () => foodRows.map((f) => String(f.name).trim())),
+      foodTable: lap('foodTable', () => foodRows.filter((f) => Foods.isValid(f)).map((f) => [
+        String(f.name).trim(), f.baseUnit, f.baseQty, f.kcal, f.protein, f.carbs, f.fat,
+        Foods.key_(f.householdUnit) ? f.householdUnit : null,
+        Foods.key_(f.householdUnit) ? f.perHousehold : null,
+      ])),
+      favorites: lap('favorites', () => (SheetApi.has_('favorites') && SheetApi.has_('ingredients') ? Favorites.names() : [])),
       meals: FoodLog.MEALS.slice(),
       units: Units.LIST.slice(),
       foodLog: Tabs.ENUMS.FOOD_LOG.slice(),
-      recent: SheetApi.recent_(),
+      recent: lap('recent', () => SheetApi.recent_()),
     };
+    timings.total = Date.now() - started;
+    result.timings = timings;
+    return result;
+  },
+
+  /** How many days, ending today, catalog.recentGroups covers. */
+  RECENT_GROUP_DAYS: 7,
+
+  /**
+   * Work sets per muscle group over the last RECENT_GROUP_DAYS days (today included), for the
+   * body map: [{group, sets}], most sets first. A partial session's sets count (they were done);
+   * an exercise with no group anywhere (Exercícios, then its plan row) is left out.
+   */
+  recentGroups_(rows, today) {
+    const start = Dates.addDays(today, 1 - SheetApi.RECENT_GROUP_DAYS);
+    const catalogue = Exercises.list();
+    const plans = {};
+    const planRows = (id) => {
+      if (!id || !SheetApi.has_('plans')) return [];
+      if (!(id in plans)) { const v = Plans.get(String(id)); plans[id] = v ? v.rows : []; }
+      return plans[id];
+    };
+    const by = {};
+    rows.filter((r) => Dates.within(r.date, start, today)).forEach((r) => {
+      const sets = Progression.workSets(r).length;
+      const group = sets ? Exercises.groupOf(r.exercise, planRows(r.plan), catalogue) : null;
+      if (group) by[group] = (by[group] || 0) + sets;
+    });
+    return Object.keys(by)
+      .map((group) => ({ group, sets: by[group] }))
+      .sort((x, y) => y.sets - x.sets || (x.group < y.group ? -1 : 1));
   },
 
   /** Actions of the last RECENT_MINUTES not undone, newest first (bot writes carry their summary). */

@@ -109,7 +109,7 @@
 
   /* Shape (mascot) --------------------------------------------------------------------------- */
 
-  // The avatar is a swappable component (src/avatar.js); the app only sets mood and text.
+  // Artwork stays swappable; context/reaction decisions come from ShapeCore.
   var Avatar = window.ShapeAvatar;
   var Body = window.ShapeBody || null; // the muscle map (src/body.js); the page works without it
   if (Avatar) Avatar.mount(els.shape, els.say);
@@ -117,9 +117,62 @@
 
   function say(mood, text) {
     if (!Avatar) { if (text) els.say.textContent = text; return; }
+    if (Avatar.setDozing) Avatar.setDozing(false);
     Avatar.setMood(mood);
     Avatar.say(text);
+    els.say.scrollTop = 0;
   }
+
+  var tipTap = 0, tipKey = '', focusedCard = null, gazeTarget = null, idleTimer = null;
+  var observedForm = null, observedCards = [];
+
+  function currentPlan() {
+    return S.catalog ? S.catalog.plan.filter(function (row) { return row.s === S.workout.session; }) : [];
+  }
+
+  function pulsoContext() {
+    var compose = S.food.compose;
+    return { view: S.view, cards: S.catalog && S.workout.session ? cards() : [], cardIndex: focusedCard, plan: currentPlan(),
+      items: S.food.items, compose: compose && S.food.mode === 'description'
+        ? { kind: 'description', description: compose.description, qty: compose.dqty } : null };
+  }
+
+  function react(reaction) {
+    if (!reaction) return;
+    say(reaction.mood, reaction.line);
+    if (Avatar && Avatar.pulse) Avatar.pulse(reaction.pulse);
+  }
+
+  function glance(target) {
+    gazeTarget = target;
+    if (Avatar && Avatar.glance) Avatar.glance(target);
+  }
+
+  function wake() {
+    var wasDozing = Avatar && Avatar.dozing && Avatar.dozing();
+    if (Avatar && Avatar.setDozing) Avatar.setDozing(false);
+    if (wasDozing && gazeTarget && Avatar.glance) Avatar.glance(gazeTarget);
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(function rest() {
+      if (C.pulsoDozing(C.PULSO_IDLE_MS, !S.catalog || sending || reviewTimer !== null || S.sheetOpen)) {
+        if (Avatar && Avatar.setDozing) Avatar.setDozing(true);
+      } else idleTimer = setTimeout(rest, C.PULSO_IDLE_MS);
+    }, C.PULSO_IDLE_MS);
+  }
+
+  els.shape.addEventListener('pointerdown', function (e) { e.preventDefault(); }); // keep the typing field focused
+  els.shape.addEventListener('click', function () {
+    wake();
+    var context = pulsoContext(), key = C.pulsoTips(context).join('\n');
+    if (key !== tipKey) { tipKey = key; tipTap = 0; }
+    react(C.pulsoTip(context, tipTap++));
+  });
+  document.addEventListener('pointerdown', wake);
+  document.addEventListener('keydown', wake);
+  document.addEventListener('input', wake);
+  document.addEventListener('scroll', function () { if (gazeTarget) glance(gazeTarget); }, true);
+  if (window.addEventListener) window.addEventListener('resize', function () { if (gazeTarget) glance(gazeTarget); });
+  wake();
 
   /** A large Shape for empty, error and success states (its own, independent mood). */
   function mascot(mood, title, text) {
@@ -145,22 +198,45 @@
     if (Avatar && Avatar.pulse && Avatar.mood() === 'alert') Avatar.pulse('no');
   }
 
+  /** Resolve the core's first error to a visible field, without moving keyboard focus. */
+  function errorTarget(error, composerOnly) {
+    var container = els.view, path = error.path || '';
+    if (error.card !== undefined) {
+      container = cardEls[error.card] || els.view;
+      path = path.replace(/^exercises\[\d+\]\./, '');
+    } else if (error.item !== undefined) {
+      return els.view.querySelectorAll('.plate-item')[error.item] || els.view;
+    } else if (path === 'date') return els.dates;
+    else if (path === 'session') return els.view.querySelector('.chip-row');
+    else if (path === 'meal') return els.view.querySelector('.chip-wrap');
+    if (composerOnly) container = els.view.querySelector('.panel') || els.view;
+    var fields = container.querySelectorAll('input');
+    var texts = container.querySelectorAll('textarea');
+    var candidates = Array.prototype.slice.call(fields).concat(Array.prototype.slice.call(texts));
+    return candidates.filter(function (field) { return field.getAttribute('data-error-path') === path; })[0] || container;
+  }
+
   /** A work set that counts: kg and reps in range. */
   function setDone(s) {
-    var L = C.LIMITS, kg = C.parseDecimal(s.kg), reps = C.parseDecimal(s.reps);
-    return kg !== null && kg >= L.KG_MIN && kg <= L.KG_MAX &&
-      Number.isInteger(reps) && reps >= L.REPS_MIN && reps <= L.REPS_MAX;
+    return C.workSetDone(s);
   }
   function doneSets(card) { return C.filledSets(card).filter(setDone).length; }
 
-  /** Avatar ring: workout = plan cards with a valid work set (kg and reps in range); meal = items / 3. */
+  /** Avatar ring: explicit planned sets, otherwise exercises with a set; meal = items / 3. */
   function syncProgress() {
-    if (!Avatar || !Avatar.setProgress || !S.catalog) return;
+    if (!S.catalog) return;
+    if (S.view === 'workout' && S.workout.session) {
+      observedForm = form();
+      observedCards = JSON.parse(JSON.stringify(cards()));
+    }
+    if (!Avatar || !Avatar.setProgress) return;
     if (S.view !== 'workout') { Avatar.setProgress(Math.min(S.food.items.length / 3, 1)); return; }
     var list = cards();
-    var plan = list.filter(function (c) { return c.fromPlan; }).length || list.length;
-    var done = list.filter(function (c) { return doneSets(c) > 0; }).length;
-    Avatar.setProgress(plan ? done / plan : 0);
+    var planned = C.pulsoPlan(list, currentPlan());
+    // Unknown prescriptions retain the old exercise meter; explicit plans count every set.
+    var total = planned.known ? planned.total : list.length;
+    var done = planned.known ? planned.done : list.filter(function (c) { return doneSets(c) > 0; }).length;
+    Avatar.setProgress(total ? done / total : 0);
   }
 
   /** Mood from the current state: focused while typing, alert on errors shown, happy when ready. */
@@ -174,7 +250,8 @@
     if (S.focus) { say('focused', S.focus); return; }
     var r = build();
     if (S.showErrors && r.errors.length) {
-      say('alert', r.errors[0].message + (r.errors.length > 1 ? ' (e mais ' + plural(r.errors.length - 1, 'ajuste', 'ajustes') + ')' : ''));
+      var error = C.pulsoError(r.errors);
+      say(error.mood, error.line);
       return;
     }
     if (S.view === 'workout') {
@@ -195,12 +272,24 @@
 
   document.addEventListener('focusin', function (e) {
     var t = e.target;
-    if (t && t.getAttribute && t.getAttribute('data-say')) { S.focus = t.getAttribute('data-say'); updateMood(); }
+    wake();
+    if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) {
+      for (var parent = t; parent && parent.getAttribute; parent = parent.parentNode) {
+        if (parent.hasAttribute('data-card-index')) { focusedCard = Number(parent.getAttribute('data-card-index')); break; }
+      }
+      glance(t);
+      if (t.getAttribute('data-say')) { S.focus = t.getAttribute('data-say'); updateMood(); }
+    }
   });
-  document.addEventListener('focusout', function () {
+  document.addEventListener('focusout', function (e) {
+    var leaving = e.target;
     setTimeout(function () {
       var a = document.activeElement;
-      if (!(a && a.getAttribute && a.getAttribute('data-say'))) { S.focus = null; updateMood(); }
+      if (!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) {
+        S.focus = null;
+        // Validation may have just installed a new target while removing the old input.
+        if (gazeTarget === leaving) glance(null);
+      }
     }, 0);
   });
 
@@ -333,7 +422,11 @@
   }
 
   /** After any edit: draft, button label, live errors once they were shown. */
-  function changed(structural) {
+  function changed(structural, options) {
+    var opts = options || {};
+    opts.plan = currentPlan();
+    var reaction = S.view === 'workout' && S.workout.session && observedForm === form()
+      ? C.pulsoReaction(observedCards, cards(), opts.cardIndex, opts.setIndex, opts) : null;
     // A review being prepared would show what the form no longer holds; back to the form's mood.
     if (cancelReview()) structural = true;
     // Remember which workout form was edited last, so the app reopens there.
@@ -341,7 +434,8 @@
     scheduleSave();
     updateMainForForm();
     if (S.showErrors) refreshErrors();
-    if (structural || S.showErrors) updateMood(); else syncProgress();
+    if (reaction && !opts.quiet) { syncProgress(); react(reaction); }
+    else if (!opts.quiet && (structural || S.showErrors)) updateMood(); else syncProgress();
     syncBody();
   }
 
@@ -391,7 +485,7 @@
     var input = h('input', {
       class: 'step-input', type: 'text', inputmode: opts.integer ? 'numeric' : 'decimal',
       autocomplete: 'off', enterkeyhint: 'done', value: opts.value || '', placeholder: startText || '–',
-      'aria-label': opts.label, 'data-say': opts.say,
+      'aria-label': opts.label, 'data-say': opts.say, 'data-error-path': opts.path,
       oninput: function () { opts.onChange(input.value); },
       onkeydown: function (e) { if (e.key === 'Enter') input.blur(); },
     });
@@ -460,6 +554,9 @@
         onclick: function () {
           if (s === w.session) return;
           w.session = s;
+          focusedCard = null;
+          S.focus = null;
+          glance(null);
           haptic('select');
           renderWorkout();
           motion('stagger', cardEls);
@@ -519,13 +616,13 @@
     var summary = h('span', { class: 'card-summary', text: cardSummary(card) });
     var headBtn = h('button', {
       type: 'button', class: 'card-head', 'aria-expanded': String(!!card.open), 'aria-controls': bodyId,
-      onclick: function () { card.open = !card.open; replaceCard(i); scheduleSave(); },
+      onclick: function () { focusedCard = i; card.open = !card.open; replaceCard(i); scheduleSave(); },
     },
     h('span', { class: 'dot', 'aria-hidden': 'true' }),
     h('span', {}, h('span', { class: 'card-name', text: card.name }), card.group ? h('span', { class: 'card-group', text: card.group }) : null),
     h('span', {}, summary, h('span', { class: 'chev', 'aria-hidden': 'true' }, icon('chevron'))));
 
-    var el = h('article', { class: 'card', 'data-status': status }, headBtn);
+    var el = h('article', { class: 'card', 'data-status': status, 'data-card-index': i }, headBtn);
     el._summary = summary;
     el._done = doneSets(card);
     if (!card.open) return el;
@@ -544,8 +641,7 @@
           haptic('light');
           replaceCard(i);
           motion('fill', cardEls[i]);
-          changed(true);
-          say('idle', 'Última carga copiada. Ajuste o que mudou hoje.');
+          changed(true, { action: 'repeat', cardIndex: i });
         },
       }, icon('repeat'), 'Repetir última'));
     }
@@ -557,12 +653,12 @@
           h('span', { class: 'set-label' }, h('span', { class: 'kind-dot' }), 'Série ' + (j + 1)),
           card.sets.length > 1 ? h('button', { type: 'button', class: 'btn-x', 'aria-label': 'Remover série ' + (j + 1), text: '×', onclick: function (e) { card.sets.splice(j, 1); replaceCard(i, e.currentTarget.closest('.set')); changed(true); } }) : null),
         stepper({ value: s.kg, step: 2.5, min: C.LIMITS.KG_MIN, max: C.LIMITS.KG_MAX, start: hint ? hint.kg : null, unit: 'kg', label: 'kg da série ' + (j + 1), big: true,
-          say: 'Os botões andam 2,5 kg. Vírgula vale: 82,5.', onChange: function (v) { s.kg = v; liveCard(i); } }),
+          path: 'work[' + j + '].kg', say: 'Os botões andam 2,5 kg. Vírgula vale: 82,5.', onChange: function (v) { s.kg = v; liveCard(i, j); } }),
         h('div', { class: 'pair' },
           stepper({ value: s.reps, step: 1, min: C.LIMITS.REPS_MIN, max: C.LIMITS.REPS_MAX, start: hint ? hint.reps : null, label: 'reps da série ' + (j + 1), integer: true, caption: 'reps',
-            say: 'Reps de trabalho, sem contar aquecimento.', onChange: function (v) { s.reps = v; liveCard(i); } }),
+            path: 'work[' + j + '].reps', say: 'Reps de trabalho, sem contar aquecimento.', onChange: function (v) { s.reps = v; liveCard(i, j); } }),
           stepper({ value: s.rir, step: 1, min: C.LIMITS.RIR_MIN, max: C.LIMITS.RIR_MAX, start: hint && hint.rir !== undefined ? hint.rir : null, label: 'RIR da série ' + (j + 1), caption: 'RIR (opcional)',
-            say: 'RIR: quantas reps ainda sobravam.', onChange: function (v) { s.rir = v; liveCard(i); } }))));
+            path: 'work[' + j + '].rir', say: 'RIR: quantas reps ainda sobravam.', onChange: function (v) { s.rir = v; liveCard(i); } }))));
     });
 
     [['warmup', 'Aquecimento'], ['feeder', 'Feeder']].forEach(function (pair) {
@@ -575,9 +671,9 @@
           h('button', { type: 'button', class: 'btn-x', 'aria-label': 'Remover ' + pair[1].toLowerCase(), text: '×', onclick: function (e) { card[k] = null; replaceCard(i, e.currentTarget.closest('.set')); changed(true); } })),
         h('div', { class: 'pair' },
           stepper({ value: set.kg, step: 2.5, min: C.LIMITS.KG_MIN, max: C.LIMITS.KG_MAX, label: 'kg do ' + pair[1].toLowerCase(), caption: 'kg',
-            say: pair[1] + ' não conta como série de trabalho.', onChange: function (v) { set.kg = v; liveCard(i); } }),
+            path: k + '.kg', say: pair[1] + ' não conta como série de trabalho.', onChange: function (v) { set.kg = v; liveCard(i); } }),
           stepper({ value: set.reps, step: 1, min: C.LIMITS.REPS_MIN, max: C.LIMITS.REPS_MAX, label: 'reps do ' + pair[1].toLowerCase(), integer: true, caption: 'reps',
-            say: pair[1] + ' não conta como série de trabalho.', onChange: function (v) { set.reps = v; liveCard(i); } }))));
+            path: k + '.reps', say: pair[1] + ' não conta como série de trabalho.', onChange: function (v) { set.reps = v; liveCard(i); } }))));
     });
 
     if (card.showPain || !isBlank(card.pain)) {
@@ -586,7 +682,7 @@
         h('div', { class: 'pain-row pair' },
           h('div', {},
             stepper({ value: card.pain, step: 1, min: C.LIMITS.PAIN_MIN, max: C.LIMITS.PAIN_MAX, start: 0, label: 'dor de 0 a 10', integer: true,
-              say: 'Dor: 0 é nenhuma, 10 é parar na hora.', onChange: function (v) { card.pain = v; liveCard(i); } })),
+              path: 'pain', say: 'Dor: 0 é nenhuma, 10 é parar na hora.', onChange: function (v) { card.pain = v; liveCard(i); } })),
           h('p', { class: 'hint', style: 'margin:0', text: 'Vazio = não informado.' }))));
     }
 
@@ -594,7 +690,7 @@
       var counter = h('span', { class: 'counter', text: (card.note || '').length + '/' + C.LIMITS.NOTE_MAX });
       var ta = h('textarea', {
         class: 'textarea', rows: '2', maxlength: String(C.LIMITS.NOTE_MAX), placeholder: 'Ex.: ombro ok, pegada fechada',
-        'aria-label': 'Nota do exercício', 'data-say': 'Nota curta, até 200 caracteres.', value: card.note || '',
+        'aria-label': 'Nota do exercício', 'data-error-path': 'note', 'data-say': 'Nota curta, até 200 caracteres.', value: card.note || '',
         oninput: function () { card.note = ta.value; counter.textContent = ta.value.length + '/' + C.LIMITS.NOTE_MAX; noteErr.check(); liveCard(i); },
       });
       var noteErr = formulaHint(ta, 'A nota');
@@ -656,7 +752,7 @@
   }
 
   /** Typing inside a card: refresh its head (summary, status) without rebuilding the inputs. */
-  function liveCard(i) {
+  function liveCard(i, j) {
     var card = cards()[i];
     var el = cardEls[i];
     if (el) {
@@ -670,7 +766,7 @@
       }
       el._done = done;
     }
-    changed(false);
+    changed(false, { cardIndex: i, setIndex: j });
   }
 
   function refreshErrors() {
@@ -836,7 +932,7 @@
     };
     var input = h('input', {
       class: 'text-input', type: 'text', inputmode: 'decimal', autocomplete: 'off', enterkeyhint: 'done',
-      placeholder: 'Quantidade', 'aria-label': 'Quantidade', 'data-say': say, value: value,
+      placeholder: 'Quantidade', 'aria-label': 'Quantidade', 'data-error-path': 'qty', 'data-say': say, value: value,
       oninput: function () { onInput(input.value); show(input.value); },
     });
     show(value);
@@ -863,7 +959,7 @@
       var counter = h('span', { class: 'counter', text: c.description.length + '/' + C.LIMITS.DESCRIPTION_MAX });
       var ta = h('textarea', {
         class: 'textarea', rows: '2', maxlength: String(C.LIMITS.DESCRIPTION_MAX), placeholder: 'Ex.: pastel de feira',
-        'aria-label': 'Descrição do item', 'data-say': 'Sem cálculo: entra no diário sem calorias nem macros.', value: c.description,
+        'aria-label': 'Descrição do item', 'data-error-path': 'description', 'data-say': 'Sem cálculo: entra no diário sem calorias nem macros.', value: c.description,
         oninput: function () { c.description = ta.value; counter.textContent = ta.value.length + '/' + C.LIMITS.DESCRIPTION_MAX; descErr.check(); },
       });
       var descErr = formulaHint(ta, 'A descrição');
@@ -914,7 +1010,7 @@
     if (free) {
       var nameInput = h('input', {
         class: 'text-input', type: 'text', placeholder: 'Nome do alimento', autocomplete: 'off', 'aria-label': 'Nome do alimento',
-        'data-say': 'Escreva como está na planilha; ela confere o nome.', value: c.food,
+        'data-error-path': 'food', 'data-say': 'Escreva como está na planilha; ela confere o nome.', value: c.food,
         oninput: function () { c.food = nameInput.value; },
       });
       parts.push(nameInput, h('p', { class: 'hint warn', text: 'A lista de alimentos não coube no link. Escreva o nome como está na planilha: ela confere e sugere se errar.' }));
@@ -963,8 +1059,9 @@
     if (r.errors.length) {
       haptic('error');
       nudge(els.view.querySelector('.panel'));
-      var m = r.errors[0].message;
-      say('alert', m.charAt(0).toUpperCase() + m.slice(1) + '.');
+      var error = C.pulsoError(r.errors);
+      react(error);
+      glance(errorTarget(error, true));
       return false;
     }
     S.food.items.push(item);
@@ -972,7 +1069,7 @@
     renderFood();
     // After this tap's last re-render (the composer resets too), the new item arrives on the plate.
     Promise.resolve().then(function () { motion('enter', els.view.querySelector('.plate > :last-child')); });
-    changed(true);
+    changed(true, { quiet: true });
     say(S.food.meal ? 'happy' : 'idle', itemName(item) + ' no prato.' + (S.food.meal ? '' : ' Falta escolher a refeição.'));
     return true;
   }
@@ -1048,7 +1145,11 @@
         renderFood();
         nudge(els.view.querySelectorAll('.plate-item.bad'));
       }
-      updateMood();
+      S.focus = null;
+      syncProgress();
+      var error = C.pulsoError(r.errors);
+      react(error);
+      glance(errorTarget(error));
       return;
     }
     var view = S.view;
@@ -1131,7 +1232,7 @@
       : h('div', {}, h('h2', { class: 'section-title', text: 'JSON que iria para o bot' }), h('pre', { class: 'json', id: 'json-out', text: pretty }));
 
     els.review.replaceChildren(
-      mascot('happy', null, 'Validado aqui. A confirmação vem do bot.'),
+      mascot('happy', null, C.pulsoSummary(pulsoContext())),
       h('div', { class: 'view-head', style: 'margin-top:12px' },
         h('h1', { class: 'view-title', text: 'Confira o envio' }),
         h('p', { class: 'view-sub', text: 'É exatamente isto que vai para o bot. A planilha confere de novo, e só a resposta do bot diz o que foi gravado.' })),
@@ -1186,6 +1287,8 @@
     lift = motion('handoff', els.review); // a hand-off, not a confirmation: that is the bot's reply
     try {
       tg.sendData(p.json); // Telegram closes the app; the bot's reply is the confirmation.
+      var scene = els.review.querySelector('.mascot-scene');
+      if (scene) els.review.replaceChild(mascot('happy', 'Envio solicitado', C.pulsoSummary(pulsoContext())), scene);
       // If it does not close, stop waiting: nothing is known about delivery, so say only that.
       sendTimer = setTimeout(function () {
         endSend();
@@ -1269,6 +1372,9 @@
 
   function render() {
     cancelReview(); // navigation (tab, date, restore) drops a review being prepared
+    focusedCard = null;
+    S.focus = null;
+    glance(null);
     renderChrome();
     if (S.view === 'workout') renderWorkout(); else renderFood();
     updateMainForForm();

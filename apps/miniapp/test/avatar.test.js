@@ -6,7 +6,7 @@ const A = require('../src/avatar.js');
 test('the public API keeps the old members and adds progress', () => {
   assert.deepEqual(A.MOODS.slice(0, 4), ['idle', 'focused', 'happy', 'alert']);
   assert.ok(A.MOODS.includes('thinking'));
-  for (const k of ['mount', 'setMood', 'mood', 'say', 'create', 'setProgress', 'progress', 'intro']) {
+  for (const k of ['mount', 'setMood', 'mood', 'say', 'create', 'setProgress', 'progress', 'intro', 'glance', 'setDozing', 'dozing']) {
     assert.equal(typeof A[k], 'function', k);
   }
   assert.equal(A.TICKS, 12);
@@ -55,6 +55,13 @@ test('pulse does nothing before mount and for unknown kinds', () => {
   assert.equal(typeof A.pulse, 'function');
   assert.equal(A.pulse('tick'), false);
   assert.equal(A.pulse('nope'), false);
+  assert.equal(A.pulse('celebrate'), false);
+});
+
+test('interactive avatar API is safe before mount', () => {
+  assert.doesNotThrow(() => A.glance(null));
+  assert.doesNotThrow(() => A.setDozing(true));
+  assert.equal(A.dozing(), false);
 });
 
 test('setProgress without a mounted host still clamps and remembers the value', () => {

@@ -6,6 +6,113 @@ const fs = require('node:fs');
 const path = require('node:path');
 const C = require('../src/core.js');
 
+const pulsoCard = (sets, extra) => Object.assign(C.newCard('Supino', 'Peito', { p: '2×6–8 RIR 1', l: '60×8, 60×7' }), { sets }, extra);
+const pulsoSet = (kg, reps, rir = '') => ({ kg: String(kg), reps: String(reps), rir });
+
+test('Pulso only reads explicit set prescriptions, without guessing prose', () => {
+  for (const p of ['2×6–8 RIR 1', ' 2 x 8 ', '2*8-10 RIR 2']) assert.equal(C.plannedSets(p), 2);
+  for (const p of ['', null, 'até 2×8', '2×8 + drop', '0×8', 'livre']) assert.equal(C.plannedSets(p), null);
+});
+
+test('Pulso requires all sets of each planned exercise; extra sets do not fill another exercise', () => {
+  const a = pulsoCard([pulsoSet(60, 8), pulsoSet(60, 8), pulsoSet(60, 8)]);
+  const b = pulsoCard([pulsoSet(50, 8)]);
+  assert.equal(C.pulsoPlan([a, b]).remaining, 1);
+  assert.equal(C.pulsoPlan([a, b]).complete, false);
+  b.sets.push(pulsoSet(50, 8));
+  assert.equal(C.pulsoPlan([a, b]).complete, true);
+  assert.equal(C.pulsoPlan([a, pulsoCard([], { p: 'livre' })]).known, false);
+  assert.equal(C.pulsoPlan([]).complete, false);
+  assert.equal(C.pulsoPlan([a, pulsoCard([], { fromPlan: false })]).complete, true);
+});
+
+test('Pulso gain compares the same numbered set and formats decimal deltas in Portuguese', () => {
+  assert.deepEqual(C.pulsoGain(pulsoCard([pulsoSet('62,5', 6)]), 0), { value: 2.5, unit: 'kg', line: '+2,5 kg em relação à última vez' });
+  assert.equal(C.pulsoGain(pulsoCard([pulsoSet(60, 8), pulsoSet(60, 9)]), 1).line, '+2 reps em relação à última vez');
+  assert.equal(C.pulsoGain(pulsoCard([pulsoSet('17,6', 8)], { l: '17,5×8' }), 0).value, 0.1);
+  assert.equal(C.pulsoGain(pulsoCard([pulsoSet('60,000001', 8)]), 0), null, 'never display a rounded +0 gain');
+  for (const sets of [[pulsoSet(60, 8)], [pulsoSet(59, 20)], [pulsoSet(70, '')], [pulsoSet(70, '2,5')], [pulsoSet(1001, 8)], [pulsoSet(70, 8, '99')]]) {
+    assert.equal(C.pulsoGain(pulsoCard(sets), 0), null);
+  }
+  assert.equal(C.pulsoGain(pulsoCard([pulsoSet(70, 8)], { l: 'sem registro' }), 0), null);
+  assert.equal(C.pulsoGain(pulsoCard([pulsoSet(70, 8), pulsoSet(70, 8), pulsoSet(70, 8)]), 2), null);
+});
+
+test('Pulso cycles applicable tips from the current exercise and plan', () => {
+  const context = { view: 'workout', cards: [pulsoCard([]), pulsoCard([], { name: 'Remada' })], cardIndex: 0 };
+  const tips = C.pulsoTips(context);
+  assert.match(tips[0], /Supino, última vez: 60 kg × 8/);
+  assert.equal(tips[1], 'Faltam 4 séries planejadas.');
+  assert.equal(tips[2], 'Depois de Supino: Remada.');
+  assert.equal(C.pulsoTip(context, 3).line, tips[0]);
+  assert.equal(C.pulsoTip(context, -1).line, tips[0]);
+  assert.equal(C.pulsoTip(Object.assign({}, context, { cardIndex: null }), 0).line, tips[0]);
+  context.cardIndex = 1;
+  assert.match(C.pulsoTip(context, 0).line, /^Remada/);
+  const unknown = { view: 'workout', cards: [pulsoCard([], { p: 'livre', l: '' })] };
+  assert.deepEqual(C.pulsoTips(unknown), ['Tô por aqui. Um registro de cada vez.']);
+});
+
+test('Pulso meal tips distinguish description without quantity from a missing required food quantity', () => {
+  const context = { view: 'food', items: [{ kind: 'food', food: 'Arroz', qty: '' }] };
+  assert.deepEqual(C.pulsoTips(context), ['Seu prato tem 1 item.']);
+  context.compose = { kind: 'description', description: 'pastel', qty: '' };
+  assert.equal(C.pulsoTips(context)[1], 'A descrição sem quantidade entra no diário sem cálculo.');
+  context.compose.qty = '1';
+  assert.equal(C.pulsoTips(context).length, 1);
+});
+
+test('Pulso reacts once to a gain and gives completion priority when both happen together', () => {
+  const before = [pulsoCard([pulsoSet(60, 8), pulsoSet('', '')])];
+  const after = [pulsoCard([pulsoSet(60, 8), pulsoSet('62,5', 8)])];
+  const full = C.pulsoReaction(before, after, 0, 1);
+  assert.equal(full.pulse, 'full');
+  assert.match(full.line, /Todas as séries planejadas.*\+2,5 kg/);
+  assert.equal(C.pulsoReaction(after, after, 0, 1), null);
+  const extra = [pulsoCard([pulsoSet(60, 8), pulsoSet(70, 8)], { p: '3×8' })];
+  assert.equal(C.pulsoReaction(before, extra, 0, 1).pulse, 'celebrate');
+  const lower = [pulsoCard([pulsoSet(60, 8), pulsoSet(65, 8)], { p: '3×8' })];
+  assert.equal(C.pulsoReaction(extra, lower, 0, 1), null, 'lowering a current gain does not celebrate');
+});
+
+test('Pulso summaries use valid sets and the best known gain, without asserting delivery', () => {
+  assert.equal(C.pulsoSummary({ view: 'workout', cards: [pulsoCard([pulsoSet('62,5', 8), pulsoSet(70, '')])] }), '1 série neste treino. Supino: +2,5 kg em relação à última vez.');
+  assert.equal(C.pulsoSummary({ view: 'food', items: [{}, {}] }), '2 itens nesta refeição.');
+  assert.equal(C.pulsoSummary({ cards: [] }), 'Sessão pronta para conferir.');
+});
+
+test('Pulso error decisions preserve the first field target and all remaining error counts', () => {
+  assert.equal(C.pulsoError([]), null);
+  assert.deepEqual(C.pulsoError([{ message: 'kg: obrigatório', card: 0, path: 'exercises[0].work[1].kg' }, { message: 'reps' }]), {
+    mood: 'alert', pulse: 'no', line: 'kg: obrigatório (e mais 1 ajuste)', card: 0, item: undefined, path: 'exercises[0].work[1].kg',
+  });
+});
+
+test('Pulso dozes at 45 seconds, except while busy', () => {
+  assert.equal(C.pulsoDozing(44999, false), false);
+  assert.equal(C.pulsoDozing(45000, false), true);
+  assert.equal(C.pulsoDozing(90000, true), false);
+});
+
+test('Pulso counts current catalog prescriptions even when an older draft lacks a planned exercise', () => {
+  const rows = [{ e: 'Supino', p: '2×8' }, { e: 'Remada', p: '2×8' }];
+  const cards = [pulsoCard([pulsoSet(60, 8), pulsoSet(60, 8)])];
+  const plan = C.pulsoPlan(cards, rows);
+  assert.equal(plan.total, 4);
+  assert.equal(plan.remaining, 2);
+  assert.equal(plan.complete, false);
+  assert.equal(C.pulsoPlan(cards, []).complete, false);
+  assert.ok(C.pulsoTips({ cards, plan: rows }).includes('Faltam 2 séries planejadas.'));
+});
+
+test('Pulso acknowledges repeat-last unless that same action completes the current plan', () => {
+  const before = [pulsoCard([])];
+  const after = [pulsoCard([pulsoSet(60, 8), pulsoSet(60, 7)])];
+  assert.equal(C.pulsoReaction(before, after, 0, undefined, { action: 'repeat' }).pulse, 'full');
+  const rows = [{ e: 'Supino', p: '2×8' }, { e: 'Remada', p: '2×8' }];
+  assert.equal(C.pulsoReaction(before, after, 0, undefined, { action: 'repeat', plan: rows }).line, 'Última carga copiada. Ajuste o que mudou hoje.');
+});
+
 /** The bot's encoding: base64url_nopad(raw_deflate(utf8(json_compact(catalog)))), zlib wbits=-15. */
 function pythonBlob(obj, level) {
   const json = JSON.stringify(obj);

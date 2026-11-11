@@ -14,6 +14,8 @@ kcal to a whole number, grams to one decimal. Names are TACO's, unchanged.
 
 Output: apps/miniapp/data/foods.taco.json, read by the Mini App page. tools/taco/seed_sheet.py
 sends the same rows to a client's Alimentos tab, so the page and the sheet cannot disagree.
+Also writes src/agent/data/foods.taco.names.json inside the agent package. --names-only rebuilds
+that package resource from the already generated page table, without downloading the source.
 
 Run:  python tools/taco/build_foods.py [path/to/taco_phase_1_no_format.xlsx]
 Without a path the file is downloaded. Standard library only.
@@ -50,6 +52,12 @@ ZERO = {"Tr", "NA"}
 
 ROOT = Path(__file__).resolve().parents[2]
 PAGE_FILE = ROOT / "apps" / "miniapp" / "data" / "foods.taco.json"
+NAMES_FILE = ROOT / "services" / "agent" / "src" / "agent" / "data" / "foods.taco.names.json"
+
+
+def write_names(names: list[str]) -> None:
+    NAMES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    NAMES_FILE.write_text(json.dumps(names, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
 def read_sheet(data: bytes) -> list[dict[str, str]]:
@@ -107,6 +115,11 @@ def build(rows: list[dict[str, str]]) -> tuple[list[dict], list[str]]:
 
 
 def main() -> None:
+    if sys.argv[1:] == ["--names-only"]:
+        table = json.loads(PAGE_FILE.read_text(encoding="utf-8"))
+        write_names([row[0] for row in table["foods"]])
+        print(f"{len(table['foods'])} package names written")
+        return
     if len(sys.argv) > 1:
         data = Path(sys.argv[1]).read_bytes()
     else:
@@ -127,6 +140,7 @@ def main() -> None:
     }
     PAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
     PAGE_FILE.write_text(json.dumps(page, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    write_names([food["name"] for food in foods])
 
     print(f"{len(foods)} foods written, {len(left_out)} left out")
     for line in left_out:

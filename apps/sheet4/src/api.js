@@ -620,6 +620,7 @@ const SheetApi = {
       todayDiary = SheetApi.compact_(SheetApi.pick_(todayRow, Object.keys(Diary.FIELDS)));
       if (!Object.keys(todayDiary).length) todayDiary = null;
     }
+    const foodRows = lap('foodsRead', () => (SheetApi.has_('foods') ? Foods.all() : []));
     const result = {
       today: Dates.key(today),
       timezone: Config.timezone(),
@@ -649,7 +650,12 @@ const SheetApi = {
           lastWork,
         });
       })),
-      foods: lap('foods', () => (SheetApi.has_('foods') ? Foods.names() : [])),
+      foods: lap('foods', () => foodRows.map((f) => String(f.name).trim())),
+      foodTable: lap('foodTable', () => foodRows.filter((f) => Foods.isValid(f)).map((f) => [
+        String(f.name).trim(), f.baseUnit, f.baseQty, f.kcal, f.protein, f.carbs, f.fat,
+        Foods.key_(f.householdUnit) ? f.householdUnit : null,
+        Foods.key_(f.householdUnit) ? f.perHousehold : null,
+      ])),
       favorites: lap('favorites', () => (SheetApi.has_('favorites') && SheetApi.has_('ingredients') ? Favorites.names() : [])),
       meals: FoodLog.MEALS.slice(),
       units: Units.LIST.slice(),

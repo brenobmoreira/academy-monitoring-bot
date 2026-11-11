@@ -76,6 +76,21 @@ test('doPost without the Script Property answers internal, never an HTML page', 
 
 /* catalog ---------------------------------------------------------------------------------------- */
 
+test('catalog foodTable: one food read, valid rows only, exact stored values and nullable household', () => {
+  const ctx = setup();
+  const read = ctx.Foods.all;
+  let reads = 0;
+  ctx.Foods.all = () => { reads++; return read(); };
+  const c = ok(ctx.api('catalog', {}));
+  assert.equal(reads, 1);
+  assert.deepEqual(c.foods, FOODS.map((f) => f.name));
+  assert.equal(c.foodTable.length, FOODS.length - 1);
+  assert.deepEqual(c.foodTable[0], ['Ovo inteiro cozido', 'g', 100, 146, 13.3, 0.6, 9.5, 'un', 50]);
+  assert.deepEqual(c.foodTable[1], ['Arroz branco cozido', 'g', 100, 128, 2.5, 28.1, 0.2, null, null]);
+  assert.equal(typeof c.timings.foodTable, 'number');
+  assert.equal(typeof c.timings.foodsRead, 'number');
+});
+
 test('catalog: today, client, phase in force with targets, rotation, next session, plan, foods', () => {
   const ctx = setup();
   const c = ok(ctx.api('catalog', {}));

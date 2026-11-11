@@ -179,3 +179,17 @@ test('setCells writes layout cells, formulas included', () => {
   assert.equal(s.cell_(7, 2), 67);
   assert.equal(s.cell_(1, 3), '=1+1');
 });
+
+test('read asks the spreadsheet for the sheet a fixed number of times, not once per row', () => {
+  const lookups = (n) => {
+    const rows = Array.from({ length: n }, (_, i) => ({ name: `Exercício ${i + 1}` }));
+    const ctx = boot({ tabs: { exercises: rows } });
+    const ss = ctx.SpreadsheetApp.getActive();
+    const real = ss.getSheetByName.bind(ss);
+    let count = 0;
+    ss.getSheetByName = (name) => { count++; return real(name); };
+    assert.equal(ctx.Tabs.read('exercises').length, n);
+    return count;
+  };
+  assert.equal(lookups(200), lookups(2));
+});

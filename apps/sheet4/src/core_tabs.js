@@ -262,9 +262,13 @@ const Tabs = {
     }
   },
 
-  /** Row values (full width) → object keyed by column key, with _row. */
-  toObject_(id, line, row) {
-    const { map } = Tabs.layout(id);
+  /**
+   * Row values (full width) → object keyed by column key, with _row. `layout` is the tab's
+   * Tabs.layout(id) when the caller already has it: layout() asks the spreadsheet for the sheet
+   * on every call, so a loop over rows must fetch it once, not once per row.
+   */
+  toObject_(id, line, row, layout) {
+    const { map } = layout || Tabs.layout(id);
     const obj = { _row: row };
     Tabs.columns(id).forEach((c) => {
       obj[c.key] = map[c.key] ? Tabs.fromCell(c, line[map[c.key] - 1]) : null;
@@ -273,8 +277,8 @@ const Tabs = {
   },
 
   /** True when every mapped cell of the line is empty. */
-  isEmpty_(id, line) {
-    const { map } = Tabs.layout(id);
+  isEmpty_(id, line, layout) {
+    const { map } = layout || Tabs.layout(id);
     return Object.keys(map).every((k) => {
       const v = line[map[k] - 1];
       return v === '' || v === null || v === undefined;
@@ -288,14 +292,15 @@ const Tabs = {
    */
   read(id) {
     const spec = Tabs.get(id);
-    const { sheet, lastCol } = Tabs.layout(id);
+    const layout = Tabs.layout(id);
+    const { sheet, lastCol } = layout;
     const first = spec.firstDataRow;
     const last = sheet.getLastRow();
     if (last < first || !lastCol) return [];
     const values = sheet.getRange(first, 1, last - first + 1, lastCol).getValues();
     const out = [];
     values.forEach((line, i) => {
-      if (!Tabs.isEmpty_(id, line)) out.push(Tabs.toObject_(id, line, first + i));
+      if (!Tabs.isEmpty_(id, line, layout)) out.push(Tabs.toObject_(id, line, first + i, layout));
     });
     return out;
   },

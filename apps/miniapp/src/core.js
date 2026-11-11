@@ -424,6 +424,12 @@
     var units = strList(raw.units);
     return {
       v: 1,
+      view: raw.view === 'food' || raw.view === 'workout' ? raw.view : '',
+      ft: raw.ft === 'taco4' ? raw.ft : '',
+      fh: typeof raw.fh === 'string' && /^[a-f0-9]{64}$/.test(raw.fh) ? raw.fh : '',
+      nutrition: ownNutrition(raw.foods, raw.fv, raw.fu),
+      freeFoods: !Array.isArray(raw.foods),
+      tableStatus: raw.ft === 'taco4' ? 'loading' : '',
       today: isDateKey(raw.today) ? raw.today : '',
       tz: validTimeZone(raw.tz) ? raw.tz : DEFAULT_TZ,
       client: str(raw.client),
@@ -437,6 +443,127 @@
       meals: meals.length ? meals : DEFAULT_MEALS.slice(),
       units: units.length ? units : DEFAULT_UNITS.slice(),
     };
+  }
+
+  /* meal arithmetic: Foods.key_, Units.convert and Foods.macros ------------------------------- */
+
+  function foodKey(name) {
+    return String(name === null || name === undefined ? '' : name).normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  var UNIT_ALIASES = {
+    grama: 'g', gramas: 'g', gr: 'g', miligrama: 'mg', miligramas: 'mg', quilo: 'kg', quilos: 'kg',
+    kilo: 'kg', kilos: 'kg', mililitro: 'ml', mililitros: 'ml', litro: 'l', litros: 'l',
+    unidade: 'un', unidades: 'un', und: 'un', 'un.': 'un', fatias: 'fatia', colheres: 'colher',
+    porcao: 'porção', porcoes: 'porção', 'porções': 'porção',
+  };
+  function normalizeUnit(unit) {
+    var u = String(unit === null || unit === undefined ? '' : unit).normalize('NFC').trim().toLowerCase();
+    return UNIT_ALIASES[u] || u;
+  }
+  var MASS = { mg: 0.001, g: 1, kg: 1000 }, VOLUME = { ml: 1, l: 1000 };
+  function unitFamily(u) {
+    return Object.prototype.hasOwnProperty.call(MASS, u) ? MASS : Object.prototype.hasOwnProperty.call(VOLUME, u) ? VOLUME : null;
+  }
+  function nutritionRow(row) {
+    if (!Array.isArray(row) || row.length !== 8 || (row[0] !== 'g' && row[0] !== 'ml')) return null;
+    if (!row.slice(1, 6).every(function (v) { return typeof v === 'number' && isFinite(v) && v >= 0; }) || !(row[1] > 0)) return null;
+    var hh = normalizeUnit(row[6]);
+    if (hh ? unitFamily(hh) || typeof row[7] !== 'number' || !isFinite(row[7]) || !(row[7] > 0) : row[7] !== null) return null;
+    return { baseUnit: row[0], baseQty: row[1], kcal: row[2], protein: row[3], carbs: row[4], fat: row[5], householdUnit: hh, perHousehold: row[7] };
+  }
+  function ownNutrition(names, rows, units) {
+    var out = Object.create(null), seen = Object.create(null);
+    (Array.isArray(rows) && Array.isArray(names) ? rows : []).forEach(function (r) {
+      if (!Array.isArray(r) || r.length !== 9 || !Number.isInteger(r[0]) || typeof names[r[0]] !== 'string') return;
+      var data = r.slice(1);
+      if (Array.isArray(units)) {
+        data[0] = Number.isInteger(data[0]) ? units[data[0]] : undefined;
+        data[6] = data[6] === null ? null : Number.isInteger(data[6]) ? units[data[6]] : undefined;
+      }
+      var k = foodKey(names[r[0]]), value = nutritionRow(data);
+      if (seen[k]) { delete out[k]; return; }
+      seen[k] = true;
+      if (value) out[k] = value;
+    });
+    return out;
+  }
+
+  /** Returns null whenever the sheet's calculation cannot be reproduced. Never uses search fold. */
+  function foodNutrition(item, catalog) {
+    if (!item || item.kind !== 'food') return null;
+    var food = catalog.nutrition && catalog.nutrition[foodKey(item.food)];
+    if (!food) return null;
+    var n = parseDecimal(item.qty);
+    if (!Number.isFinite(n) || n < LIMITS.QTY_MIN || n > LIMITS.QTY_MAX) return null;
+    var unit = normalizeUnit(item.unit) || food.baseUnit, family = unitFamily(unit), baseFamily = unitFamily(food.baseUnit);
+    var qty;
+    if (family) {
+      if (family !== baseFamily) return null;
+      qty = round(n * family[unit] / family[food.baseUnit], 4);
+    } else {
+      if (!food.householdUnit || unit !== food.householdUnit || !(food.perHousehold > 0)) return null;
+      qty = round(n * food.perHousehold, 4);
+    }
+    var result = {};
+    ['kcal', 'protein', 'carbs', 'fat'].forEach(function (key) { result[key] = round(food[key] * (qty / food.baseQty), 2); });
+    return Object.keys(result).every(function (key) { return Number.isFinite(result[key]); }) ? result : null;
+  }
+  function mealNutrition(items, catalog) {
+    var total = { kcal: 0, protein: 0, carbs: 0, fat: 0, included: 0, excluded: 0 };
+    (items || []).forEach(function (item) {
+      var value = foodNutrition(item, catalog);
+      if (!value) { total.excluded++; return; }
+      total.included++;
+      ['kcal', 'protein', 'carbs', 'fat'].forEach(function (key) { total[key] += value[key]; });
+    });
+    ['kcal', 'protein', 'carbs', 'fat'].forEach(function (key) { total[key] = round(total[key], 2); });
+    return total;
+  }
+  function nutritionText(total) {
+    var text = total.included ? Math.round(total.kcal) + ' kcal · P ' + String(round(total.protein, 1)).replace('.', ',') +
+      ' g · C ' + String(round(total.carbs, 1)).replace('.', ',') + ' g · G ' + String(round(total.fat, 1)).replace('.', ',') + ' g'
+      : 'Sem itens com valores disponíveis';
+    return text + (total.excluded ? ' · ' + total.excluded + (total.excluded === 1 ? ' item fora da soma' : ' itens fora da soma') : '');
+  }
+
+  function tacoRows(table) {
+    if (!table || table.table !== 'taco4' || table.per !== '100 g' ||
+        JSON.stringify(table.columns) !== JSON.stringify(['name', 'kcal', 'protein', 'carbs', 'fat', 'fiber']) ||
+        !Array.isArray(table.foods) || table.foods.length !== 575) throw new Error('tabela inválida');
+    var seen = Object.create(null);
+    return table.foods.map(function (row) {
+      if (!Array.isArray(row) || row.length !== 6 || !str(row[0]) || seen[foodKey(row[0])] ||
+          !row.slice(1).every(function (v) { return typeof v === 'number' && isFinite(v) && v >= 0; })) throw new Error('alimento inválido');
+      seen[foodKey(row[0])] = true;
+      return ['g', 100, row[1], row[2], row[3], row[4], null, null];
+    });
+  }
+  function sha256(text) {
+    if (typeof crypto === 'undefined' || !crypto.subtle) return Promise.reject(new Error('SHA-256 indisponível'));
+    return crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)).then(function (buffer) {
+      return Array.prototype.map.call(new Uint8Array(buffer), function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+    });
+  }
+  /** Fixed same-origin URL. A failure (including unavailable WebCrypto) never blocks the form. */
+  function loadFoodTable(catalog, fetcher, digest) {
+    if (catalog.ft !== 'taco4') return Promise.resolve(catalog);
+    return Promise.resolve().then(function () { return (fetcher || fetch)('data/foods.taco.json'); }).then(function (r) {
+      if (!r.ok) throw new Error('tabela indisponível');
+      return r.json();
+    }).then(function (table) {
+      var rows = tacoRows(table);
+      var out = Object.assign({}, catalog, { foods: (catalog.foods || []).slice(), nutrition: Object.assign(Object.create(null), catalog.nutrition) });
+      var names = Object.create(null);
+      out.foods.forEach(function (n) { names[foodKey(n)] = true; });
+      table.foods.forEach(function (row) { if (!names[foodKey(row[0])]) out.foods.push(row[0]); });
+      return Promise.resolve().then(function () { return (digest || sha256)(JSON.stringify(rows)); }).then(function (hash) {
+        var verified = catalog.fh && hash === catalog.fh;
+        out.tableStatus = verified ? 'ready' : 'values_unavailable';
+        if (verified) table.foods.forEach(function (r, i) { out.nutrition[foodKey(r[0])] = nutritionRow(rows[i]); });
+        return out;
+      }, function () { out.tableStatus = 'values_unavailable'; return out; });
+    }).catch(function () { return Object.assign({}, catalog, { tableStatus: 'unavailable' }); });
   }
 
   /**
@@ -704,7 +831,7 @@
     if (item.kind === 'food') {
       var name = typeof item.food === 'string' ? item.food.trim() : '';
       if (!name) e.push({ path: 'food', message: 'alimento: obrigatório' });
-      else if (catalog.foods && catalog.foods.indexOf(name) < 0) e.push({ path: 'food', message: 'alimento fora do catálogo; use "sem cálculo"' });
+      else if (!catalog.freeFoods && catalog.foods && catalog.foods.indexOf(name) < 0) e.push({ path: 'food', message: 'alimento fora do catálogo; use "sem cálculo"' });
       else if (name.length > LIMITS.DESCRIPTION_MAX) e.push({ path: 'food', message: 'alimento: nome longo demais' });
       out.food = name;
       var qty = numberField(e, item.qty, 'qty', 'quantidade', { required: true, min: LIMITS.QTY_MIN, max: LIMITS.QTY_MAX });
@@ -1025,6 +1152,12 @@
     inflateRawBrowser: inflateRawBrowser,
     decodeCatalog: decodeCatalog,
     normalizeCatalog: normalizeCatalog,
+    foodKey: foodKey,
+    normalizeUnit: normalizeUnit,
+    foodNutrition: foodNutrition,
+    mealNutrition: mealNutrition,
+    nutritionText: nutritionText,
+    loadFoodTable: loadFoodTable,
     muscleEntries: muscleEntries,
     parseHash: parseHash,
     parseLastWork: parseLastWork,

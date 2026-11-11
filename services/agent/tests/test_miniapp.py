@@ -539,6 +539,8 @@ def test_shared_table_activation_uses_sheet_normalization_and_requires_every_nam
     assert len(miniapp.TACO_NAMES) == 575
     assert len(compact["foods"]) == 110
     assert all(len(row) == 9 for row in compact["fv"])
+    assert len(compact["fu"]) == len(set(compact["fu"]))
+    assert all(type(row[1]) is int and type(row[7]) in (int, type(None)) for row in compact["fv"])
     cat["foods"] = ["  " + n.upper().replace(" ", "  ") + "  " for n in cat["foods"]]
     assert catalog_v1(cat)["ft"] == "taco4"
     cat["foods"].pop()
@@ -560,7 +562,7 @@ def test_realistic_110_own_food_values_fit_and_are_trimmed_before_names():
     markup, dropped = keyboard_markup(URL, cat, full - 1)
     trimmed = decode(markup["keyboard"][0][1]["web_app"]["url"])
     assert dropped == ["fv"]
-    assert "fv" not in trimmed and trimmed["foods"] == meal["foods"]
+    assert "fv" not in trimmed and "fu" not in trimmed and trimmed["foods"] == meal["foods"]
     assert trimmed["ft"] == "taco4" and trimmed["fh"] == meal["fh"]
 
 

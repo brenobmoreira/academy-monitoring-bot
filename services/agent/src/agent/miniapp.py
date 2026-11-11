@@ -625,9 +625,23 @@ def _food_values(result: dict[str, Any], out: dict[str, Any]) -> None:
         key = _food_key(row[0])
         if keys.count(key) == 1:
             rows[key] = [row[0], base, *row[2:]]
-    values = [[i, *rows[_food_key(n)][1:]] for i, n in enumerate(own) if _food_key(n) in rows]
+    units: list[str] = []
+
+    def unit_index(unit: str | None) -> int | None:
+        if unit is None:
+            return None
+        if unit not in units:
+            units.append(unit)
+        return units.index(unit)
+
+    values = []
+    for i, name in enumerate(own):
+        if _food_key(name) in rows:
+            row = rows[_food_key(name)]
+            values.append([i, unit_index(row[1]), *row[2:7], unit_index(row[7]), row[8]])
     if values:
         out["fv"] = values
+        out["fu"] = units
     if has_table and all(k in rows for k in shared_keys):
         # Names alone cannot prove the sheet still has TACO values: foods.seed skips existing
         # names. The page checks this digest before using the shared file for arithmetic.
@@ -706,6 +720,8 @@ def encode_catalog(catalog: dict[str, Any]) -> str:
 def _trim(catalog: dict[str, Any], key: str) -> bool:
     """Drops `key` (`l`/`p` of every plan row, or the top-level `wk`/`foods`); True if it changed."""
     if key in ("fv", "wk", "foods"):
+        if key in ("fv", "foods"):
+            catalog.pop("fu", None)
         if key == "foods":
             catalog.pop("fv", None)  # indices only make sense with the matching own names
         return catalog.pop(key, None) is not None
@@ -738,10 +754,11 @@ def keyboard_markup(
         "view": "workout",
         **{k: v for k, v in catalog.items() if k in ("next", "sessions", "plan", "ex", "wk")},
     }
+    food_keys = ("foods", "fav", "meals", "units", "ft", "fv", "fu", "fh")
     food = {
         **common,
         "view": "food",
-        **{k: v for k, v in catalog.items() if k in ("foods", "fav", "meals", "units", "ft", "fv", "fh")},
+        **{k: v for k, v in catalog.items() if k in food_keys},
     }
     dropped: list[str] = []
 

@@ -624,6 +624,7 @@ const SheetApi = {
       lastWorkout,
       todayDiary,
       progressionSuggestions: SheetApi.has_('plans') ? Progression.suggestions(today) : [],
+      recentGroups: SheetApi.recentGroups_(all, today),
       exercises: Exercises.known(today).map((e) => ({ name: e.name, group: e.group })),
       plan: (plan ? plan.rows : []).filter((r) => r.exercise !== null).map((r) => {
         const p = Sessions.prescription(r, trainingPhase);
@@ -646,6 +647,34 @@ const SheetApi = {
       foodLog: Tabs.ENUMS.FOOD_LOG.slice(),
       recent: SheetApi.recent_(),
     };
+  },
+
+  /** How many days, ending today, catalog.recentGroups covers. */
+  RECENT_GROUP_DAYS: 7,
+
+  /**
+   * Work sets per muscle group over the last RECENT_GROUP_DAYS days (today included), for the
+   * body map: [{group, sets}], most sets first. A partial session's sets count (they were done);
+   * an exercise with no group anywhere (Exercícios, then its plan row) is left out.
+   */
+  recentGroups_(rows, today) {
+    const start = Dates.addDays(today, 1 - SheetApi.RECENT_GROUP_DAYS);
+    const catalogue = Exercises.list();
+    const plans = {};
+    const planRows = (id) => {
+      if (!id || !SheetApi.has_('plans')) return [];
+      if (!(id in plans)) { const v = Plans.get(String(id)); plans[id] = v ? v.rows : []; }
+      return plans[id];
+    };
+    const by = {};
+    rows.filter((r) => Dates.within(r.date, start, today)).forEach((r) => {
+      const sets = Progression.workSets(r).length;
+      const group = sets ? Exercises.groupOf(r.exercise, planRows(r.plan), catalogue) : null;
+      if (group) by[group] = (by[group] || 0) + sets;
+    });
+    return Object.keys(by)
+      .map((group) => ({ group, sets: by[group] }))
+      .sort((x, y) => y.sets - x.sets || (x.group < y.group ? -1 : 1));
   },
 
   /** Actions of the last RECENT_MINUTES not undone, newest first (bot writes carry their summary). */

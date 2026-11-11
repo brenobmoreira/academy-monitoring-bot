@@ -566,6 +566,27 @@ test('requestId conflict, user undo vs rolled-back partial failure, entryId look
   assert.equal(decodeCalls, 0, 'no Log JSON decoded on a fresh requestId');
 });
 
+test('catalog.recentGroups: work sets per muscle group over the last 7 days, most sets first', () => {
+  const ctx = setup();
+  assert.deepEqual(ok(ctx.api('catalog', {})).recentGroups, []);
+  const names = ok(ctx.api('catalog', {})).plan.filter((r) => r.session === 'Upper' && r.group);
+  const [first, second] = [names[0], names.find((r) => r.group !== names[0].group)];
+  const set = { kg: 20, reps: 10 };
+  // 8 days ago: outside the window. 6 days ago and today: inside.
+  ok(ctx.api('workout.upsert', { date: '2026-10-12', session: 'Upper', exercises: [{ name: first.exercise, work: [set, set] }] }));
+  ok(ctx.api('workout.upsert', { date: '2026-10-14', session: 'Upper', exercises: [{ name: first.exercise, work: [set] }] }));
+  ok(ctx.api('workout.upsert', {
+    date: '2026-10-20',
+    session: 'Upper',
+    exercises: [
+      { name: first.exercise, work: [set], warmup: { kg: 10, reps: 10 } },
+      { name: second.exercise, work: [set, set] },
+    ],
+  }));
+  const got = ok(ctx.api('catalog', {})).recentGroups;
+  assert.deepEqual(got, [first.group, second.group].sort().map((group) => ({ group, sets: 2 })));
+});
+
 test('catalog includes lastWork per plan row, todayDiary, and progressionSuggestions; food.copy, measures.upsert, foods.seed', () => {
   const ctx = setup({ config: { 'analysis.progressionSessions': 1, 'routine.loadIncrementKg': 2.5 } });
 

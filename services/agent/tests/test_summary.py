@@ -167,7 +167,42 @@ def test_food_lines_show_macros_and_cálculo_fonte_when_estimated_or_without_cal
         "• Arroz branco cozido 150 g · 192 kcal, P 3,8 g",
         "• Ovo inteiro cozido 100 g · 146 kcal, P 13,3 g (Estimado · Fonte: TACO/fonte confiável)",
         "• Pastel de feira · sem cálculo (Fonte: Pendente)",
+        "Lançado agora: 338 kcal · P 17 g",
         "Dia: 338 kcal · P 17 g · 1 sem cálculo · 1 estimado",
+    ]
+
+
+def test_food_sums_split_carbs_and_fat_for_this_write_and_for_the_day_when_the_sheet_sends_them():
+    def item(food: str, kcal: float, protein: float, carbs: float, fat: float) -> dict:
+        row = {"food": food, "qty": 100, "unit": "g", "calc": "Calculado"}
+        return {**row, "kcal": kcal, "protein": protein, "carbs": carbs, "fat": fat}
+
+    def write(items: list[dict], totals: dict) -> tuple:
+        return ("food.add", {"date": "2026-09-21", "meal": "Jantar", "items": items, "totals": totals})
+
+    day = {"kcal": 900, "protein": 60.4, "carbs": 95.5, "fat": 28.2}
+    two = write([item("Arroz", 128, 2.6, 28.1, 0.2), item("Frango", 163, 31.5, 0, 3.2)], day)
+    assert confirmation([two])[-2:] == [
+        "Lançado agora: 291 kcal · P 34 g · C 28 g · G 3 g",
+        "Dia: 900 kcal · P 60 g · C 96 g · G 28 g",
+    ]
+    # one item: the line is still there, because the item line shows only kcal and protein
+    one = write([item("Arroz", 128, 2.6, 28.1, 0.2)], day)
+    assert confirmation([one])[-2] == "Lançado agora: 128 kcal · P 3 g · C 28 g · G 0 g"
+
+
+def test_one_item_without_carbs_or_fat_gets_no_sum_line():
+    rice = {"food": "Arroz", "qty": 100, "unit": "g", "kcal": 128, "protein": 2.6, "calc": "Calculado"}
+    result = {
+        "date": "2026-09-21",
+        "meal": "Jantar",
+        "items": [rice],
+        "totals": {"kcal": 128, "protein": 2.6},
+    }
+    assert confirmation([("food.add", result)]) == [
+        "<b>21/09 · Jantar:</b>",
+        "• Arroz 100 g · 128 kcal, P 2,6 g",
+        "Dia: 128 kcal · P 3 g",
     ]
 
 

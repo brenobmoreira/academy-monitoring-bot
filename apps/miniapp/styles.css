@@ -603,3 +603,5 @@ details.raw summary { min-height: 44px; display: flex; align-items: center; colo
 .sheet-title { margin: 0 0 10px; font-size: 19px; font-weight: 750; }
 .sheet .results { overflow-y: auto; flex: 1; margin-top: 8px; }
 .sheet .result { border-bottom: 1px solid var(--line); border-radius: 0; min-height: 52px; }
+/* Meal totals use the same theme tokens as the plate, and wrap on narrow phones. */
+.meal-nutrition { margin: 12px 0 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; font-size: 14px; font-weight: 600; line-height: 1.6; font-variant-numeric: tabular-nums; }

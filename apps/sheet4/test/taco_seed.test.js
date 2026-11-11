@@ -7,7 +7,7 @@ const { load, plain } = require('./harness');
 
 test('all 575 generated seed rows pass the real foods.seed validator, in batches <=250', () => {
   const root = path.resolve(__dirname, '../../..');
-  const python = process.env.TACO_TEST_PYTHON || 'C:/Users/LOUREN~1/AppData/Local/Temp/v312/Scripts/python.exe';
+  const python = process.env.TACO_TEST_PYTHON || (process.platform === 'win32' ? 'C:/Users/LOUREN~1/AppData/Local/Temp/v312/Scripts/python.exe' : 'python3');
   const script = 'import json, runpy; m=runpy.run_path("tools/taco/seed_sheet.py"); print(json.dumps(m["rows"]()))';
   const rows = JSON.parse(execFileSync(python, ['-B', '-c', script], { cwd: root, encoding: 'utf8' }));
   const ctx = load();

@@ -437,11 +437,13 @@
     if (reaction && !opts.quiet) { syncProgress(); react(reaction); }
     else if (!opts.quiet && (structural || S.showErrors)) updateMood(); else syncProgress();
     syncBody();
+    if (S.view === 'food') syncNutrition();
   }
 
   /* chrome: tabs and dates ------------------------------------------------------------------- */
 
   function renderChrome() {
+    els.tabBar.hidden = !!S.catalog.view;
     els.tabBar.setAttribute('data-view', S.view); // styles.css slides the selected pill
     Array.prototype.forEach.call(els.tabs, function (t) {
       t.setAttribute('aria-selected', String(t.getAttribute('data-view') === S.view));
@@ -464,7 +466,7 @@
   Array.prototype.forEach.call(els.tabs, function (t) {
     t.addEventListener('click', function () {
       var v = t.getAttribute('data-view');
-      if (v === S.view) return;
+      if (v === S.view || (S.catalog.view && S.catalog.view !== v)) return;
       S.view = v;
       S.showErrors = false;
       haptic('select');
@@ -911,7 +913,19 @@
       onclick: function () { confirmDialog('Tirar todos os itens do prato?', function () { f.items = []; f.id = C.newSubmissionId(); S.showErrors = false; renderFood(); changed(true); }); },
     }) : null);
 
-    els.view.replaceChildren(head, meals, h('h2', { class: 'section-title', text: 'Adicionar' }), panel, plateTitle, plate, reset);
+    var status = S.catalog.tableStatus;
+    var notice = h('p', { id: 'food-table-status', class: 'hint', role: 'status', text: status === 'loading'
+      ? 'Lista completa indisponível enquanto carrega.' : status === 'unavailable' ? 'Lista completa indisponível.'
+        : status === 'values_unavailable' ? 'Valores da tabela indisponíveis; soma parcial.' : '' });
+    notice.hidden = !status || status === 'ready';
+    var total = h('p', { id: 'meal-nutrition', class: 'meal-nutrition', 'aria-live': 'polite', 'aria-atomic': 'true' });
+    els.view.replaceChildren(head, meals, h('h2', { class: 'section-title', text: 'Adicionar' }), notice, panel, plateTitle, plate, total, reset);
+    syncNutrition();
+  }
+
+  function syncNutrition() {
+    var line = $('meal-nutrition');
+    if (line) line.textContent = S.food.items.length ? C.nutritionText(C.mealNutrition(S.food.items, S.catalog)) : 'Adicione itens para ver a soma.';
   }
 
   function unitChips(current, onPick, optional) {
@@ -981,7 +995,7 @@
     }
 
     // Catalog food (or free name when the catalog's food list did not fit in the link).
-    var free = !S.catalog.foods;
+    var free = !S.catalog.foods || c.manual;
     var parts = [];
     if (!free && !c.food) {
       var results = h('ul', { class: 'results' });
@@ -1004,7 +1018,8 @@
         }) : [h('li', { class: 'hint', text: 'Não está no catálogo. Use "Sem cálculo" para registrar mesmo assim.' })]);
       };
       fillResults();
-      return h('div', {}, h('label', { class: 'search' }, icon('search'), input), results);
+      return h('div', {}, h('label', { class: 'search' }, icon('search'), input), results,
+        S.catalog.freeFoods ? h('button', { type: 'button', class: 'btn-text', text: 'Digitar nome da planilha', onclick: function () { c.manual = true; renderFood(); } }) : null);
     }
 
     if (free) {
@@ -1079,7 +1094,10 @@
   }
   /** Kind and measure under the name; the amount goes in its own right-aligned column. */
   function itemMeta(it) {
-    if (it.kind === 'food') return it.measure ? 'catálogo, ' + it.measure.toLowerCase() : 'catálogo';
+    if (it.kind === 'food') {
+      var value = C.foodNutrition(it, S.catalog);
+      return (it.measure ? 'catálogo, ' + it.measure.toLowerCase() : 'catálogo') + (value ? ' · ' + Math.round(value.kcal) + ' kcal' : '');
+    }
     if (it.kind === 'favorite') return 'favorita, porções';
     return 'sem cálculo';
   }
@@ -1266,7 +1284,7 @@
     S.screen = 'form';
     els.review.hidden = true;
     els.view.hidden = false;
-    els.tabBar.hidden = false;
+    els.tabBar.hidden = !!S.catalog.view;
     els.dates.hidden = false;
     render();
     if (back) motion('settle', els.view);
@@ -1454,6 +1472,7 @@
     S.view = hash.view;
     loadCatalog(hash).then(function (catalog) {
       S.catalog = catalog;
+      if (catalog.view) S.view = catalog.view;
       S.dates = C.dateOptions(catalog.tz);
       S.today = S.dates[0].key;
       S.workout = { date: S.today, session: catalog.next, forms: {} };
@@ -1484,6 +1503,29 @@
       if (first && !cards().some(function (c) { return c.open; })) first.open = true;
       render();
       if (draft) say('idle', 'Rascunho recuperado. Continue de onde parou.');
+      if (catalog.ft) {
+        var timeout = new Promise(function (resolve) {
+          setTimeout(function () { resolve(Object.assign({}, catalog, { tableStatus: 'unavailable' })); }, 8000);
+        });
+        Promise.race([C.loadFoodTable(catalog), timeout]).then(function (loaded) {
+          S.catalog = loaded;
+          if (S.view !== 'food' || S.screen !== 'form') return;
+          var active = document.activeElement;
+          var label = active && active.getAttribute('aria-label');
+          var start = active && active.selectionStart, end = active && active.selectionEnd;
+          renderFood();
+          if (label) {
+            var inputs = Array.prototype.slice.call(els.view.querySelectorAll('input'))
+              .concat(Array.prototype.slice.call(els.view.querySelectorAll('textarea')));
+            Array.prototype.some.call(inputs, function (input) {
+              if (input.getAttribute('aria-label') !== label) return false;
+              input.focus();
+              if (input.setSelectionRange && typeof start === 'number') input.setSelectionRange(start, end);
+              return true;
+            });
+          }
+        });
+      }
     }).catch(function (err) {
       if (!inTelegram && !hash.blob) {
         fatal('O catálogo de exemplo não carregou.', 'Não consegui carregar dev/sample-catalog.json (' + err.message + '). Sirva a pasta apps/miniapp por HTTP.');

@@ -592,41 +592,50 @@ const SheetApi = {
   /* catalog ------------------------------------------------------------------------------------ */
 
   catalog_() {
+    // Milliseconds each step took, returned as `timings` so a slow catalog can be traced to a step.
+    const timings = {};
+    const started = Date.now();
+    const lap = (name, fn) => {
+      const t = Date.now();
+      const value = fn();
+      timings[name] = (timings[name] || 0) + (Date.now() - t);
+      return value;
+    };
     const today = Dates.today();
-    const plan = SheetApi.has_('plans') ? Plans.on(today) : null;
-    const trainingPhase = Sessions.phaseOn(today, plan);
-    const all = Workouts.rows();
-    const idx = Progression.index(all);
+    const plan = lap('plan', () => (SheetApi.has_('plans') ? Plans.on(today) : null));
+    const trainingPhase = lap('trainingPhase', () => Sessions.phaseOn(today, plan));
+    const all = lap('workouts', () => Workouts.rows());
+    const idx = lap('index', () => Progression.index(all));
     let next = null;
-    try { next = Sessions.nextSession(today, all); } catch (err) { next = null; }
+    try { next = lap('nextSession', () => Sessions.nextSession(today, all)); } catch (err) { next = null; }
     let lastWorkout = null;
     if (all.length) {
       const last = all.slice().sort((a, b) => Dates.compare(a.date, b.date) || a._row - b._row)[all.length - 1];
       const s = Workouts.sessionsOn(all, last.date).find((x) => Exercises.normalize(x.session) === Exercises.normalize(last.session));
       lastWorkout = { date: Dates.key(last.date), session: s.session, state: s.state };
     }
-    const todayRow = SheetApi.has_('diary') ? Days.get(today) : null;
+    const todayRow = lap('diary', () => (SheetApi.has_('diary') ? Days.get(today) : null));
     let todayDiary = null;
     if (todayRow) {
       todayDiary = SheetApi.compact_(SheetApi.pick_(todayRow, Object.keys(Diary.FIELDS)));
       if (!Object.keys(todayDiary).length) todayDiary = null;
     }
-    return {
+    const result = {
       today: Dates.key(today),
       timezone: Config.timezone(),
       client: { name: Config.get('client.name') },
-      phase: SheetApi.phase_(today),
+      phase: lap('phase', () => SheetApi.phase_(today)),
       trainingPhase,
-      sessions: Sessions.names(today),
-      rotation: Sessions.rotation(today),
+      sessions: lap('sessions', () => Sessions.names(today)),
+      rotation: lap('rotation', () => Sessions.rotation(today)),
       rotationMode: Sessions.mode(),
       nextSession: next,
       lastWorkout,
       todayDiary,
-      progressionSuggestions: SheetApi.has_('plans') ? Progression.suggestions(today) : [],
-      recentGroups: SheetApi.recentGroups_(all, today),
-      exercises: Exercises.known(today).map((e) => ({ name: e.name, group: e.group })),
-      plan: (plan ? plan.rows : []).filter((r) => r.exercise !== null).map((r) => {
+      progressionSuggestions: lap('suggestions', () => (SheetApi.has_('plans') ? Progression.suggestions(today) : [])),
+      recentGroups: lap('recentGroups', () => SheetApi.recentGroups_(all, today)),
+      exercises: lap('exercises', () => Exercises.known(today).map((e) => ({ name: e.name, group: e.group }))),
+      plan: lap('planRows', () => (plan ? plan.rows : []).filter((r) => r.exercise !== null).map((r) => {
         const p = Sessions.prescription(r, trainingPhase);
         const prev = Progression.previous(idx[Exercises.normalize(r.exercise)] || [], today);
         const lastWork = prev ? {
@@ -639,14 +648,17 @@ const SheetApi = {
           prescription: Sessions.prescriptionText(p),
           lastWork,
         });
-      }),
-      foods: SheetApi.has_('foods') ? Foods.names() : [],
-      favorites: SheetApi.has_('favorites') && SheetApi.has_('ingredients') ? Favorites.names() : [],
+      })),
+      foods: lap('foods', () => (SheetApi.has_('foods') ? Foods.names() : [])),
+      favorites: lap('favorites', () => (SheetApi.has_('favorites') && SheetApi.has_('ingredients') ? Favorites.names() : [])),
       meals: FoodLog.MEALS.slice(),
       units: Units.LIST.slice(),
       foodLog: Tabs.ENUMS.FOOD_LOG.slice(),
-      recent: SheetApi.recent_(),
+      recent: lap('recent', () => SheetApi.recent_()),
     };
+    timings.total = Date.now() - started;
+    result.timings = timings;
+    return result;
   },
 
   /** How many days, ending today, catalog.recentGroups covers. */

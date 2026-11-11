@@ -8,7 +8,7 @@ const { FOODS } = require('../../sheet4/test/food_helpers');
 const { load, plain } = require('../../sheet4/test/harness');
 
 const digest = (text) => Promise.resolve(createHash('sha256').update(text).digest('hex'));
-const canonical = TABLE.foods.map((r) => ['g', 100, ...r.slice(1, 5), null, null]);
+const canonical = TABLE.foods.map((r) => [r[0].normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase(), 'g', 100, ...r.slice(1, 5), null, null]);
 const fh = createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 const OWN = { v: 1, foods: FOODS.slice(0, -1).map((f) => f.name), fv: FOODS.slice(0, -1).map((f, i) =>
   [i, f.baseUnit, f.baseQty, f.kcal, f.protein, f.carbs, f.fat, f.householdUnit || null, f.perHousehold || null]) };
@@ -90,6 +90,7 @@ test('HTTP, network or bad table failure keeps own food names and totals usable'
     () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) })]) {
     const cat = await C.loadFoodTable(C.normalizeCatalog({ ...OWN, ft: 'taco4', fh }), fetcher, digest);
     assert.equal(cat.tableStatus, 'unavailable');
+    assert.equal(cat.freeFoods, true); // the 575 names stay reachable by typing
     assert.deepEqual(cat.foods, OWN.foods);
     assert.equal(C.foodNutrition(item(FOODS[0].name, 100, 'g'), cat).kcal, FOODS[0].kcal);
   }
@@ -115,3 +116,14 @@ test('unknown table and old bot links never fetch; dropped own names retain manu
 });
 
 module.exports = { TABLE, OWN, fh, response, digest };
+
+test('a table whose names were swapped between rows fails the digest: no shared values', async () => {
+  const foods = TABLE.foods.map((r) => r.slice());
+  const a = foods.findIndex((r) => r[0] === 'Arroz, integral, cozido'), b = foods.findIndex((r) => r[0] === 'Arroz, integral, cru');
+  assert.ok(a >= 0 && b >= 0);
+  [foods[a][0], foods[b][0]] = [foods[b][0], foods[a][0]];
+  const swapped = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ ...TABLE, foods }) });
+  const cat = await C.loadFoodTable(C.normalizeCatalog({ ...OWN, ft: 'taco4', fh }), swapped, digest);
+  assert.equal(cat.tableStatus, 'values_unavailable');
+  assert.equal(C.foodNutrition(item('Arroz, integral, cozido', 100, 'g'), cat), null);
+});

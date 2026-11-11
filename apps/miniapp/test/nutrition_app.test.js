@@ -8,7 +8,7 @@ const { FOODS } = require('../../sheet4/test/food_helpers');
 const own = FOODS[0];
 const fv = [[0, 0, own.baseQty, own.kcal, own.protein, own.carbs, own.fat, 1, own.perHousehold]];
 const fu = [own.baseUnit, own.householdUnit];
-const fh = createHash('sha256').update(JSON.stringify(TABLE.foods.map((r) => ['g', 100, ...r.slice(1, 5), null, null]))).digest('hex');
+const fh = createHash('sha256').update(JSON.stringify(TABLE.foods.map((r) => [r[0].normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase(), 'g', 100, ...r.slice(1, 5), null, null]))).digest('hex');
 const digest = (text) => Promise.resolve(createHash('sha256').update(text).digest('hex'));
 const catalog = { ...SAMPLE, view: 'food', foods: [own.name], fv, fu, ft: 'taco4', fh };
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -72,8 +72,13 @@ test('stalled table request times out; late arrival cannot replace an edited for
   let resolve;
   const pending = new Promise((done) => { resolve = done; });
   const p = await boot({ view: 'food', catalog, globals: globals(() => pending) });
+  assert.equal(button(p.doc, 'Digitar nome da planilha'), undefined);
   p.timers.run(8000); await tick();
   assert.equal(p.doc.getElementById('food-table-status').textContent, 'Lista completa indisponível.');
+  // the 575 shared names did not arrive: typing a sheet name must be possible, and it is kept
+  button(p.doc, 'Digitar nome da planilha').click();
+  const typed = p.doc.querySelectorAll('input').find((e) => e.value === '' && e.getAttribute('aria-label') !== 'Quantidade' && e.type !== 'date');
+  p.input(typed, 'Arroz, integral, cozido');
   resolve({ ok: true, json: () => Promise.resolve(TABLE) });
   await tick(); await tick();
   assert.equal(p.doc.getElementById('food-table-status').textContent, 'Lista completa indisponível.');

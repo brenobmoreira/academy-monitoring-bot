@@ -645,8 +645,10 @@ def _food_values(result: dict[str, Any], out: dict[str, Any]) -> None:
     if has_table and all(k in rows for k in shared_keys):
         # Names alone cannot prove the sheet still has TACO values: foods.seed skips existing
         # names. The page checks this digest before using the shared file for arithmetic.
+        # The name key is hashed with its values, so values cannot be attached to another name.
         data = [
-            [int(v) if type(v) is float and v.is_integer() else v for v in rows[k][1:]] for k in shared_keys
+            [k, *(int(v) if type(v) is float and v.is_integer() else v for v in rows[k][1:])]
+            for k in shared_keys
         ]
         canonical = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
         out["fh"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()

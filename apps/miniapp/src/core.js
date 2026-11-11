@@ -557,13 +557,13 @@
       var names = Object.create(null);
       out.foods.forEach(function (n) { names[foodKey(n)] = true; });
       table.foods.forEach(function (row) { if (!names[foodKey(row[0])]) out.foods.push(row[0]); });
-      return Promise.resolve().then(function () { return (digest || sha256)(JSON.stringify(rows)); }).then(function (hash) {
+      return Promise.resolve().then(function () { return (digest || sha256)(JSON.stringify(rows.map(function (r, i) { return [foodKey(table.foods[i][0])].concat(r); }))); }).then(function (hash) {
         var verified = catalog.fh && hash === catalog.fh;
         out.tableStatus = verified ? 'ready' : 'values_unavailable';
         if (verified) table.foods.forEach(function (r, i) { out.nutrition[foodKey(r[0])] = nutritionRow(rows[i]); });
         return out;
       }, function () { out.tableStatus = 'values_unavailable'; return out; });
-    }).catch(function () { return Object.assign({}, catalog, { tableStatus: 'unavailable' }); });
+    }).catch(function () { return Object.assign({}, catalog, { tableStatus: 'unavailable', freeFoods: true }); });
   }
 
   /**
@@ -892,9 +892,10 @@
       Number.isInteger(reps) && reps >= LIMITS.REPS_MIN && reps <= LIMITS.REPS_MAX;
   }
 
-  /** Only an explicit NxReps prescription supplies a set count; prose is not guessed. */
+  /** Only an explicit NxReps prescription supplies a set count; prose is not guessed. Accepts the
+   *  sheet's Sessions.prescriptionText: "2×6–10 · RIR 0–1 · 150 s · alt.: X". */
   function plannedSets(text) {
-    var m = /^\s*(\d+)\s*[x×X*]\s*\d+(?:\s*[–-]\s*\d+)?(?:\s+RIR\s+\d+(?:[.,]\d+)?)?\s*$/i.exec(text || '');
+    var m = /^\s*(\d+)\s*[x×X*]\s*\d+(?:\s*[–-]\s*\d+)?(?:\s+RIR\s+\d+(?:[.,]\d+)?)?(?:\s*·\s*RIR\s+\d+(?:[.,]\d+)?(?:\s*[–-]\s*\d+(?:[.,]\d+)?)?)?(?:\s*·\s*\d+(?:[.,]\d+)?\s*s)?(?:\s*·\s*alt\.:\s*\S[\s\S]*)?\s*$/i.exec(text || '');
     return m && Number(m[1]) > 0 ? Number(m[1]) : null;
   }
 

@@ -1,5 +1,6 @@
 import base64
 import copy
+import hashlib
 import json
 import runpy
 import zlib
@@ -536,6 +537,14 @@ def test_shared_table_activation_uses_sheet_normalization_and_requires_every_nam
     cat = realistic_catalog()
     compact = catalog_v1(cat)
     assert compact["ft"] == "taco4" and len(compact["fh"]) == 64
+    # the digest the page computes from its own file: names bound to values, in file order
+    path = Path(__file__).resolve().parents[3] / "apps/miniapp/data/foods.taco.json"
+    rows = [
+        [miniapp._food_key(r[0]), "g", 100, *(int(v) if v == int(v) else v for v in r[1:5]), None, None]
+        for r in json.loads(path.read_text("utf-8"))["foods"]
+    ]
+    canonical = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+    assert compact["fh"] == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     assert len(miniapp.TACO_NAMES) == 575
     assert len(compact["foods"]) == 110
     assert all(len(row) == 9 for row in compact["fv"])

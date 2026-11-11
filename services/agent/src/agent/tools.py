@@ -274,7 +274,13 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         prescritos); foods e favorites (nomes exatos); meals; recent: as gravações dos últimos
         30 minutos, a mais recente primeiro. Chame antes de save_workout, save_food ou
         get_exercise_history, e para continuar ou corrigir uma gravação recente."""
-        return journal.check(await sheet.catalog(), op="catalog")
+        response = journal.check(await sheet.catalog(), op="catalog")
+        # foodTable feeds only the Mini App (/app); the model needs the names, not ~35 KB of values.
+        result = response.get("result")
+        if isinstance(result, dict) and "foodTable" in result:
+            trimmed = {k: v for k, v in result.items() if k != "foodTable"}
+            return {**response, "result": trimmed}
+        return response
 
     async def save_diary(
         date: str, fields: DiaryFields, clear: list[DiaryKey] | None = None

@@ -15,11 +15,11 @@
     <p class="preview-banner" id="preview-banner" hidden>Modo prévia: catálogo de exemplo, nada vai para o bot. O JSON aparece na revisão.</p>
 
     <header class="coach" id="coach">
-      <div class="shape" id="shape" data-state="idle" aria-hidden="true">
+      <button type="button" class="shape" id="shape" data-state="idle" aria-label="Pulso: toque para uma dica" aria-describedby="say">
         <!-- filled by src/avatar.js (ShapeAvatar.mount) -->
-      </div>
+      </button>
       <div class="bubble" role="status" aria-live="polite">
-        <span class="bubble-name">Shape</span>
+        <span class="bubble-name">Pulso</span>
         <p class="bubble-text" id="say">Carregando a ficha…</p>
       </div>
     </header>

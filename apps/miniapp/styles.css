@@ -114,6 +114,8 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 
 .shape { flex: 0 0 40px; width: 40px; height: 40px; margin-bottom: 6px; }
 .shape svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.coach button.shape { flex-basis: 44px; width: 44px; height: 44px; padding: 2px; border: 0; background: transparent; cursor: pointer; border-radius: 50%; }
+.coach button.shape:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 .bubble {
   position: relative;
@@ -136,7 +138,7 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
   clip-path: path("M12 0 C12 8 8 13 0 14 L12 14 Z");
 }
 .bubble-name { display: block; font-size: 12px; font-weight: 700; color: var(--accent-text); }
-.bubble-text { margin: 1px 0 0; font-size: 15px; line-height: 1.32; }
+.bubble-text { margin: 1px 0 0; font-size: 15px; line-height: 1.32; height: 3.96em; overflow-y: auto; overscroll-behavior: contain; }
 .shape[data-state="alert"] ~ .bubble .bubble-name { color: var(--alert); }
 .shape[data-state="happy"] ~ .bubble .bubble-name { color: var(--mint); }
 .bubble-text.swap { animation: say-in 0.28s ease-out; }

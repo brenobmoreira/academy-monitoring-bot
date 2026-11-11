@@ -72,8 +72,13 @@ test('stalled table request times out; late arrival cannot replace an edited for
   let resolve;
   const pending = new Promise((done) => { resolve = done; });
   const p = await boot({ view: 'food', catalog, globals: globals(() => pending) });
+  assert.equal(button(p.doc, 'Digitar nome da planilha'), undefined);
   p.timers.run(8000); await tick();
   assert.equal(p.doc.getElementById('food-table-status').textContent, 'Lista completa indisponível.');
+  // the 575 shared names did not arrive: typing a sheet name must be possible, and it is kept
+  button(p.doc, 'Digitar nome da planilha').click();
+  const typed = p.doc.querySelectorAll('input').find((e) => e.value === '' && e.getAttribute('aria-label') !== 'Quantidade' && e.type !== 'date');
+  p.input(typed, 'Arroz, integral, cozido');
   resolve({ ok: true, json: () => Promise.resolve(TABLE) });
   await tick(); await tick();
   assert.equal(p.doc.getElementById('food-table-status').textContent, 'Lista completa indisponível.');

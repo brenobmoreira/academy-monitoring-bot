@@ -895,7 +895,7 @@
   /** Only an explicit NxReps prescription supplies a set count; prose is not guessed. Accepts the
    *  sheet's Sessions.prescriptionText: "2×6–10 · RIR 0–1 · 150 s · alt.: X". */
   function plannedSets(text) {
-    var m = /^\s*(\d+)\s*[x×X*]\s*\d+(?:\s*[–-]\s*\d+)?(?:\s+RIR\s+\d+(?:[.,]\d+)?)?(?:\s*·\s*RIR\s+\d+(?:[.,]\d+)?(?:\s*[–-]\s*\d+(?:[.,]\d+)?)?)?(?:\s*·\s*\d+\s*s)?(?:\s*·\s*alt\.:\s*\S.*)?\s*$/i.exec(text || '');
+    var m = /^\s*(\d+)\s*[x×X*]\s*\d+(?:\s*[–-]\s*\d+)?(?:\s+RIR\s+\d+(?:[.,]\d+)?)?(?:\s*·\s*RIR\s+\d+(?:[.,]\d+)?(?:\s*[–-]\s*\d+(?:[.,]\d+)?)?)?(?:\s*·\s*\d+(?:[.,]\d+)?\s*s)?(?:\s*·\s*alt\.:\s*\S[\s\S]*)?\s*$/i.exec(text || '');
     return m && Number(m[1]) > 0 ? Number(m[1]) : null;
   }
 

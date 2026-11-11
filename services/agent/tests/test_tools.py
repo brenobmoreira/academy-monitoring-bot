@@ -321,5 +321,9 @@ async def test_copy_food_and_save_measures_journal_writes():
 
 
 async def test_get_catalog_keeps_the_food_value_table_away_from_the_model():
-    sheet = FakeSheet(catalog=[{"ok": True, "foods": ["Arroz"], "foodTable": [["Arroz", "g", 100]]}])
-    assert await tools(sheet)["get_catalog"]() == {"ok": True, "foods": ["Arroz"]}
+    result = {"foods": ["Arroz"], "foodTable": [["Arroz", "g", 100]]}
+    sheet = FakeSheet(catalog=[{"ok": True, "result": result}, {"ok": False, "errors": []}])
+    t = tools(sheet)
+    assert await t["get_catalog"]() == {"ok": True, "result": {"foods": ["Arroz"]}}
+    assert "foodTable" in result  # the sheet's response itself is left untouched
+    assert await t["get_catalog"]() == {"ok": False, "errors": []}

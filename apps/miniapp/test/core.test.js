@@ -16,7 +16,7 @@ test('Pulso only reads explicit set prescriptions, without guessing prose', () =
   const S = require('../../sheet4/test/harness').load().Sessions;
   const p = { sets: 2, repsMin: 6, repsMax: 10, rirMax: 1, restS: 150, alternative: null, setModel: null };
   for (const [over, sets] of [[{}, 2], [{ rirMax: 0 }, 2], [{ rirMax: null, restS: null }, 2], [{ repsMin: 8, repsMax: 8, sets: 3 }, 3],
-    [{ alternative: 'Supino máquina · 3×8' }, 2], [{ rirMax: 1.5 }, 2], [{ sets: null }, null], [{ repsMin: null, repsMax: null }, null]]) {
+    [{ alternative: 'Supino máquina · 3×8' }, 2], [{ rirMax: 1.5 }, 2], [{ restS: 90.5 }, 2], [{ alternative: 'Supino\nmáquina 4×8' }, 2], [{ sets: null }, null], [{ repsMin: null, repsMax: null }, null]]) {
     const text = S.prescriptionText({ ...p, ...over });
     assert.equal(C.plannedSets(text), sets, text);
   }

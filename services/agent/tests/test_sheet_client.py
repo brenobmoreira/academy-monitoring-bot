@@ -121,6 +121,19 @@ async def test_transport_failures_become_unavailable_errors():
     assert res["errors"][0]["code"] == "unavailable"
 
 
+async def test_transport_errors_never_carry_the_key():
+    # A broken proxy can echo the request, envelope and key included, into the exception text.
+    def handler(request):
+        raise httpx.RemoteProtocolError(f"malformed response to {request.content.decode()}", request=request)
+
+    secret = "chave-super-secreta"
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    res = await SheetClient(URL, secret, http).catalog()
+    assert res["errors"][0]["code"] == "unavailable"
+    assert "RemoteProtocolError" in res["errors"][0]["message"]
+    assert secret not in json.dumps(res)
+
+
 async def test_undo_sends_the_write_id_only_when_given():
     seen = []
 

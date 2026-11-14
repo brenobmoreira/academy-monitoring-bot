@@ -1,7 +1,7 @@
 # Voice input — design
 
-Date: 2026-11-14 · Status: revision 2, after the Codex review of `041ed06`; owner decisions taken
-(§14) · Branch: `claude/voz-spec`
+Date: 2026-11-14 · Status: revision 3, after the Codex reviews of `041ed06` and `4e4252f`; owner
+decisions taken (§14) · Branch: `claude/voz-spec`
 
 Voice becomes a **primary input** of the product: on the Telegram chat and in the Mini App now,
 and later on the client PWA and the native app, through the same HTTP API. This spec decides the
@@ -50,8 +50,10 @@ commit `59bf0f5`). It supersedes the first step of "Voice → draft" in
 | Write request ids include a digest of the tool args (`tools.py:196-206`); the handler deduplicates by `update_id` (`handler.py:199-200`). | code | Neither stops a second agent run on the same confirmed text: §4.1 and §4.2 add their own state. |
 | `log.exception` writes the exception message and traceback, which can carry the provider request (`bot.py:302`, `bot.py:305`, `handler.py:293`, `handler.py:316`); the mask in `logs.py:43` removes only registered secrets. `bot.py:288, 296, 302, 305, 310` interpolate the message text. | code, review finding 2 | Safe exception logging (§10). |
 | `Settings` requires `SHEET_API_URL` and `SHEET_API_KEY` (`settings.py:83-84`); `build_handler` assembles sheet, agent and Telegram (`handler.py:467-475`). | code | The voice service gets its own settings and assembly (§5.1). |
-| The command `Context` holds only sheet, date, chat id and `miniapp_url` (`commands.py:64-70`); `normalizeCatalog` keeps only known keys (`apps/miniapp/src/core.js:425-445`). | code | C7 and C6 change them explicitly (§13). |
+| The command `Context` holds only sheet, date, chat id and `miniapp_url` (`commands.py:64-70`); `normalizeCatalog` keeps only known keys (`apps/miniapp/src/core.js:425-445`). | code | C7 and C6a change them explicitly (§13). |
 | The bot runs by long polling on the owner's PC (`scripts/start-luan-bot.ps1`): no public HTTPS. | code | The voice service runs on Cloud Run, separate from the bot; deploying it is the owner's action (§5.1). |
+| A transport failure on a sheet call becomes `unavailable` (`sheet_client.py:73`), even when the request may already have run; `Journal` marks a write uncertain only when it is cancelled (`tools.py:185`); `bot.py:309` can then answer "failed, nothing saved" for a write that went in. | code, review R1 | Structured write outcomes (§4.3). |
+| The Gemini project spend cap takes about 10 minutes to take effect (https://aistudio.google.com/docs/billing#project-spend-caps). Cloud Run can briefly run more instances than `max-instances` during traffic spikes (https://docs.cloud.google.com/run/docs/configuring/max-instances-limits#handle_traffic_spikes). | provider docs cited in review R3 (not re-read for this revision) | Neither is a hard limit; §5.1 and §5.6 describe the real control and the overshoot window. |
 
 ## 3. Transcription
 
@@ -103,9 +105,13 @@ class Transcriber:
   retries=TRANSCRIBE_RETRIES, wait_s=TRANSCRIBE_RETRY_WAIT_S, fallback_model=…,
   fallback_api_key=<resolved>)`. `MeteredClient` reserves and settles the budget around **each
   attempt** (§5.6); in the bot it is given the bot's own `Budget`.
-- The whole call runs inside `asyncio.timeout(min(TRANSCRIBE_DEADLINE_S, deadline_s))`. The chat
-  path passes the time left in the message budget (`MESSAGE_DEADLINE_AT`) minus `SEND_RESERVE_S`.
-  When the deadline fires, the attempt in flight is cancelled and settled as "paid, unknown".
+- **Deadline.** `effective = TRANSCRIBE_DEADLINE_S if deadline_s is None else
+  min(TRANSCRIBE_DEADLINE_S, deadline_s)`. If `effective <= 0`, raise `TranscribeError("timeout")`
+  at once, with no reservation and no provider call. Otherwise the whole call (every attempt, wait
+  and fallback) runs inside `asyncio.timeout(effective)`. The voice service passes `None`; the chat
+  path passes the time left in the message budget (`MESSAGE_DEADLINE_AT − now − SEND_RESERVE_S`),
+  or `None` when `MESSAGE_DEADLINE_AT` is unset. When the deadline fires, the attempt in flight is
+  cancelled, settled as "paid, unknown" (§5.6), and the call raises `TranscribeError("timeout")`.
 - Request: one system message (§3.3) and one user message whose only content is
   `{"type": "input_audio", "input_audio": {"data": <base64>, "format": <fmt>}}`; `temperature=0`,
   `max_tokens=600`, `timeout=TRANSCRIBE_TIMEOUT_S`, `api_key`/`api_base` as in §3.1, no tools.
@@ -164,7 +170,7 @@ class Usage(NamedTuple):
 class Transcript(NamedTuple):
     text: str
     model: str                    # the model that answered (primary or fallback)
-    usage: Usage                  # of the successful attempt
+    usage: Usage | None           # of the successful attempt; None = the provider sent no usage
     fallback: bool
 
 class TranscribeError(Exception):
@@ -176,8 +182,13 @@ class TranscribeError(Exception):
 - Strip whitespace and one pair of surrounding quotes. Exactly `<vazio>`, empty, or only
   `[inaudível]` tokens → `no_speech`.
 - More than 2000 characters → `failed` (a looping model; 90 s of speech is about 1500 characters).
-- A missing `usage` in the provider response counts as the attempt's full reservation (§5.6) and is
-  logged as a counter, never guessed downwards.
+- **Usage unavailable is explicit.** `usage` is `None` when the response has no usage object, or
+  when its `prompt_tokens` or `completion_tokens` is missing or not a non-negative integer (a
+  partial object counts as unavailable; values are never guessed). `audio_tokens` is `None` when
+  the provider does not report it, even if the rest is present. In both cases the counter
+  `usage_missing` is incremented.
+- With `usage is None`: the budget settles the attempt at its full reservation `E` (§5.6), and the
+  duration check of §3.5 is skipped (it cannot be done); the transcript is returned.
 
 ### 3.5 Duration and size
 
@@ -189,11 +200,13 @@ dictate; above 90 s the transcript stops fitting a quick read and one note tends
 | Chat | Telegram's `voice.duration` / `audio.duration` comes from Telegram and is checked **before** the download; over 90 s is refused. Missing duration → only `MEDIA_MAX_BYTES`. | — |
 | HTTP | At most `VOICE_MAX_BYTES = 1_500_000` bytes per request (90 s of AAC at 128 kbps; the page asks for 32 kbps, about 360 KB), enforced while reading. The page stops recording at 90 s. `X-Audio-Duration-Ms` over 90 000 is refused. | **Bytes and the declared duration do not guarantee 90 s.** A crafted low-bitrate file of 1.5 MB can hold more than 20 minutes of Opus, and the header is whatever the client says. The server learns the real length only from the provider's usage, **after** the attempt is paid. |
 
-After a successful HTTP transcription, if the audio length implied by usage (`audio_tokens`, or
-`prompt_tokens − TRANSCRIBE_PROMPT_TOKENS` when absent; the constant is measured in C4b) exceeds
-`32 × VOICE_MAX_SECONDS × 1.15`, the service answers `too_long` and does not return the text. The
-attempt stays charged. The money bound for lying clients is therefore the budget (§5.6) and the
-provider-side cap (§5.1), not the duration rule.
+After a successful HTTP transcription, the implied audio tokens are `usage.audio_tokens` when it is
+not `None`, else `max(0, usage.prompt_tokens − TRANSCRIBE_PROMPT_TOKENS)` (the constant is measured
+in C4b). If that exceeds `32 × VOICE_MAX_SECONDS × 1.15`, the service answers `too_long` and does
+not return the text; the attempt stays charged at its actual usage. When `usage is None` the check
+cannot run: the transcript is returned, the attempt is charged `E`, and `usage_missing` is counted.
+The money bounds for lying clients are therefore the budget (§5.6) and the provider-side spend cap
+(§5.1), both approximate, not the duration rule.
 
 Bodies under 1 KB are `no_speech` without a model call. The page refuses recordings under 0.7 s.
 
@@ -291,8 +304,9 @@ instance until the database step backs `VoiceConfirmations` with shared storage.
 
 **Running a confirmed text.** The agent runs on the recovered text exactly as if typed, with
 `update_key_scope(f"tg:voice:{vid}")`, and the reply (usual confirmation with ✅/↩️/✏️) quotes the
-`Entendi` message. Outcome: `done` when the run ended normally (written or not); `uncertain` when
-the message deadline cut it or `Bot.reply` reported `WRITE_UNCERTAIN`.
+`Entendi` message. The entry moves to `done` when the run's outcome (§4.3) is `committed` or
+`not_committed`, and to `uncertain` when it is `uncertain` or the message deadline cut the run.
+Either way the `vid` never runs again.
 
 **✏️ fix prompt.** `✏️ Envie o texto corrigido respondendo a esta mensagem. Toque para copiar:`
 followed by the text in `<code>`, with `force_reply` and the placeholder
@@ -336,12 +350,18 @@ MainButton `Enviar` and secondary actions `Regravar` and `Cancelar`. `Enviar` se
 | same hash, `done` | `Esse envio já foi registrado. Confira com /hoje.` |
 | same hash, `uncertain` | `Esse envio pode ter sido gravado. Confira com /hoje antes de repetir.` |
 
-After the run: `done` when it ended normally; `uncertain` when it was cut or reported
-`WRITE_UNCERTAIN` (C7 adds `Answer.uncertain`); the entry is **removed** when the run failed with
-nothing written and no uncertainty (model or sheet down before any write), so the same payload can
-be retried. Entries live 48 h, capacity 1024 (oldest terminal first; a `running` entry is never
-evicted). This catches the same payload in different updates, which `update_id` deduplication
-cannot.
+After the run, by the run's outcome (§4.3, `Answer.outcome`, added in C4c):
+
+- `committed` → `done`.
+- `uncertain`, or the run was cut by the message deadline → `uncertain`. **Never** removed, never
+  retried automatically; the reply is `WRITE_UNCERTAIN` (§4.3).
+- `not_committed` → the entry is **removed**, so the same payload can be sent again. This happens
+  only when §4.3 proves nothing was applied: no write was attempted (the model failed first), or
+  every write attempt ended `not_committed` (rejected by validation, or a transport failure before
+  the request left).
+
+Entries live 48 h, capacity 1024 (oldest terminal first; a `running` entry is never evicted). This
+catches the same payload in different updates, which `update_id` deduplication cannot.
 
 Residual: the store is memory only; after a bot restart an identical payload re-delivered by
 Telegram could run again. That is the same exposure as today's `update_id` deduplication (also in
@@ -350,6 +370,65 @@ key. The page never re-sends a text payload by itself (it keeps no "last sent" f
 
 When the launch mode changes (§6.10, step 2), the page sends the same object to
 `POST /v1/messages`, which applies the same rule with the session's principal.
+
+### 4.3 Write outcomes: committed, not committed, uncertain
+
+A write can reach the sheet and its answer can be lost on the way back. Today that case is reported
+as an outage (`unavailable`) and can end as "nothing was saved" (§2). Every confirmation path in
+this spec (§4.1, §4.2) depends on telling these apart, so C4c makes the outcome of every
+**mutating** sheet call explicit. Mutating ops: `diary.upsert`, `workout.upsert`, `food.add`,
+`food.copy`, `measures.upsert`, `write.undo` (one constant, `MUTATING_OPS`, in `sheet_client.py`;
+every other op is a read).
+
+```python
+WriteOutcome = Literal["committed", "not_committed", "uncertain"]
+```
+
+Classification in `SheetClient`, for mutating ops only (reads keep today's `unavailable`):
+
+| What happened | Outcome | Error code returned |
+| --- | --- | --- |
+| `{"ok": true, …}` | `committed` | — |
+| `{"ok": false, errors}` with validation codes (the sheet validates everything before writing anything) | `not_committed` | the sheet's codes |
+| `{"ok": false}` with `internal` (uncaught exception inside the Web App, possibly mid-write) | `uncertain` | `write_uncertain` |
+| `httpx.ConnectError`, `httpx.ConnectTimeout`, `httpx.PoolTimeout`, `httpx.UnsupportedProtocol`, raised for the **original POST** (`err.request.method == "POST"` and its URL is `SHEET_API_URL`): the request never left | `not_committed` | `unavailable` |
+| any other `httpx.HTTPError` (`ReadTimeout`, `WriteTimeout`, `ReadError`, `WriteError`, `RemoteProtocolError`, …), and **any** error raised for the redirected GET (Apps Script runs the script on the POST and serves the body on a 302 → GET, so a failure there comes after the write) | `uncertain` | `write_uncertain` |
+| HTTP 5xx or 408, a 200 whose body is not JSON or not `{ok, …}` | `uncertain` | `write_uncertain` |
+| HTTP 4xx other than 408 (including 429) | `not_committed` | `unavailable` |
+| the call cancelled after it started (the message deadline) | `uncertain` | (cancellation, as today: `Journal.interrupted`) |
+
+The retry without `requestId` after an `unknown_field` rejection (an older sheet deployment) is a
+second request: if it fails after sending, the outcome is `uncertain` as above.
+
+Propagation:
+
+- `Journal` records each mutating attempt's outcome. `Journal.outcome` is `uncertain` if any
+  attempt was `uncertain` or `interrupted`; else `committed` if any write is recorded; else
+  `not_committed`. `write_uncertain` is **not** in `OUTAGE_CODES`: its request-id sequence is not
+  returned to the reusable pool, and `sheet_failed` does not count it.
+- The tool returns `{"ok": false, "errors": [{"code": "write_uncertain", …}]}` to the model; prompt
+  rule 9 gains: `Se o erro tiver code "write_uncertain", não repita nem refaça essa gravação de
+  outro jeito: diga que ela pode ter entrado na planilha.`
+- `Bot.reply` (`bot.py:309` today) returns `SHEET_FAILED` only when the outcome is `not_committed`
+  and the sheet was down; with `uncertain` it returns the confirmations of the committed writes plus
+  `WRITE_UNCERTAIN`, and `Answer` carries `outcome`. `WRITE_UNCERTAIN` is the existing constant
+  (`bot.py:47`), reworded to cover both causes, the deadline cut and a lost answer:
+  `"⚠ Não sei se a planilha gravou: a resposta não chegou. Confira com /hoje antes de repetir."`
+- **`uncertain` never releases an automatic retry anywhere:** the handler marks the update
+  completed (`Reply.transient = False`, so a Telegram re-delivery is ignored); the Mini App form
+  path shows `WRITE_UNCERTAIN` without the `🔁 Tentar de novo` button and keeps nothing in
+  `PendingStore`; `VoiceConfirmations` and `TextSubmissions` keep their `uncertain` state; undo
+  answers `Não sei se desfez; confira com /hoje.` and keeps no retry. The person decides after
+  checking. (A form resent unchanged from the page keeps its old request id, so the sheet
+  deduplicates it; that is the person's choice, not an automatic retry.)
+
+Test that defines the contract (C4c), "written, answer lost": a fake transport that **applies** the
+write to an in-memory sheet and then raises `httpx.ReadTimeout`. Expected: outcome `uncertain`;
+reply `WRITE_UNCERTAIN`, not `SHEET_FAILED`; update marked completed; exactly one POST observed (no
+retry by the client, the tool, the handler or a store); for the same scenario through §4.1, the
+`vid` ends `uncertain`; through §4.2, re-sending the same payload answers "pode ter sido gravado"
+and does not run. Companion tests: the same failure on the redirected GET → `uncertain`; a
+`ConnectError` on the POST → `not_committed`, `SHEET_FAILED`, retry allowed.
 
 ## 5. Voice service
 
@@ -374,15 +453,34 @@ session is obtained and `POST /v1/voice/transcriptions` answers `200` with a fak
 Hosting (decision D1): a **Cloud Run service**, separate from the bot on the PC. Deploying it is
 the owner's action; nothing in the spec or the tasks assumes it is live. Until it is, the bot's
 `VOICE_API_URL` stays empty, `/app` adds no voice keys, and the page hides the record button. The
-chat path (C4) works without it. Deployment requirements (documented in C5c's README, applied by
-the owner):
+chat path (C4) works without it.
 
-- `max-instances=1`, because rate limits, budgets, single-use sets and the idempotency cache live
-  in process memory (approximate limits, §5.6);
-- a **provider-side spending cap** on the transcription key's project (a quota or budget limit in
-  the provider console), the only hard money bound until shared storage exists;
-- secrets (`APP_AUTH_SECRET`, `TRANSCRIBE_API_KEY`, `TELEGRAM_BOT_TOKEN`) from Secret Manager;
-- scale to zero is allowed; §5.6 and §6.8 state what a cold start resets.
+Owner deploy checklist (C5c's README carries it; none of it is a hard guarantee, see below):
+
+1. `max-instances=1`. Rate limits, budgets, single-use sets and the idempotency cache live in
+   process memory. Cloud Run treats this setting as a target and **can briefly run more instances
+   during traffic spikes** (§2); each extra instance starts with empty counters and sets.
+2. A **project spend cap** on the transcription key's Gemini project (AI Studio billing). It takes
+   **about 10 minutes** to take effect after it is reached (§2), so spending continues during that
+   window.
+3. A billing budget with an e-mail alert on the same project, below the cap, to hear about it early.
+4. Secrets (`APP_AUTH_SECRET`, `TRANSCRIBE_API_KEY`, `TELEGRAM_BOT_TOKEN`) from Secret Manager.
+5. Scale to zero is allowed; §5.6 and §6.8 state what a cold start resets.
+
+**What actually limits spending**, from the fastest to the slowest layer, and its overshoot window:
+
+| Layer | Acts | Overshoot |
+| --- | --- | --- |
+| Per-principal rate limits and concurrency gate (§5.6) | per request, per instance | none within one warm instance; multiplied by the number of instances actually running |
+| In-process token budgets (§5.6) | per attempt, per instance | one attempt's (actual − `E`) per request; reset at every cold start; multiplied by the instances running |
+| Project spend cap | at the provider | whatever is spent in the ~10 minutes after the cap is reached |
+
+With the defaults, one principal at the rate limit spends at most about 6 × 3 880 ≈ 23 k tokens a
+minute per instance (more only if a crafted file exceeds `E`), so the cap's 10-minute window adds
+roughly 230 k tokens per abusive principal per instance on top of the cap. These are approximate
+limits: the spec makes no claim of a hard ceiling or of a single instance. Both are declared risks
+(§12). A shared store (database step) turns the in-process layer into a global one; the provider
+cap's delay remains.
 
 ### 5.2 Routes
 
@@ -472,6 +570,25 @@ Key = `(principal_key, Idempotency-Key)`; every entry holds the body `digest`, a
   waiting and without returning anything cached.
 - `in_flight`, same digest → wait for the same future (no second model call).
 - `finished`, same digest → the same response, no model call and no budget.
+
+**Owner, waiters and cancellation.** The request that creates the `in_flight` entry is its
+**owner**: it alone runs the transcription and resolves the entry's `asyncio.Future`.
+
+- A waiter awaits `asyncio.shield(entry.future)`. If the waiter is cancelled (its client went away),
+  only the waiter stops; the shared future and the owner's work are untouched.
+- The owner runs inside `try/except BaseException`. On success it stores the `finished` response
+  and sets the future's result. On a `TranscribeError` it sets that error on the future and deletes
+  the entry (unless the error is `no_speech`, which is kept as `finished`). If the owner is
+  **cancelled** (its client went away, or the server is shutting down) or raises anything else, it
+  deletes the `in_flight` entry, sets `OwnerAborted` on the future, and re-raises. Waiters turn
+  `OwnerAborted` into `502 transcription_failed`, `retry: true`; a retry with the same key then
+  finds no entry and runs again. The owner's attempt in flight is settled as "paid, unknown" (§5.6).
+- Every future gets its exception retrieved (a done-callback reads it) so an aborted entry with no
+  waiters logs no "exception never retrieved" warning.
+- Tests (C5b): a waiter cancelled while the owner runs → the owner completes, the entry becomes
+  `finished`, a later same-key request gets the cached response; the owner cancelled while two
+  waiters wait → both get `OwnerAborted`, the entry is gone, the next request runs a new
+  transcription; the owner failing with `transcription_failed` → waiters get the same code.
 - Finished entries are kept **5 minutes** in memory (D6). Only `200` and `no_speech` are kept;
   other errors delete the entry so a retry runs again.
 
@@ -517,10 +634,11 @@ class Reservation(Protocol):
 - A reservation belongs to the day it was made.
 
 **This is an approximate limit, and the spec calls it that.** It is kept in process memory, so:
-each instance has its own (hence `max-instances=1`); a cold start resets it (Cloud Run scales to
-zero after idle, so the daily figure is really "per warm period"); and one request can overshoot by
-its actual cost minus `E`. It limits bursts and accidents. The money ceiling is the provider-side
-cap required in §5.1, until the database step backs `Budget` with shared storage.
+each instance has its own, and Cloud Run may briefly run more than `max-instances`; a cold start
+resets it (Cloud Run scales to zero after idle, so the daily figure is really "per warm period");
+and one attempt can overshoot by its actual cost minus `E`. It limits bursts and accidents, not
+money. The spend cap of §5.1 limits money, with its ~10-minute delay; §5.1 gives the overshoot
+window of each layer. The database step backs `Budget` with shared storage.
 
 The bot process uses the same `Budget` for chat voice notes (principal `telegram:<chat_id>`), with
 the same defaults.
@@ -613,8 +731,10 @@ server):
     B    = b64url(compact JSON {"r": ref, "j": <16 random bytes, b64url>, "e": <exp, unix s>})
 
 - About 120 characters. `exp = now + APP_CODE_TTL_S` (default 900 s = 15 min).
-- **Single use**: the `j` of each redeemed code goes into an in-memory set until its `exp`; a second
-  redemption → `credential_used`.
+- **Single use, redeemed atomically**: after the MAC, expiry and authorization checks pass,
+  `UsedSet.claim(j, exp)` checks and inserts under one lock in the same step, and only a `True`
+  from it issues a session; a second redemption, concurrent or later, gets `credential_used`. The set
+  keeps each `j` until its `exp` and is per process (§6.8 T4).
 - The code grants nothing by itself; it only buys one session.
 
 ### 6.5 Authorization and revocation
@@ -647,9 +767,19 @@ server):
 ### 6.7 `POST /v1/auth/sessions`
 
 Request (JSON, at most 4 KB): `{"v": 1, "kind": "tg_link", "credential": "c1.…"}` or
-`{"v": 1, "kind": "tg_init_data", "credential": "<initData>"}`. Exact keys, strings only.
+`{"v": 1, "kind": "tg_init_data", "credential": "<initData>"}`. Exactly these three keys, duplicate
+keys rejected:
 
-`200`: `{"v": 1, "session": "s1.…", "expires_at": 1763150400, "scopes": ["voice"]}`.
+- `v`: the JSON integer `1` (not `true`, not `"1"`, not `1.0`);
+- `kind`: a string, one of the enabled providers' kinds (`tg_link`; `tg_init_data` when
+  `TELEGRAM_BOT_TOKEN` is set);
+- `credential`: a non-empty string of at most 4096 characters.
+
+Anything else → `400 bad_request`.
+
+`200`: `{"v": 1, "session": "s1.…", "expires_at": 1763150400, "scopes": ["voice"], "ref": "<the
+principal's opaque ref, §6.3>"}`. The page uses `ref` only to bind the stored session to the
+account (§7.2); it is a pseudonym, not an id.
 
 Errors (shape of §5.3): `400 bad_request`, `401 unauthenticated`, `401 auth_expired`,
 `401 credential_used`, `403 forbidden`, `429 rate_limited` (30 exchanges per minute per process,
@@ -666,8 +796,9 @@ accepted by the voice route directly.
    hex(HMAC_SHA256(secret_key, data_check_string))`; `compare_digest` with `hash`.
 4. `now − auth_date > INITDATA_MAX_AGE_S` (default **300 s**, the shortest that covers opening the
    app and exchanging at start-up) → `auth_expired`; more than 60 s in the future → `unauthenticated`.
-5. **Single use**: `hash` goes into an in-memory set for the age window; a second exchange →
-   `credential_used`.
+5. **Single use, redeemed atomically**: after steps 1–4 and authorization pass,
+   `UsedSet.claim(hash, auth_date + INITDATA_MAX_AGE_S)` checks and inserts under one lock; only a
+   `True` issues a session; a concurrent or later second exchange gets `credential_used`.
 6. `user` parsed with duplicate keys rejected; `user.id` must be an integer (not a boolean) > 0.
    `subject = str(id)`, `chat_id = id` (the private chat with the bot has the user's id),
    `scopes = {"voice"}`.
@@ -688,10 +819,10 @@ fit for them; (A4) Telegram ids, which tokens must not expose.
 | T1 | Someone obtains the link (code) from the keyboard URL: a shared screen with dev tools, a device left unlocked. Keyboard buttons cannot be forwarded. | Code valid 15 min, single use, opaque (§6.3–6.4); it only buys a 12 h session. | Within 15 min of `/app`, if the owner has not opened the app yet. |
 | T2 | Someone obtains a session: device access, a dump of the page's `localStorage`, a malicious script in the page. | 12 h TTL; scope `voice` only (no data can be read, nothing written); per-person and global revocation (§6.5); the page loads no third-party script except Telegram's and renders text with text nodes. | Up to 12 h of budget spend by that person's session, bounded by §5.6 and the provider cap. When sessions gain write scopes (step 2), their TTL and storage are revisited. |
 | T3 | Replay of captured `initData`. | Exchange only; 300 s age; single use by `hash`. | — |
-| T4 | Replay after an instance restart: the single-use sets are lost. | `max-instances=1`; codes live 15 min, `initData` 300 s. | A code or `initData` already redeemed may be redeemed once more within its window after a cold start. |
+| T4 | Replay after an instance restart, or on a second instance: the single-use sets are per process. | `max-instances=1` as a target (Cloud Run may briefly exceed it, §5.1); codes live 15 min, `initData` 300 s; redemption is atomic within a process (§6.4). | A code or `initData` already redeemed may be redeemed once more per cold start or per extra instance, within its window. |
 | T5 | Forged or tampered tokens. | HMAC-SHA256 with separated sub-keys; constant-time comparison; strict parsing (duplicate keys, types, canonical base64url, bounded lengths). | — |
 | T6 | Network attacker. | TLS; credentials in headers or body only, never in URLs sent to a server (the code rides in the fragment, which browsers do not send). | — |
-| T7 | Cost abuse with a valid session or a crafted file. | Rate limits, concurrency cap, per-attempt reservations, approximate budgets, provider-side cap (§5.6). | Bursts after a cold start, bounded by the provider cap. |
+| T7 | Cost abuse with a valid session or a crafted file. | Rate limits, concurrency cap, per-attempt reservations, approximate budgets, project spend cap (§5.1, §5.6). | Bursts after a cold start or on extra instances, plus whatever is spent in the ~10 minutes the spend cap takes to act (§5.1 gives the window). |
 | T8 | Logs as a leak. | §10. | — |
 | T9 | Cross-site requests. | No cookies; CORS allowlist (defence in depth). | — |
 | T10 | Telegram itself is compromised. | Out of scope: the platform is trusted, as it already is for every chat message. | — |
@@ -737,7 +868,7 @@ The page decides "inside Telegram" from `tg.platform` and the launch parameters,
 ### 7.1 Catalog keys
 
 In the catalog JSON next to `v`, `today`, `tz`, `client`: `vu` (voice service origin), `vc` (the
-one-time code), `vx` (the code's `exp`). Old pages ignore them. C6 extends `normalizeCatalog`
+one-time code), `vx` (the code's `exp`). Old pages ignore them. C6a extends `normalizeCatalog`
 (`core.js:425-445`) to keep them, validated, and to drop all three if any is invalid:
 
 - `vu`: matches `^https://[a-z0-9.-]+(:[0-9]{1,5})?$` (origin only, no path);
@@ -751,14 +882,34 @@ the three are removed and `voz` is reported (`DROPPED_LABELS["voice"] = "voz"`) 
 
 ### 7.2 Session on the page
 
-At start-up, when `vu` is present (or `initData` is non-empty and `vu` present):
+The page keeps **at most one** stored session: `localStorage` key `shape-miniapp:voice-session:v1`,
+value `{vu, ref, session, expires_at}`, where `ref` is the one returned by the exchange (§6.7). A
+session is only ever used for the account it was issued to.
 
-1. A stored session for this `vu` (`localStorage` key `shape-miniapp:voice-session:v1`, value
-   `{vu, session, expires_at}`) with more than 5 minutes left → use it.
-2. Else, `initData` non-empty → exchange `tg_init_data`.
-3. Else, `vc` with `vx` in the future → exchange `tg_link`.
-4. Success → store the session (memory only if `localStorage` is unavailable). Failure → the
+At start-up, when `vu` is present:
+
+1. **Current account.**
+   - Keyboard launch (today): `currentRef` = the `r` field of the code `vc` (its payload is
+     readable base64url JSON; the page reads `r` without verifying it, which is only used to pick or
+     discard a session, never to grant anything). The code identifies the account even after it
+     has expired.
+   - Launch with non-empty `initData` (future): the page cannot compute a ref, so it never reuses a
+     stored session; it always exchanges `tg_init_data` (step 3) and replaces what is stored.
+2. **Binding check.** If a stored session exists and (its `vu` differs from the current `vu`, or its
+   `ref` differs from `currentRef`, or `initData` is non-empty), **delete it** before doing
+   anything else. Otherwise, with more than 5 minutes left, use it and stop here.
+3. Else, `initData` non-empty → exchange `tg_init_data`.
+4. Else, `vc` with `vx` in the future → exchange `tg_link`.
+5. Success → check that the response's `ref` equals `currentRef` (keyboard launch); a mismatch
+   discards the response and disables voice (it indicates a broken link). Then store
+   `{vu, ref, session, expires_at}` (memory only if `localStorage` is unavailable). Failure → the
    button is shown disabled with the message of §7.5.
+
+"Account B on the same device": Telegram with two accounts shares one WebView storage per origin.
+When B opens the app, `currentRef` is B's, A's stored session fails the binding check and is
+deleted, and B's code is exchanged; if B's code has expired, voice is disabled with
+`Envie /app para renovar a voz` and A's session is never sent. C6a tests this exact sequence, and
+the reverse (A again after B).
 
 The exchange runs at start-up, not at the first tap, so that the 15-minute code is redeemed while
 fresh. Later opens from the same persistent keyboard (whose code is used or expired) reuse the
@@ -895,9 +1046,22 @@ def describe(err: BaseException) -> str:
 ```
 
 - Walks `err`, then `__cause__`, else `__context__`, at most 5 links, stopping on a repeat.
-- Each link: the class's qualified name; `status=<n>` when the exception has an integer
-  `status_code` or `status`; `code=<v>` when it has a `code` that is an integer or a string matching
-  `^[A-Za-z0-9_.-]{1,40}$`. **Never** `str(err)`, `repr(err)`, `err.args`, or a traceback.
+- Each link has three parts, and nothing else is ever read from the exception:
+  - **class:** `type(err).__module__ + "." + type(err).__qualname__` when it matches
+    `^[A-Za-z_][A-Za-z0-9_.]{0,100}$`, else `Exception` (names come from code, but a dynamically
+    built class must not smuggle text);
+  - **status:** `status=<n>` when `status_code` (else `status`) is an `int` (not `bool`) between 100
+    and 599; any other value present → `status=other`; absent → omitted;
+  - **code:** `code=<v>` only when `code` is an `int` between 100 and 599, or a `str` that is an
+    exact member of the closed set `DIAGNOSTIC_CODES`; any other value present → `code=other`;
+    absent → omitted.
+- `DIAGNOSTIC_CODES` (in `logs.py`, extended only by editing that constant): `unavailable`,
+  `internal`, `write_uncertain`, `timeout`, `rate_limited`, `budget_exhausted`, `bad_request`,
+  `unauthenticated`, `auth_expired`, `credential_used`, `forbidden`, `not_found`, `not_in_catalog`,
+  `invalid`, `unsupported_format`, `too_long`, `too_large`, `no_speech`, `disabled`,
+  `transcription_failed`, `idempotency_conflict`, `context_window_exceeded`, `content_filtered`.
+- **Never** `str(err)`, `repr(err)`, `err.args`, `err.message`, `err.body`, `err.response`, any
+  other attribute, or a traceback.
 
 Rule for `agent/bot.py`, `agent/handler.py`, `agent/transcribe.py`, `agent/budget.py`,
 `agent/voice_*.py`, `agent/auth.py` and anything they call with content: no `log.exception`, no
@@ -924,7 +1088,11 @@ Starlette and uvicorn never log a traceback for it.
 
 Sentinels: `AUDIO_SENTINEL = b"SENTINEL-AUDIO-7f3a"` (and its base64), `TEXT_SENTINEL =
 "SENTINELA-TEXTO-91c2"`. Provoke: a provider exception whose message, `args` and **chained cause**
-contain both; an agent run raising with both; a timeout in the middle of a transcription; a library
+contain both; exceptions carrying the sentinels **only in attributes**: `.code` (a string sentinel,
+which must log as `code=other`), `.status_code` set to a sentinel string (→ `status=other`),
+`.body`, `.message`, `.llm_provider`, and `.response` (an object whose `.text`, `.content` and
+`.json()` return the sentinels); a class created at run time whose name contains `TEXT_SENTINEL`
+(→ `Exception`); an agent run raising with both; a timeout in the middle of a transcription; a library
 logger (`LiteLLM`, `google_adk`) emitting a record with both, with and without `exc_info`. Assert
 neither appears in `record.getMessage()`, `repr(record.args)`, `record.exc_text`,
 `record.stack_info`, nor in the **formatted output** of a `StreamHandler` using the service's real
@@ -949,7 +1117,7 @@ without the sheet) and §13 C5c's non-Telegram acceptance test.
 On **iOS Telegram**, **Android Telegram** and **Telegram Desktop**, with a test bot and test sheet.
 Note device, OS version, Telegram version and result.
 
-Chat (after C4c):
+Chat (after C4c and C4d):
 1. Voice note of ~15 s with a meal → `🎙️ Entendi:` with the right text, as a reply to the note.
 2. `✅ Confirmar` → confirmation from the sheet with ✅/↩️/✏️. Tap ✅ twice quickly on another note →
    one entry.
@@ -966,7 +1134,7 @@ Chat (after C4c):
    correctly (the fallback gets text).
 10. `MEDIA_ENABLED=false`: voice note with caption `peso 82,4` → weight recorded, media notice shown.
 
-Mini App (after C5–C7 and the owner's deploy):
+Mini App (after C5–C7, C6a–C6b and the owner's deploy):
 11. `/app`, open within 15 min → button enabled. Close, open again from the same keyboard an hour
     later → still enabled (stored session). After 12 h → `Envie /app para renovar a voz`.
 12. `/app`, wait 16 minutes before the first open → disabled with the renewal message.
@@ -985,9 +1153,19 @@ Mini App (after C5–C7 and the owner's deploy):
     `Envie /app para renovar a voz`; `/app` works again.
 21. Forms still submit by `sendData` exactly as before.
 22. Phone call or another app taking the microphone during `listening` → clean error.
+23. Two Telegram accounts on one phone (A and B, both allowed in the test bot): A opens the app and
+    records; switch to B, `/app`, open → B's voice works and is attributed to B; switch back to A
+    with A's old keyboard after its code expired → `Envie /app para renovar a voz` (B's session is
+    never used for A).
+
+Bot write outcome (after C4c):
+24. With the test sheet's Web App URL pointing at a slow proxy or with the network cut **right after**
+    sending a voice-confirmed or typed entry (e.g. airplane mode a second after ✅): the reply is
+    `⚠ Não sei se a planilha gravou…`, no retry happens by itself, and `/hoje` shows whether it went
+    in.
 
 Privacy:
-23. After 1–22, search the bot's and the voice service's logs for a spoken word and for the code
+25. After 1–24, search the bot's and the voice service's logs for a spoken word and for the code
     and session strings: no match.
 
 ## 12. Risks
@@ -999,10 +1177,14 @@ Privacy:
 | Transcription errors on numbers. | Mandatory confirmation with editable text; numbers-as-digits rule; vocabulary refined from correction counts. |
 | A model "transcribes" silence or loops. | `<vazio>` sentinel, minimum length, 2000-character cap, confirmation. |
 | A confirmation runs twice or after a cancel. | Atomic `pending`-only transitions with identity, TTL and fail-closed restart (§4.1); text verified by hash. |
+| A write applied by the sheet whose answer is lost is reported as "nothing saved" and retried. | Structured outcomes; `uncertain` never releases an automatic retry anywhere; the person checks `/hoje` (§4.3). **Declared residual:** an `uncertain` write may or may not be in the sheet until the person checks. |
+| Cloud Run runs more than one voice instance during a spike. **Declared.** | Per-process limits multiply and single-use sets split for that period (§5.1, §6.8 T4); the spend cap still applies, late. |
+| The Gemini project spend cap acts about 10 minutes after it is reached. **Declared.** | Budget alert below the cap; in-process limits bound the rate during the window (§5.1). |
+| A stored session used for the wrong account on a shared device. | Session bound to the account's opaque ref; mismatch deletes it (§7.2). |
 | The same Mini App text runs twice. | `TextSubmissions` keyed by principal, type and id, with text hash and `running`/`uncertain` states (§4.2). Residual after a restart, equal to today's. |
 | Content in logs through exceptions or libraries. | `describe`, no tracebacks on content paths, `ContentGuard` for library records, sentinel tests (§10). |
 | Leaked code or session. | §6.8. |
-| Cost runaway. | Per-attempt reservations, approximate budgets, rate and concurrency limits, `max-instances=1`, provider-side cap (§5.1, §5.6). |
+| Cost runaway. **Declared:** no layer is a hard ceiling. In-process limits are per instance and reset at cold start; Cloud Run may briefly exceed `max-instances`; the project spend cap acts about 10 minutes late. | Layers and overshoot windows in §5.1; budget alert (owner deploy item 3); shared store at the database step. |
 | In-memory state is per process and reset by restarts. | Fail closed where it authorizes (confirmations); stated as approximate where it limits (budgets); the database step backs the same interfaces. |
 | The service is not deployed. | Chat voice works without it; the page hides the button without `vu`. Deploy is the owner's action. |
 | `localStorage` unavailable in some WebView. | Session kept in memory for that open; the next open needs a fresh code (`/app`). Checklist 11. |
@@ -1010,185 +1192,254 @@ Privacy:
 
 ## 13. Tasks
 
-Each task is one branch and one PR, sized for Sonnet, with no architecture left to decide. Rules
-for all: no new dependencies; no secrets, real ids or client data in code, tests, fixtures or docs
-(public repository); no push or deploy without the owner; existing suites stay green
-(`uv run pytest` in `services/agent`, `npm test` and `npm run check` at the root); every new log
-line follows §10.2.
+Each task is one branch and one PR, with no architecture left to decide. Rules for all: no new
+dependencies; no secrets, real ids or client data in code, tests, fixtures or docs (public
+repository); no push or deploy without the owner; existing suites stay green (`uv run pytest` in
+`services/agent`, `npm test` and `npm run check` at the root); every new log line follows §10.2.
 
-Order: **C4a → C4b → C4c**; **C5a** and **C5b** after C4b; **C5c** after C5a and C5b; **C7** after
-C5a and C4c; **C6** after the contracts (can be developed in parallel with C5/C7); **C8** last.
+| Task | Scope | Depends on | Model |
+| --- | --- | --- | --- |
+| C4a | Safe exception logging | — | Sonnet |
+| C4b | Transcription module, budget, settings | C4a | Sonnet |
+| C4c | Write outcomes (§4.3) and the chat confirmation lifecycle (§4.1) | C4a | **Fable 5.2, effort low** |
+| C4d | Chat voice wiring and the C1 gaps | C4b, C4c, C1 `59bf0f5` | Sonnet |
+| C5a | Sign-in providers, sessions, directory (pure) | C4a | **Fable 5.2, effort low** |
+| C5b | Rate limits, concurrency, idempotency (pure) | C4b | Sonnet |
+| C5c | Voice service ASGI integration | C4b, C5a, C5b | Sonnet |
+| C7 | Bot glue for Mini App voice | C5a, C4c | Sonnet |
+| C6a | Mini App voice core: session, state, recording logic (pure) | contracts only | Sonnet |
+| C6b | Mini App recorder, DOM and MainButton | C6a | Sonnet |
+| C8 | Device validation | see C8 | owner, manual |
+
+C4c and C5a run on Fable because a mistake there costs most: a duplicated or falsely denied write,
+or a forgeable credential. Order: C4a first; then C4b and C4c in parallel; C4d; C5a after C4a, C5b
+after C4b, C5c after both; C7 after C5a and C4c; C6a any time against the contracts, C6b after it;
+C8 last.
 
 ### C4a — Safe exception logging (Python)
 
 - **Goal:** §10.2 and §10.3 in place before any voice code exists.
-- **Files:** `agent/logs.py` (`describe`, `ContentGuard` inside `install()`); `agent/bot.py` and
-  `agent/handler.py` (the listed sites); tests `tests/test_logs.py` (new cases),
+- **Files:** `agent/logs.py` (`describe`, `DIAGNOSTIC_CODES`, `ContentGuard` inside `install()`);
+  `agent/bot.py` and `agent/handler.py` (the listed sites); tests `tests/test_logs.py` (new cases),
   `tests/test_log_safety.py` (new, sentinels).
-- **Depends on:** nothing.
-- **Done when:** every assertion of §10.3 passes for the existing agent paths; no `log.exception`
-  or `exc_info` remains in `bot.py`/`handler.py` content paths; the existing secret masking tests
-  still pass.
+- **Done when:** every assertion of §10.3 passes for the existing agent paths, including sentinels
+  only in attributes (`.code`, `.status_code`, `.body`, `.message`, `.response`) and a run-time
+  class name; a `code` outside `DIAGNOSTIC_CODES` logs as `code=other`; no `log.exception` or
+  `exc_info` remains in `bot.py`/`handler.py` content paths; existing masking tests still pass.
 - **Do not:** change what is logged for commands and buttons without content; touch behaviour.
-- **Model:** Sonnet.
 
 ### C4b — Transcription module, budget and settings (Python)
 
-- **Goal:** §3.1–3.6 and the `Budget` of §5.6, usable by both processes, not yet wired to the chat.
+- **Goal:** §3.1–3.6 and the `Budget` of §5.6, usable by both processes, not wired to the chat.
 - **Files:** new `agent/transcribe.py` (`Audio`, `Usage`, `Transcript`, `TranscribeError`,
-  `audio_format`, `TRANSCRIBE_PROMPT`, `TRANSCRIBE_PROMPT_TOKENS`, `MeteredClient`, `Transcriber`,
-  `build_transcriber`); new `agent/budget.py` (`Budget`, `Reservation`, `MemoryBudget` with the
-  per-principal and process limits); `agent/settings.py` (`TranscribeSettings` mixin and its
-  checks, added to `Settings`; `VOICE_DAILY_TOKENS`, `VOICE_GLOBAL_DAILY_TOKENS`); `settings.yaml`
+  `audio_format`, `TRANSCRIBE_PROMPT`, `TRANSCRIBE_PROMPT_TOKENS`, `implied_audio_tokens(usage) ->
+  int | None`, `MeteredClient`, `Transcriber`, `build_transcriber`); new `agent/budget.py`
+  (`Budget`, `Reservation`, `MemoryBudget`); `agent/settings.py` (`TranscribeSettings` mixin and its
+  checks, in `Settings`; `VOICE_DAILY_TOKENS`, `VOICE_GLOBAL_DAILY_TOKENS`); `settings.yaml`
   (defaults, no secrets); tests `tests/test_transcribe.py`, `tests/test_budget.py`,
   `tests/test_settings.py`.
-- **Depends on:** C4a.
-- **Done when:** the §3.2 table, the §3.4 result rules and the §5.6 settlement rules are tested;
-  a provider that never answers ends at `TRANSCRIBE_DEADLINE_S` (fake clock or a short deadline)
-  even with retries and a fallback configured; credential and `api_base` resolution follows §3.1,
-  including both `ConfigError` cases; `Transcript.usage` is filled from the response.
-- **Tests:** every MIME; prompt, `temperature=0`, `max_tokens`, `input_audio`; `<vazio>`,
-  `[inaudível]`-only, >2000 characters; transient → retry → fallback with its own key and no
-  `api_base`; a 400 releases the reservation, a timeout settles `E`, a success settles actual
-  usage; budget refused before the first attempt and before the fallback; day rollover in
-  `TIMEZONE`; concurrent reservations never exceed the limit.
+- **Closed cases (each one a test):**
+  - deadline: `deadline_s=None` → `TRANSCRIBE_DEADLINE_S`; `deadline_s` smaller → that value;
+    `deadline_s <= 0` → `TranscribeError("timeout")` with no reservation and no provider call; a
+    provider that never answers ends at the effective deadline even with retries and a fallback
+    configured, the cancelled attempt settled at `E`;
+  - usage: full usage → `Usage` filled and settled at actual; no usage object → `usage=None`,
+    settled at `E`, `usage_missing` counted; usage with a missing or non-integer `prompt_tokens` or
+    `completion_tokens` → `usage=None` (same); usage without `audio_tokens` → `Usage(…,
+    audio_tokens=None)`; `implied_audio_tokens` returns `None` for `usage=None` and never a negative
+    number;
+  - settlement: a 400/401/403/404/413/415/429 releases; timeout, 5xx and connection loss settle
+    `E`; budget refused before the first attempt and before the fallback; day rollover in
+    `TIMEZONE`; concurrent reservations never exceed the limit.
+- **Other tests:** every MIME of §3.2; prompt, `temperature=0`, `max_tokens`, `input_audio`;
+  `<vazio>`, `[inaudível]`-only, >2000 characters; transient → retry → fallback with its own key and
+  no `api_base`; both `ConfigError` cases of §3.1.
 - **Do not:** touch the handler or the chat; add audio parsing or transcoding; change
   `RetryingClient` for the agent.
-- **Model:** Sonnet.
 
-### C4c — Chat confirmation lifecycle and the C1 gaps (Python)
+### C4c — Write outcomes and the chat confirmation lifecycle (Python)
 
-- **Goal:** §4.1 and §8 in the bot.
-- **Files:** new `agent/voice_confirm.py` (`VoiceConfirmations`, states, `claim`); `agent/handler.py`
-  (`MediaRef.duration`, audio → `Transcriber` with the message deadline, `Entendi` message, the
-  `vok`/`vfix`/`vno` taps with early callback answers, gap 1); `agent/buttons.py` (voice keyboard
-  with `vid`, header constant, `transcript_from`, fix prompt); `agent/bot.py` (messages of §8,
-  rule 16); `agent/commands.py` (help line); tests `tests/test_voice_confirm.py`, updates to
-  `test_handler.py`, `test_buttons.py`, `test_voice_path.py` (cherry-pick `59bf0f5` first).
-- **Depends on:** C4b, C1 commit `59bf0f5`.
-- **Done when:** every cell of the §4.1 response table has a test; audio never reaches
-  `Bot.reply`; photos unchanged; §10.3 sentinel tests extended to the voice path.
-- **Tests:** confirm vs cancel and confirm vs fix run **concurrently** (two tasks, one store): one
-  wins, the other gets the table's answer, the agent runs at most once; double confirm → one run;
-  a new `Handler`/store (restart) → unknown `vid` → expired, no agent call, no download; eviction
-  (capacity 2 in the test) → expired; TTL with a fake clock; hash mismatch and inaccessible message
-  → expired; tap from another chat → refused; cut run → `uncertain`; the four gap tests; the
-  duration check happens before `getFile`.
-- **Do not:** store transcripts; persist state to disk; change the photo path or the form payloads.
-- **Model:** Sonnet.
+- **Goal:** §4.3 in every mutating path, and §4.1's store and taps. This task owns the outcome
+  contract that C4d, C7 and later routes rely on.
+- **Files:** `agent/sheet_client.py` (`MUTATING_OPS`, the classification table of §4.3, including
+  the redirected-GET rule); `agent/tools.py` (`Journal` outcomes; `write_uncertain` outside
+  `OUTAGE_CODES`); `agent/bot.py` (`Answer.outcome`, `WRITE_UNCERTAIN`, the `bot.py:309` rule,
+  prompt rule 9); `agent/handler.py` (`transient=False` for `uncertain`; the `vok`/`vfix`/`vno` taps
+  with early callback answers); `agent/miniapp.py` (form path: `uncertain` → no retry button, nothing
+  in `PendingStore`); `agent/undo.py` (uncertain undo message, no retry); new
+  `agent/voice_confirm.py` (`VoiceConfirmations`, states, `claim`); `agent/buttons.py` (voice
+  keyboard with `vid`, `ENTENDI_HEADER`, `transcript_from`, fix prompt); tests
+  `tests/test_write_outcome.py` (new), `tests/test_voice_confirm.py` (new), updates to
+  `test_sheet_client.py`, `test_tools.py`, `test_bot.py`, `test_handler.py`, `test_miniapp.py`,
+  `test_undo.py`, `test_buttons.py`.
+- **Done when:** every row of §4.3's classification table and every cell of §4.1's response table
+  has a test; the "written, answer lost" test of §4.3 passes in all three shapes (agent run, §4.1
+  tap, form payload); reads keep `unavailable` exactly as today.
+- **Tests (in addition to the tables):** confirm vs cancel and confirm vs fix run **concurrently**
+  (two tasks, one store): one wins, the other gets the table's answer, the agent runs at most once;
+  double confirm → one run; a new store (restart) → unknown `vid` → expired, no agent call;
+  eviction (capacity 2 in the test) → expired; TTL with a fake clock; hash mismatch and inaccessible
+  message → expired; tap from another chat → refused; a confirmed run ending `uncertain` leaves the
+  `vid` `uncertain` and a later ✅ answers `Já enviado…`. Taps are tested by creating store entries
+  directly; creating them from a voice note is C4d.
+- **Do not:** wire audio or the transcriber (C4d); store transcripts; persist state to disk; add a
+  same-request-id reconciliation for `uncertain` (§15); change the form payloads.
+- **If it is too large,** split at the seam: write outcomes first (`sheet_client`, `tools`, `bot`,
+  `handler` transient, `miniapp`, `undo`), then the confirmation store and taps. Both halves stay on
+  Fable.
+
+### C4d — Chat voice wiring and the C1 gaps (Python)
+
+- **Goal:** a voice or audio message is transcribed and answered with the `Entendi` message of
+  §4.1, creating its `VoiceConfirmations` entry; §8 closed.
+- **Files:** `agent/handler.py` (`MediaRef.duration`; audio → `Transcriber` with the message
+  deadline of §3.2 and the bot's `Budget`; `Entendi` message and entry creation, entry deleted if
+  the send fails; gap 1); `agent/bot.py` (messages of §8, rule 16); `agent/commands.py` (help line);
+  tests: updates to `test_handler.py`, `test_voice_path.py` (cherry-pick `59bf0f5` first, rewrite
+  the `test_gap_*` tests).
+- **Done when:** audio never reaches `Bot.reply`; photos unchanged; the duration check happens
+  before `getFile`; each `TranscribeError` code maps to its §8 message; the caption and the
+  transcript appear together and hash as shown; §10.3 sentinel tests extended to the voice path.
+- **Do not:** change the confirmation store or the tap handling (C4c); change the photo path.
 
 ### C5a — Sign-in providers, sessions and directory (Python, pure)
 
 - **Goal:** §6.1–6.7 as pure code, no HTTP.
 - **Files:** new `agent/auth.py` (`Principal`, `AuthError`, protocols, `derive_keys`,
-  `TelegramDirectory`, `AllowedChats`, `ConfigRevocations`, `LinkCodes` with `issue` and the
-  `tg_link` provider, `TelegramInitData` provider, `Sessions`, strict base64url/JSON helpers);
-  `AuthSettings` mixin (`APP_AUTH_SECRET`, `APP_CODE_TTL_S`, `APP_SESSION_TTL_S`,
-  `INITDATA_MAX_AGE_S`, `APP_SESSION_NOT_BEFORE`) in a new `agent/voice_settings.py`; tests
-  `tests/test_auth.py`.
-- **Depends on:** C4a (logging rule only).
-- **Done when:** every verification step of §6.4, §6.6 and §6.7 has a passing and a failing test.
+  `TelegramDirectory`, `AllowedChats`, `ConfigRevocations`, `UsedSet` with an atomic `claim`,
+  `LinkCodes` with `issue` and the `tg_link` provider, `TelegramInitData` provider, `Sessions`,
+  strict base64url/JSON helpers); `AuthSettings` mixin (`APP_AUTH_SECRET`, `APP_CODE_TTL_S`,
+  `APP_SESSION_TTL_S`, `INITDATA_MAX_AGE_S`, `APP_SESSION_NOT_BEFORE`) in a new
+  `agent/voice_settings.py`; tests `tests/test_auth.py`.
+- **Done when:** every verification step of §6.4, §6.6 and §6.7 has a passing and a failing test,
+  and redemption is atomic.
 - **Tests:** codes and sessions valid / tampered payload / bad MAC / expired / wrong version /
   non-canonical base64url / padding / duplicate JSON keys / wrong types (boolean for an integer) /
-  extra or missing keys / over-long token; code single use; `initData` valid, tampered, wrong token,
-  expired at 301 s, future, repeated key, non-digit `auth_date`, `user.id` boolean or string,
-  single use; refs never contain the id; revocation by `not_before` and by removal from the
+  extra or missing keys / over-long token; **atomic redemption**: the same code redeemed by N
+  concurrent callers (threads through a barrier, and `asyncio.gather`) → exactly one session and
+  N−1 `credential_used`; the same for one `initData` `hash`; a failing check (expired, bad MAC,
+  forbidden) does not consume the code; `initData` valid, tampered, wrong token, expired at 301 s,
+  future, repeated key, non-digit `auth_date`, `user.id` boolean or string; refs never contain the
+  id; the exchange result includes `ref`; revocation by `not_before` and by removal from the
   allowlist; key separation (a code's MAC does not verify as a session).
 - **Do not:** add HTTP; put a subject or chat id in clear in any token; accept a code or `initData`
   as an API credential.
-- **Model:** Sonnet (Codex review of the HMAC and parsing code is required).
+- Codex review of the HMAC and parsing code is required.
 
 ### C5b — Rate limits, concurrency and idempotency (Python, pure)
 
-- **Goal:** §5.5 and the request limits of §5.6, as pure code.
-- **Files:** new `agent/voice_limits.py` (`RateLimiter` per principal per minute and day,
-  exchange limiter, `ConcurrencyGate`, `IdempotencyCache` with digest-first semantics, the single-use
-  `UsedSet` used by C5a if not already there); tests `tests/test_voice_limits.py`.
-- **Depends on:** C4b (`Budget` shape, for consistent clocks and day boundaries).
-- **Done when:** the §5.5 bullet list is tested exactly, including the order: a different digest
-  gets `idempotency_conflict` both while the first request is in flight and after it finished, and
-  never receives the cached result.
+- **Goal:** §5.5 (including owner, waiters and cancellation) and the request limits of §5.6.
+- **Files:** new `agent/voice_limits.py` (`RateLimiter` per principal per minute and day, exchange
+  limiter, `ConcurrencyGate`, `IdempotencyCache` with digest-first semantics, `OwnerAborted`);
+  tests `tests/test_voice_limits.py`.
+- **Done when:** the §5.5 rules are tested exactly: a different digest gets `idempotency_conflict`
+  both while the first request is in flight and after it finished, and never receives the cached
+  result; the three cancellation tests of §5.5 pass.
 - **Tests:** in-flight join (two concurrent calls, one underlying run); finished replay without a
   run; only `200`/`no_speech` cached; expiry at 5 min; sliding windows with a fake clock; gate
-  release on exceptions.
+  released on exceptions and cancellation; no "exception never retrieved" warning when an owner
+  aborts with no waiters.
 - **Do not:** add HTTP; store audio (digests only).
-- **Model:** Sonnet.
 
 ### C5c — Voice service ASGI integration (Python)
 
 - **Goal:** §5.1–5.4, §5.7–5.8 and §6.7 over HTTP.
 - **Files:** `agent/voice_settings.py` (`VoiceSettings` with the shared loader); new
-  `agent/voice_api.py` (route logic: auth, order of §5.4, error shapes, streaming read);
-  new `agent/voice_asgi.py` (`build_voice_service`, Starlette app, `CORSMiddleware`); `pyproject.toml`
-  only if a console script is wanted (no dependency); `services/agent/README.md` (how to run, the
-  deploy requirements of §5.1 for the owner); tests `tests/test_voice_api.py`,
-  `tests/test_voice_service.py`.
-- **Depends on:** C4b, C5a, C5b.
+  `agent/voice_api.py` (route logic: auth, the order of §5.4, error shapes, streaming read, the
+  usage check of §3.5 via `implied_audio_tokens`); new `agent/voice_asgi.py`
+  (`build_voice_service`, Starlette app, `CORSMiddleware`); `services/agent/README.md` (how to run,
+  the owner deploy checklist of §5.1 with its overshoot table); tests `tests/test_voice_api.py`,
+  `tests/test_voice_service.py`, `tests/voice_fakes.py`.
+- **Injection point:**
+
+  ```python
+  def build_voice_service(
+      settings: VoiceSettings, *,
+      transcriber: Transcriber | None = None,           # None → build_transcriber(settings)
+      sign_in: Sequence[SignInProvider] | None = None,  # None → tg_link, plus tg_init_data if TELEGRAM_BOT_TOKEN
+      directory: Directory | None = None,               # None → TelegramDirectory(ALLOWED_CHAT_IDS)
+      authorizer: Authorizer | None = None,             # None → AllowedChats(ALLOWED_CHAT_IDS)
+      clock: Callable[[], datetime] | None = None,
+  ) -> Starlette
+  ```
+
+  A non-`None` argument **replaces** the default entirely. The `test` provider, its directory and
+  its authorizer live only in `tests/voice_fakes.py`; no setting or environment variable can
+  register a provider, so production builds only the Telegram ones.
 - **Done when:**
   - every row of the §5.3 table and of §6.7's errors has a test; §5.4's order holds (an
     unauthenticated or oversized request never calls the transcriber; the body is not read before
-    authentication);
+    authentication); a request with `usage=None` returns the transcript (no duration check);
   - **service without the sheet:** the §5.1 acceptance test passes;
-  - **outside Telegram (mandatory acceptance test):** a test-only `SignInProvider` (`kind="test"`,
-    `Principal(provider="test", subject="u1", chat_id=None, scopes={"voice"})`) with its own
-    `Directory` and `Authorizer`, no `TELEGRAM_BOT_TOKEN` in the settings, and `agent.telegram`
-    patched so that constructing `TelegramClient` or importing the bot fails the test: exchange →
-    session → transcription returns `200`;
-  - CORS headers are present on `200`, on every error and on `500`; `Retry-After` is exposed;
-    preflight answers only allowed origins;
-  - a chunked body without `Content-Length` is accepted and still cut at the cap; a
-    `Content-Length` mismatch → `400`;
+  - **outside Telegram (mandatory acceptance test):** `build_voice_service(settings,
+    sign_in=[TestProvider()], directory=TestDirectory(), authorizer=TestAuthorizer(),
+    transcriber=<fake>)` with no `TELEGRAM_BOT_TOKEN`, and `agent.telegram` patched so that
+    constructing `TelegramClient` or importing the bot fails the test: exchange with `kind="test"` →
+    session for `Principal(provider="test", subject="u1", chat_id=None)` → transcription `200`;
+  - CORS headers on `200`, on every error and on `500`; `Retry-After` exposed; preflight answers
+    only allowed origins;
+  - a chunked body without `Content-Length` is accepted and still cut at the cap; a mismatch → `400`;
   - §10.3 sentinel tests pass for both routes, including the `Authorization` value.
 - **Do not:** import `handler`, `bot`, `sheet_client`, `telegram` or `commands`; write anywhere;
   add multipart; deploy.
-- **Model:** Sonnet.
 
 ### C7 — Bot glue for Mini App voice (Python)
 
-- **Goal:** `/app` links carry `vu`/`vc`/`vx`; the bot accepts `t:"text"` with §4.2's idempotency.
+- **Goal:** `/app` links carry `vu`/`vc`/`vx`; the bot accepts `t:"text"` with §4.2's idempotency,
+  using C4c's `Answer.outcome`.
 - **Files:** `agent/commands.py` (`Context` gains `voice: VoiceLink | None`, where
   `VoiceLink(api_url: str, codes: LinkCodes)`; `/app` issues one code for `ctx.chat_id` and passes
   the keys to `keyboard_markup`); `agent/miniapp.py` (`keyboard_markup(…, voice_keys: dict | None)`,
   budget rule of §7.1, `DROPPED_LABELS["voice"]`, pydantic model for `t:"text"`); new
-  `agent/text_submissions.py` (`TextSubmissions`); `agent/handler.py` (build `VoiceLink` from
-  settings and pass it in `Context`; route `t:"text"` through `TextSubmissions` to `_run_bot`, which
-  gains an optional scope key); `agent/bot.py` (`Answer.uncertain`); `agent/settings.py`
-  (`VOICE_API_URL`, and `AuthSettings` fields for issuing: both `VOICE_API_URL` and
-  `APP_AUTH_SECRET` or neither); tests in `test_miniapp.py`, `test_handler.py`, `test_commands.py`,
-  new `test_text_submissions.py`.
-- **Depends on:** C5a (`LinkCodes`), C4c (`Answer` and handler structure settled).
+  `agent/text_submissions.py`; `agent/handler.py` (build `VoiceLink` from settings into `Context`;
+  route `t:"text"` through `TextSubmissions` to `_run_bot`, which gains an optional scope key);
+  `agent/settings.py` (`VOICE_API_URL`, `APP_AUTH_SECRET`: both or neither); tests in
+  `test_miniapp.py`, `test_handler.py`, `test_commands.py`, new `test_text_submissions.py`.
 - **Done when:** links with and without voice settings; the code in a link verifies with C5a for
-  that chat only; voice keys survive trimming until the last resort; every row of §4.2's table has
-  a test, including **the same payload in two different updates** (one agent run) and **the same id
-  with a different text** (conflict, no run); a failed run with nothing written allows a retry; form
-  payloads unchanged.
-- **Do not:** change the form payloads or their model-free path; change the launch mode; store the
-  text.
-- **Model:** Sonnet.
+  that chat only; voice keys survive trimming until the last resort; every row of §4.2's tables has
+  a test, including **the same payload in two different updates** (one agent run), **the same id
+  with a different text** (conflict, no run), and **"written, answer lost"** (outcome `uncertain` →
+  entry kept, a resend answers "pode ter sido gravado", no second run); `not_committed` removes the
+  entry and a resend runs; form payloads unchanged.
+- **Do not:** change the outcome classification (C4c); change the form payloads or the launch mode;
+  store the text.
 
-### C6 — Record button in the Mini App (JS)
+### C6a — Mini App voice core (JS, pure)
 
-- **Goal:** §7 in the page.
-- **Files:** `apps/miniapp/src/core.js` (`normalizeCatalog` keeps and validates `vu`/`vc`/`vx`;
-  pure `pickVoiceMime`, `voiceReducer` with generations, `voiceError`, `keepBlob`, `textPayload`
-  with the size check, `voiceAvailable`); new `apps/miniapp/src/voice.js` (session exchange and
-  storage, `getUserMedia`/`MediaRecorder`, fetch, Blob lifecycle, consent); `app.js` (dock button,
+- **Goal:** everything in §7 that can be decided without a DOM or a microphone, as pure functions
+  in `apps/miniapp/src/core.js`, tested with `node --test`.
+- **Contents:** `normalizeCatalog` keeps and validates `vu`/`vc`/`vx` (§7.1); `codeRef(vc)` (reads
+  `r`); `pickSession(stored, launch)` implementing §7.2's binding check and returning one of
+  `use(stored)`, `exchange(kind, credential)` or `disabled(reason)` plus whether to delete the
+  stored session; `acceptExchange(response, currentRef)`; `pickVoiceMime`; `voiceReducer` with
+  generations (§7.4 states and transitions); `voiceError` (§7.5); `keepBlob(event, state, now)`
+  (§7.4 retention rule); `textPayload` with the size check; `voiceAvailable`.
+- **Tests:** every state and transition of §7.4; every row of §7.5; every case of §7.2, including
+  **account B on the same device** (stored A, launch B with a valid code → delete A, exchange B;
+  launch B with an expired code → delete A, disabled; back to A) and an exchange response whose
+  `ref` differs; a permission result arriving after `Cancelar` (stale generation → the reducer
+  returns "stop tracks, stay idle"); `keepBlob` drops in every case §7.4 lists and keeps only during
+  the retry window; invalid catalog keys disable voice.
+- **Do not:** touch the DOM, `MediaRecorder`, `fetch` or storage (C6b).
+
+### C6b — Mini App recorder, DOM and MainButton (JS)
+
+- **Goal:** wire C6a to the page.
+- **Files:** new `apps/miniapp/src/voice.js` (storage read/write following `pickSession`, the
+  exchange `fetch`, `getUserMedia`/`MediaRecorder` with the generation check, transcription `fetch`
+  with `AbortController`, Blob lifecycle following `keepBlob`, consent); `app.js` (dock button,
   MainButton hand-over, mascot state names); `index.html`, `styles.css`; `dev/` stub; tests in
-  `apps/miniapp/test/`.
-- **Depends on:** the contracts of §4.2, §5.3, §6.7 and §7.1–7.5.
-- **Done when:** every state and transition of §7.4 and every row of §7.5 has a pure test; a
-  permission resolved after `Cancelar` stops its tracks and starts nothing (test with a fake
-  `getUserMedia` promise); `keepBlob` drops the Blob in every case §7.4 lists; invalid catalog voice
-  keys disable voice; preview never calls a real service; forms untouched; `npm test` and
-  `npm run check` green.
-- **Do not:** draw the mascot's new art; add a build step or npm package; persist audio or
-  transcripts; send anything but the confirmed text through `sendData`.
-- **Model:** Sonnet.
+  `apps/miniapp/test/` for the glue with fake `getUserMedia`, `MediaRecorder`, `fetch` and storage.
+- **Done when:** a permission resolved after `Cancelar` stops its tracks and starts nothing (fake
+  `getUserMedia` promise); every exit path stops all tracks; consent shown once; plan B closes the
+  app; preview never calls a real service; forms untouched; `npm test` and `npm run check` green.
+- **Do not:** change C6a's decisions in the glue; draw the mascot's new art; add a build step or npm
+  package; persist audio or transcripts; send anything but the confirmed text through `sendData`.
 
 ### C8 — Device validation (owner, manual)
 
-§11.2: items 1–10 after C4c; 11–23 after C5–C7 and the owner's deploy. Its results decide whether
-the `m4a` relabel stays and close the "not verified" rows of §2.
+§11.2: items 1–10 and 24 after C4c–C4d; 11–23 after C5–C7, C6a–C6b and the owner's deploy; 25 last.
+Its results decide whether the `m4a` relabel stays and close the "not verified" rows of §2.
 
 ## 14. Decisions
 
@@ -1225,21 +1476,40 @@ the `m4a` relabel stays and close the "not verified" rows of §2.
 - HTTP submission routes (`/v1/entries`, `/v1/messages`, `/v1/catalog`), the menu-button launch,
   PWA and native sign-in (steps 2–4 of §6.10).
 - Shared storage for budgets, single-use sets and confirmations (database step).
+- Reconciling an `uncertain` write automatically by re-sending it under the **same** request id
+  (the sheet would deduplicate it): useful, but it is still an automatic retry, so this spec leaves
+  the decision to the person (§4.3).
 - Photo path changes; voice replies from the bot.
 
-## 16. Review log (Codex review of `041ed06`)
+## 16. Review log
+
+### 16.1 Second review (Codex, `4e4252f`): R1–R9
 
 | # | Finding | Resolved in |
 | --- | --- | --- |
-| 1 | Confirmation lifecycle (blocking) | §4.1 (identity, atomic `pending`-only transitions, TTL, hash check, fail-closed restart and eviction, response table), §12, C4c tests |
-| 2 | Logs leaking through exceptions (blocking) | §10.1–10.3 (`describe`, no tracebacks on content paths, `ContentGuard`, sentinel tests), C4a |
-| 3 | Text payload idempotency | §4.2 (`TextSubmissions` by principal, type and id, text hash, `running`/`uncertain`), C7 tests |
-| 4 | Budget | §3.5 (what bytes and headers do not guarantee), §5.6 (per-attempt atomic reservation, settlement rules, fallback, "approximate limit"), §5.1 (`max-instances=1`, provider cap) |
-| 5 | Credential reuse | §6.4–6.8 (one-time code → 12 h session, `initData` exchange-only with 300 s and single use, strict parsing, opaque refs, threat model) |
-| 6 | Service without the sheet | §5.1 (`VoiceSettings`, `build_voice_service`, acceptance test), C5c |
-| 7 | Decisions left to implementers | §3.4 (`Transcript.usage`), §3.1–3.2 (real 45 s deadline, fallback key and `api_base`), C7 (`Context.voice`), C6 (`normalizeCatalog`), tasks split into C4a–C4c and C5a–C5c |
-| 8 | Idempotency order | §5.4 steps 7–9, §5.5 |
-| 9 | Retention and retry on the client | §7.4 (Blob lifecycle, permission generations), §9.1 |
-| 10 | HTTP details | §5.3 (CORS on errors and 500), §5.7 (`Retry-After` exposed), §5.3–5.4 (no `Content-Length` required, cap while reading) |
-| 11 | `setChatMenuButton` per chat | §2, §6.10 (corrected reasons) |
-| 12 | Outside Telegram acceptance | C5c mandatory test (provider `test`, `chat_id=None`, own authorizer, no Telegram SDK) |
+| R1 | A write retried after it may already have been applied (blocking) | §4.3 (outcomes `committed` / `not_committed` / `uncertain`, classification table including the redirected GET, propagation, `uncertain` never retried automatically, `WRITE_UNCERTAIN` message, "written, answer lost" test); §4.1 and §4.2 (stores driven by the outcome); §2; §11.2 item 24; §12; §15; contract owned by C4c |
+| R2 | `describe()` accepted arbitrary `code` strings | §10.2 (closed `DIAGNOSTIC_CODES`, status 100–599, anything else `other`, class-name guard, no other attribute read); §10.3 (sentinels in `.code`, `.status_code`, `.body`, `.message`, `.response`, run-time class name); C4a |
+| R3 | "Hard limit" and "single instance" claims | §2 (both behaviours cited); §5.1 (owner deploy checklist, real control layers with their overshoot windows, no hard-ceiling claim); §5.6; §6.8 T4 and T7; §12 (declared risks) |
+| R4 | Transcription contract gaps | §3.2 (`deadline_s=None` and `<= 0` branches); §3.4 (`usage: Usage \| None`, partial usage counts as unavailable); §3.5 (no duration check without usage, transcript returned, attempt charged `E`); C4b closed cases |
+| R5 | Cancelling a shared in-flight result | §5.5 (owner and waiters, `asyncio.shield`, `OwnerAborted`, cleanup, three tests); C5b |
+| R6 | Stored session not tied to the account | §6.7 (`ref` in the exchange response); §7.2 (one stored session with its `ref`, binding check, account B sequence); §11.2 item 23; §12; C6a tests |
+| R7 | Exchange request types | §6.7 (`v` the integer 1, `kind` and `credential` strings, exact keys) |
+| R8 | Task split | §13: C6 → C6a (pure) + C6b (glue); C4b closed cases for usage and deadline; C5a atomic redemption tests (§6.4, §6.7 step 5); C5c injection point (`build_voice_service` signature); C4 split into C4a–C4d so that C4c holds the outcome contract |
+| R9 | Model per task | §13 table: C4c and C5a on Fable 5.2 (effort low); all others on Sonnet |
+
+### 16.2 First review (Codex, `041ed06`)
+
+| # | Finding | Resolved in |
+| --- | --- | --- |
+| 1 | Confirmation lifecycle (blocking) | §4.1, §12, C4c |
+| 2 | Logs leaking through exceptions (blocking) | §10, C4a |
+| 3 | Text payload idempotency | §4.2, C7 |
+| 4 | Budget | §3.5, §5.1, §5.6 (revised again by R3) |
+| 5 | Credential reuse | §6.4–6.8 |
+| 6 | Service without the sheet | §5.1, C5c |
+| 7 | Decisions left to implementers | §3.1–3.4, C6a, C7, §13 |
+| 8 | Idempotency order | §5.4–5.5 |
+| 9 | Retention and retry on the client | §7.4, §9.1 |
+| 10 | HTTP details | §5.3, §5.7 |
+| 11 | `setChatMenuButton` per chat | §2, §6.10 |
+| 12 | Outside Telegram acceptance | C5c |

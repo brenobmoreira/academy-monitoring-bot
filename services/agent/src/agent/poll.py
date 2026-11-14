@@ -17,6 +17,7 @@ from typing import Any, Protocol
 import httpx
 
 from agent.handler import build_handler
+from agent.logs import describe, safe_code
 from agent.settings import Settings, parse_env_arg
 from agent.telegram import TelegramClient, TelegramError, configure_logging
 
@@ -55,10 +56,11 @@ async def poll_forever(
     max_wait_s: float = 30,
     rounds: int | None = None,
 ) -> None:
-    """Polls until stopped. A network failure or a Telegram error (Wi-Fi drop, 502) is logged and
-    retried after 1 s, then 2, 4... up to max_wait_s; a success resets the wait. A Telegram error
-    in NEEDS_ACTION is logged with what to do and raised, as is any other exception (a bug).
-    `rounds` bounds it in tests."""
+    """Polls until stopped. A network failure or a Telegram error (Wi-Fi drop, 502) is logged
+    (its class, HTTP status and Telegram error_code, never its message) and retried after 1 s,
+    then 2, 4... up to max_wait_s; a success resets the wait. A Telegram error in NEEDS_ACTION is
+    logged with what to do and raised, as is any other exception (a bug). `rounds` bounds it in
+    tests."""
     offset: int | None = None
     wait = 1.0
     done = 0
@@ -67,12 +69,21 @@ async def poll_forever(
         try:
             offset = await poll_once(telegram, handler, offset)
         except (httpx.TransportError, TelegramError) as err:
-            action = NEEDS_ACTION.get(getattr(err, "error_code", None) or 0)
+            code = getattr(err, "error_code", None)
+            action = NEEDS_ACTION.get(code or 0)
             if action:
-                log.error("Telegram refused polling (%s): %s", err, action)
+                log.error(
+                    "Telegram refused getUpdates (%s, error_code=%s): %s",
+                    describe(err),
+                    safe_code(code),
+                    action,
+                )
                 raise
             log.warning(
-                "Telegram unreachable (%s: %s); trying again in %.0f s", type(err).__name__, err, wait
+                "getUpdates failed (%s, error_code=%s); trying again in %.0f s",
+                describe(err),
+                "none" if code is None else safe_code(code),
+                wait,
             )
             await sleep(wait)
             wait = min(wait * 2, max_wait_s)

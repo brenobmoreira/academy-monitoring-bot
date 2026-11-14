@@ -9,6 +9,8 @@ from agent.telegram import TelegramClient, TelegramError
 
 pytestmark = pytest.mark.unit
 
+TEXT_SENTINEL = "SENTINELA-TEXTO-91c2"  # stands for content an error message can repeat
+
 
 class FakeTelegram:
     def __init__(self, updates):
@@ -103,7 +105,7 @@ async def test_a_programming_error_still_stops_the_loop():
     [(401, "TELEGRAM_BOT_TOKEN"), (404, "TELEGRAM_BOT_TOKEN"), (409, "set-webhook.sh delete")],
 )
 async def test_an_error_that_needs_action_stops_with_what_to_do(code, hint, caplog):
-    error = TelegramError(f"getUpdates: HTTP {code} Conflict or Unauthorized", code)
+    error = TelegramError(f"getUpdates: HTTP {code} {TEXT_SENTINEL}", code, code)
     tg = FlakyTelegram([error])
 
     async def sleep(seconds):
@@ -111,18 +113,35 @@ async def test_an_error_that_needs_action_stops_with_what_to_do(code, hint, capl
 
     with pytest.raises(TelegramError):
         await poll_forever(tg, FakeHandler(), sleep=sleep, rounds=3)
-    assert f"HTTP {code}" in caplog.text
+    expected = f"Telegram refused getUpdates (agent.telegram.TelegramError[status={code}], error_code={code})"
+    assert expected in caplog.text
     assert hint in caplog.text
+    assert TEXT_SENTINEL not in caplog.text
 
 
-async def test_a_transient_error_is_logged_with_its_reason(caplog):
-    tg = FlakyTelegram([TelegramError("getUpdates: HTTP 502 Bad Gateway", 502), []])
+async def test_a_transient_error_is_logged_with_its_class_and_status_not_its_message(caplog):
+    request = httpx.Request("POST", "https://api.telegram.org/x")
+    tg = FlakyTelegram(
+        [
+            TelegramError(f"getUpdates: HTTP 502 {TEXT_SENTINEL}", 502, 502),
+            TelegramError(f"getUpdates: HTTP 404 {TEXT_SENTINEL}", None, 404),
+            httpx.ConnectError(f"no route for {TEXT_SENTINEL}", request=request),
+            [],
+        ]
+    )
 
     async def sleep(seconds):
         pass
 
-    await poll_forever(tg, FakeHandler(), sleep=sleep, rounds=2)
-    assert "HTTP 502 Bad Gateway" in caplog.text
+    await poll_forever(tg, FakeHandler(), sleep=sleep, rounds=4)
+    messages = [r.getMessage() for r in caplog.records]
+    assert messages == [
+        "getUpdates failed (agent.telegram.TelegramError[status=502], error_code=502); trying again in 1 s",
+        "getUpdates failed (agent.telegram.TelegramError[status=404], error_code=none); trying again in 2 s",
+        "getUpdates failed (httpx.ConnectError, error_code=none); trying again in 4 s",
+    ]
+    assert TEXT_SENTINEL not in caplog.text
+    assert all(TEXT_SENTINEL not in repr(r.args) and r.exc_info is None for r in caplog.records)
 
 
 def telegram_answering(*responses):

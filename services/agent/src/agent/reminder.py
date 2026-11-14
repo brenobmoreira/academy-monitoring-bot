@@ -9,6 +9,9 @@ A Cloud Scheduler job per kind calls the agent's URL at /remind with the header
 
 Without REMINDER_TOKEN the endpoint does not exist (404). The sheet being down never turns into
 a message: the job runs unattended, so a failure is logged and nothing is sent.
+
+The messages hold what the person recorded, and the sheet's error messages can repeat it: a failure
+is logged through logs.describe() (class, HTTP status, a listed code) and a chat as logs.ref().
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import httpx
 from agent import webhook
 from agent.commands import CommandSheet, Reply, week_text
 from agent.format import escape, split
+from agent.logs import describe, ref
 from agent.settings import Settings
 from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient
@@ -57,7 +61,13 @@ class Sender(Protocol):
 
 
 class SheetDown(RuntimeError):
-    """The sheet did not answer (or refused); the reminder sends nothing."""
+    """The sheet did not answer (or refused); the reminder sends nothing. `code` is the sheet's
+    error code, which logs.describe() prints only when it is a listed one; the sheet's message is
+    not kept."""
+
+    def __init__(self, code: object) -> None:
+        super().__init__("the sheet failed")
+        self.code = code
 
 
 # ---- what to send --------------------------------------------------------------------------
@@ -78,7 +88,7 @@ def daily_text(missing: list[str]) -> str:
 async def daily(sheet: CommandSheet, today: date) -> Reply | None:
     response = await sheet.day(today.isoformat())
     if not response.get("ok"):
-        raise SheetDown(_error(response))
+        raise SheetDown(_code(response))
     missing = missing_fields(response["result"].get("diary") or {})
     return Reply(daily_text(missing)) if missing else None
 
@@ -86,7 +96,7 @@ async def daily(sheet: CommandSheet, today: date) -> Reply | None:
 async def weekly(sheet: CommandSheet, today: date) -> Reply:
     reply = await week_text(sheet, today)
     if reply.failed:
-        raise SheetDown(reply.text)
+        raise SheetDown("unavailable" if reply.transient else "rejected")
     return reply
 
 
@@ -100,7 +110,7 @@ async def remind(
     try:
         reply = await (daily(sheet, today) if kind == "daily" else weekly(sheet, today))
     except SheetDown as err:
-        log.warning("%s reminder skipped, sheet failed: %s", kind, err)
+        log.warning("%s reminder skipped, sheet failed: %s", kind, describe(err))
         return 0, 0
     if reply is None:
         return 0, 0
@@ -112,8 +122,10 @@ async def remind(
             for chunk in chunks:
                 await telegram.send_message(chat_id, chunk, html=True)
             sent += 1
-        except Exception:
-            log.exception("could not send the %s reminder to chat %s", kind, chat_id)
+        except Exception as error:
+            log.error(
+                "could not send the %s reminder to chat ref %s: %s", kind, ref(chat_id), describe(error)
+            )
     return sent, len(chats)
 
 
@@ -164,6 +176,7 @@ def _blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
-def _error(response: dict[str, Any]) -> str:
-    error = (response.get("errors") or [{}])[0]
-    return f"{error.get('code', '?')}: {error.get('message', '')}"
+def _code(response: dict[str, Any]) -> object:
+    errors = response.get("errors")
+    first = errors[0] if isinstance(errors, list) and errors else None
+    return first.get("code") if isinstance(first, dict) else None

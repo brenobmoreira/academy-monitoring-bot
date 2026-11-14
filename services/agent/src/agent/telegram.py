@@ -23,11 +23,14 @@ def configure_logging() -> None:
 
 class TelegramError(RuntimeError):
     """`error_code` is the one in Telegram's own JSON answer; None when the answer was not
-    Telegram's (an HTML error page from a proxy, a network failure)."""
+    Telegram's (an HTML error page from a proxy, a network failure). `status_code` is the HTTP
+    status, None when there was no answer; logs.describe() prints it, never the message (the
+    description Telegram returns can repeat what was sent)."""
 
-    def __init__(self, message: str, error_code: int | None = None) -> None:
+    def __init__(self, message: str, error_code: int | None = None, status_code: int | None = None) -> None:
         super().__init__(message)
         self.error_code = error_code
+        self.status_code = status_code
 
 
 class TelegramClient:
@@ -49,6 +52,7 @@ class TelegramClient:
             raise TelegramError(
                 f"{method}: HTTP {response.status_code} {body.get('description', '')}".strip(),
                 code if isinstance(code, int) and not isinstance(code, bool) else None,
+                response.status_code,
             )
         return body["result"]
 
@@ -110,7 +114,9 @@ class TelegramClient:
         except httpx.HTTPError as error:
             raise TelegramError(f"download_file: {type(error).__name__}") from None
         if response.status_code != 200:
-            raise TelegramError(f"download_file: HTTP {response.status_code}")
+            raise TelegramError(
+                f"download_file: HTTP {response.status_code}", status_code=response.status_code
+            )
         return response.content
 
     async def get_updates(self, offset: int | None = None, wait: int = 50) -> list[dict[str, Any]]:

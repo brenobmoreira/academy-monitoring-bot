@@ -129,14 +129,16 @@ def test_a_formatting_error_does_not_print_the_secret_on_stderr(capsys):
     assert SECRET not in err and SECRET not in stream.getvalue()
 
 
-def test_the_formatting_error_report_keeps_the_call_stack_and_masks_it(capsys):
+def test_the_formatting_error_report_names_the_error_class_and_the_place_and_nothing_else(capsys):
     logs.register_secrets([SECRET])
     logger, _ = capture("test.redaction.stack")
     logger.info("value %s", Exploding())
     err = capsys.readouterr().err
-    assert "ValueError: no text" in err
-    assert "Call stack:" in err and "test_the_formatting_error_report_keeps_the_call_stack" in err
-    assert f"Exploding({logs.MASK})" in err and SECRET not in err
+    assert "ValueError while writing a log record" in err
+    assert "Logged from file test_logs.py, line " in err
+    assert "logger test.redaction.stack, level INFO" in err
+    for hidden in ("no text", "Call stack", "Traceback", "Exploding", "value %s", SECRET):
+        assert hidden not in err
 
 
 def test_the_report_is_silent_when_logging_exceptions_are_off(capsys, monkeypatch):

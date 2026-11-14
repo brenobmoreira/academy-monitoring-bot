@@ -7,7 +7,7 @@ from pydantic import SecretStr
 from starlette.testclient import TestClient
 from werkzeug.test import EnvironBuilder
 
-from agent import asgi, main, reminder, webhook
+from agent import asgi, logs, main, reminder, webhook
 from agent.settings import Settings
 
 from .fakes import FakeSheet
@@ -16,6 +16,8 @@ pytestmark = pytest.mark.unit
 
 TODAY = date(2026, 9, 24)
 DOWN = {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": "planilha fora"}]}
+TEXT_SENTINEL = "SENTINELA-TEXTO-91c2"  # stands for content a sheet or Telegram error can repeat
+CHAT = 987650042  # a chat id no other number in a log line can be mistaken for
 SETTINGS = Settings.model_construct(
     None,
     TELEGRAM_BOT_TOKEN=SecretStr("tok"),
@@ -35,7 +37,7 @@ class FakeTelegram:
 
     async def send_message(self, chat_id, text, *, html=False, reply_markup=None, reply_to=None):
         if chat_id in self.failing:
-            raise RuntimeError("chat blocked the bot")
+            raise RuntimeError(f"chat {chat_id} blocked the bot, message was: {text}")
         self.sent.append((chat_id, text, html))
         return {"message_id": len(self.sent)}
 
@@ -90,7 +92,42 @@ async def test_one_failing_chat_does_not_stop_the_others(caplog):
     counts, sent, _ = await remind("daily", telegram, chats=(42, 7, 99), day_get=[day({})])
     assert counts == (2, 3)
     assert [chat for chat, _, _ in sent] == [42, 99]
-    assert "chat 7" in caplog.text
+    assert f"could not send the daily reminder to chat ref {logs.ref(7)}: RuntimeError" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("kind", "code", "logged"),
+    [
+        ("daily", "unavailable", "unavailable"),
+        ("daily", TEXT_SENTINEL, "other"),
+        ("weekly", "unavailable", "unavailable"),
+        ("weekly", "invalid_date", "rejected"),
+    ],
+)
+async def test_a_sheet_failure_is_logged_by_a_listed_code_not_by_the_sheets_message(
+    kind, code, logged, caplog
+):
+    refusal = {"ok": False, "errors": [{"path": "", "code": code, "message": f"recebido {TEXT_SENTINEL}"}]}
+    counts, sent, _ = await remind(kind, day_get=[refusal], week_get=[refusal])
+    assert (counts, sent) == ((0, 0), [])
+    expected = f"{kind} reminder skipped, sheet failed: agent.reminder.SheetDown[code={logged}]"
+    assert expected in caplog.text
+    assert TEXT_SENTINEL not in caplog.text
+    assert all(TEXT_SENTINEL not in repr(r.args) for r in caplog.records)
+
+
+async def test_a_failing_send_logs_no_traceback_no_message_text_and_no_chat_id(caplog):
+    """The error Telegram's client raises here repeats the reminder's text and the chat id."""
+    telegram = FakeTelegram(failing=frozenset({CHAT}))
+    diary = day({"weightKg": TEXT_SENTINEL})
+    counts, _, _ = await remind("daily", telegram, chats=(CHAT,), day_get=[diary])
+    assert counts == (0, 1)
+    expected = f"could not send the daily reminder to chat ref {logs.ref(CHAT)}: RuntimeError"
+    assert [r.getMessage() for r in caplog.records] == [expected]
+    for leaked in (str(CHAT), "Faltou registrar", "Traceback", "blocked the bot"):
+        assert leaked not in caplog.text
+    record = caplog.records[0]
+    assert record.exc_info is None and CHAT not in record.args
 
 
 # ---- weekly --------------------------------------------------------------------------------

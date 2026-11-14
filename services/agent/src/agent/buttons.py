@@ -13,6 +13,7 @@ OK = "ok"
 UNDO = "undo"
 FIX = "fix"
 RETRY = "retry"  # `retry:<id>`: replays a Mini App write the sheet could not take
+VERBS = frozenset({OK, UNDO, FIX, RETRY})
 MAX_DATA = 64  # bytes, Telegram's limit for callback_data
 
 FIX_PROMPT = "✏️ Envie a correção para esta mensagem"
@@ -35,6 +36,13 @@ def parse(data: str) -> tuple[str, list[str]]:
     """`undo:w1,w2` → ("undo", ["w1", "w2"]); `ok` → ("ok", [])."""
     verb, _, arg = data.partition(":")
     return verb, [i for i in arg.split(",") if i]
+
+
+def action(data: str) -> str:
+    """The verb of `data` when it is one of VERBS, else "other": what a log line may say about a
+    tap. `callback_data` comes from the update, so it is never logged as it arrived."""
+    verb = parse(data)[0]
+    return verb if verb in VERBS else "other"
 
 
 def fix_prompt(confirmation: str | None) -> tuple[str, dict[str, Any]]:

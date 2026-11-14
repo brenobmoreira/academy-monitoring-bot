@@ -192,17 +192,25 @@ class RealLiteLLM(LiteLLMClient):
     transport replaced: what goes out to Anthropic is captured instead of sent. Only the primary's
     overload is simulated, before LiteLLM (any `gemini/` model fails with 503).
 
-    `requests` keeps a deep copy of each call from the retry layer; `http` the JSON bodies that left."""
+    `requests` keeps a deep copy of each call from the retry layer; `http` the (method, URL, JSON
+    body) that left. `aclose` closes both HTTP clients: the one LiteLLM's handler creates on its
+    own and the one injected in its place."""
 
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
-        self.http: list[tuple[str, dict[str, Any]]] = []
+        self.http: list[tuple[str, str, dict[str, Any]]] = []
         self._handler = AsyncHTTPHandler()
-        self._handler.client = httpx.AsyncClient(transport=httpx.MockTransport(self._anthropic))
+        self._created = self._handler.client
+        self._injected = httpx.AsyncClient(transport=httpx.MockTransport(self._anthropic))
+        self._handler.client = self._injected
 
     def _anthropic(self, request: httpx.Request) -> httpx.Response:
-        self.http.append((str(request.url), json.loads(request.content)))
+        self.http.append((request.method, str(request.url), json.loads(request.content)))
         return httpx.Response(200, json=ANTHROPIC_OK)
+
+    async def aclose(self) -> None:
+        await self._created.aclose()
+        await self._injected.aclose()
 
     async def acompletion(self, model: Any, messages: Any, tools: Any, **kwargs: Any) -> Any:
         self.requests.append({"model": model, "messages": copy.deepcopy(messages)})
@@ -213,7 +221,16 @@ class RealLiteLLM(LiteLLMClient):
         )
 
 
-async def test_gap_a_fallback_of_another_provider_gets_the_audio_dropped_and_nobody_is_told():
+@pytest.fixture
+async def real_litellm():
+    client = RealLiteLLM()
+    try:
+        yield client
+    finally:
+        await client.aclose()
+
+
+async def test_gap_a_fallback_of_another_provider_gets_the_audio_dropped_and_nobody_is_told(real_litellm):
     """CURRENT: the primary (Gemini) is overloaded and the fallback (Anthropic) receives the same
     request, audio included; LiteLLM's real conversion for Anthropic then leaves the audio out of the
     HTTP body, so that model sees only "[Anexo: áudio]". Nothing in our code notices: the reply is
@@ -223,7 +240,7 @@ async def test_gap_a_fallback_of_another_provider_gets_the_audio_dropped_and_nob
     DESIRED: audio never goes silently to a model that cannot take it: the fallback is skipped or
     the person gets MEDIA_UNREADABLE (or the audio is transcribed first). When fixed, invert the
     last assertions: no "ok", `answer.text == MEDIA_UNREADABLE` (or an audio block in the body)."""
-    client = RealLiteLLM()
+    client = real_litellm
     model = build_model(
         settings(
             LLM_FALLBACK_MODEL="anthropic/claude-haiku-5-5", LLM_FALLBACK_API_KEY=SecretStr("anthropic-key")
@@ -238,8 +255,8 @@ async def test_gap_a_fallback_of_another_provider_gets_the_audio_dropped_and_nob
     # The retry layer hands the same audio (format and bytes) to both models, unadapted.
     assert audio_blocks(primary["messages"]) == audio_blocks(fallback["messages"]) == [("ogg", FAKE_OGG)]
     # What actually left for Anthropic: one call, no audio, only the label.
-    [(url, body)] = client.http
-    assert url == "https://api.anthropic.com/v1/messages"
+    [(method, url, body)] = client.http
+    assert (method, url) == ("POST", "https://api.anthropic.com/v1/messages")
     assert body["model"] == "claude-haiku-5-5"
     assert body["messages"] == [{"role": "user", "content": [{"type": "text", "text": "[Anexo: áudio]"}]}]
     assert base64.b64encode(FAKE_OGG).decode() not in json.dumps(body)

@@ -1,5 +1,6 @@
 """Fakes shared by the unit tests: a sheet API that records calls, a scripted LLM and a Telegram client."""
 
+import copy
 import json
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -103,14 +104,14 @@ def say(text: str) -> types.Content:
 
 class FakeLiteLLMClient(LiteLLMClient):
     """Stands in for litellm.acompletion: replays OpenAI-style responses (an exception in the
-    script is raised), records each request."""
+    script is raised), records each request (messages as deep copies: what was sent at call time)."""
 
     def __init__(self, script: list[Any]) -> None:
         self.script = script
         self.requests: list[dict[str, Any]] = []
 
     async def acompletion(self, model: Any, messages: Any, tools: Any, **kwargs: Any) -> Any:
-        self.requests.append({"model": model, "messages": messages, "tools": tools, **kwargs})
+        self.requests.append({"model": model, "messages": copy.deepcopy(messages), "tools": tools, **kwargs})
         response = self.script.pop(0)
         if isinstance(response, Exception):
             raise response

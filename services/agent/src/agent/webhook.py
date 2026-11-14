@@ -14,7 +14,8 @@ from typing import Any
 
 import httpx
 
-from agent.handler import UpdateDeduplicator, build_handler
+from agent.handler import UpdateDeduplicator, _update_id, build_handler
+from agent.logs import describe
 from agent.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -43,10 +44,17 @@ async def handle_update(settings: Settings, update: dict[str, Any]) -> None:
 
 async def process(secret: str | None, body: Any) -> tuple[str, int]:
     """Returns (text, status). Unauthorized → 403; anything else → 200, so Telegram never retries
-    an update the bot has already seen or cannot use."""
+    an update the bot has already seen or cannot use.
+
+    The handler ignores a malformed update by itself; the `except` is the net under it, for a
+    failure nobody foresaw. It covers the processing only, never the check of the secret, and logs
+    the class of the error and the update id: the body and the traceback can carry content."""
     settings = get_settings()
     if not is_authorized(settings, secret):
         return "forbidden", 403
     if isinstance(body, dict):
-        await handle_update(settings, body)
+        try:
+            await handle_update(settings, body)
+        except Exception as error:
+            log.error("update %s failed: %s", _update_id(body.get("update_id")), describe(error))
     return "ok", 200

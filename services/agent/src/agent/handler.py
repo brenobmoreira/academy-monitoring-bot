@@ -139,10 +139,14 @@ def media_ref(message: dict[str, Any], max_bytes: int) -> MediaRef | None:
     for key, default_mime in (("voice", "audio/ogg"), ("audio", "audio/mpeg")):
         item = message.get(key)
         if isinstance(item, dict) and isinstance(item.get("file_id"), str):
-            return MediaRef(item["file_id"], _size(item), item.get("mime_type") or default_mime)
+            mime = item.get("mime_type")
+            return MediaRef(
+                item["file_id"], _size(item), mime if isinstance(mime, str) and mime else default_mime
+            )
+    sizes = message.get("photo")
     photos = [
         MediaRef(p["file_id"], _size(p), "image/jpeg")
-        for p in message.get("photo") or []
+        for p in (sizes if isinstance(sizes, list) else [])
         if isinstance(p, dict) and isinstance(p.get("file_id"), str)
     ]
     if not photos:
@@ -160,6 +164,36 @@ def _size(item: dict[str, Any]) -> int | None:
 
 def _update_id(raw: Any) -> int | None:
     return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+
+
+def _message_fault(message: Any, where: str) -> str | None:
+    if message is None:
+        return None
+    if not isinstance(message, dict):
+        return where
+    chat = message.get("chat")
+    if chat is None:
+        return None
+    if not isinstance(chat, dict):
+        return f"{where}.chat"
+    chat_id = chat.get("id")
+    if chat_id is not None and _update_id(chat_id) is None:  # same rule: an int, not a bool
+        return f"{where}.chat.id"
+    return None
+
+
+def malformed_field(update: Any) -> str | None:
+    """The first field of `update` whose type the handler cannot use, as a fixed name written here
+    (never a value); None for an update it can process. Checked before any field is read: Telegram
+    does not send these shapes, and resending one would not fix it. Absent fields are fine."""
+    if not isinstance(update, dict):
+        return "update"
+    if "callback_query" in update:
+        query = update["callback_query"]
+        if not isinstance(query, dict):
+            return "callback_query"
+        return _message_fault(query.get("message"), "callback_query.message")
+    return _message_fault(update.get("message"), "message")
 
 
 class Handler:
@@ -196,7 +230,13 @@ class Handler:
         self._pending = pending if pending is not None else miniapp.PendingStore()
 
     async def handle_update(self, update: dict[str, Any]) -> None:
-        """Never raises: a webhook that errors makes Telegram resend the same update."""
+        """Never raises: a webhook that errors makes Telegram resend the same update. A malformed
+        update is ignored: nothing is written or sent, and the log names the field, not its value."""
+        fault = malformed_field(update)
+        if fault is not None:
+            raw_id = update.get("update_id") if isinstance(update, dict) else None
+            log.warning("ignoring malformed Telegram update %s: bad %s", _update_id(raw_id), fault)
+            return
         update_id = _update_id(update.get("update_id"))
         if update_id is not None and not self._deduplicator.try_begin(update_id):
             log.info("ignoring duplicate Telegram update %s", update_id)
@@ -465,8 +505,9 @@ def replied_text(message: dict[str, Any]) -> str | None:
     """The text of the bot message this one replies to (swipe-reply or ✏️ Corrigir), the only
     context the agent gets from earlier messages besides the sheet's recent writes. A reply to
     the user's own message, or to one without text, gives none."""
-    replied = message.get("reply_to_message") or {}
-    if not (replied.get("from") or {}).get("is_bot"):
+    replied = message.get("reply_to_message")
+    author = replied.get("from") if isinstance(replied, dict) else None
+    if not isinstance(replied, dict) or not isinstance(author, dict) or not author.get("is_bot"):
         return None
     text = replied.get("text")
     return text if isinstance(text, str) and text.strip() else None

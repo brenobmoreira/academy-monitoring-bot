@@ -1,7 +1,7 @@
 # Voice input — design
 
-Date: 2026-11-14 · Status: revision 3, after the Codex reviews of `041ed06` and `4e4252f`; owner
-decisions taken (§14) · Branch: `claude/voz-spec`
+Date: 2026-11-14 · Status: revision 4, after the Codex reviews of `041ed06`, `4e4252f` and
+`e6e2d09`; owner decisions taken (§14) · Branch: `claude/voz-spec`
 
 Voice becomes a **primary input** of the product: on the Telegram chat and in the Mini App now,
 and later on the client PWA and the native app, through the same HTTP API. This spec decides the
@@ -53,6 +53,9 @@ commit `59bf0f5`). It supersedes the first step of "Voice → draft" in
 | The command `Context` holds only sheet, date, chat id and `miniapp_url` (`commands.py:64-70`); `normalizeCatalog` keeps only known keys (`apps/miniapp/src/core.js:425-445`). | code | C7 and C6a change them explicitly (§13). |
 | The bot runs by long polling on the owner's PC (`scripts/start-luan-bot.ps1`): no public HTTPS. | code | The voice service runs on Cloud Run, separate from the bot; deploying it is the owner's action (§5.1). |
 | A transport failure on a sheet call becomes `unavailable` (`sheet_client.py:73`), even when the request may already have run; `Journal` marks a write uncertain only when it is cancelled (`tools.py:185`); `bot.py:309` can then answer "failed, nothing saved" for a write that went in. | code, review R1 | Structured write outcomes (§4.3). |
+| The client follows Apps Script's 302 → GET (`sheet_client.py:58`); the script has already run when the GET fails. | code, review R1a | Any failure after a redirect is `uncertain` (§4.3.1). |
+| The sheet can apply a write and answer `ok: false`: an `action.committed` listener that throws after the commit (`core_log.js:149`) becomes `rejected` or `internal` (`api.js:469-471`), and a failed revert is swallowed during rollback (`core_log.js:245`). | `apps/sheet4`, review R1c | Only a closed list of codes proven pre-write is `not_committed` (§4.3.2); task S1 narrows the rest. |
+| A failed reply makes the update "not completed" whatever was written (`handler.py:271-276`), so a webhook re-delivery runs it again. | code, review R1b | Completion follows the terminal write state (§4.3.4). |
 | The Gemini project spend cap takes about 10 minutes to take effect (https://aistudio.google.com/docs/billing#project-spend-caps). Cloud Run can briefly run more instances than `max-instances` during traffic spikes (https://docs.cloud.google.com/run/docs/configuring/max-instances-limits#handle_traffic_spikes). | provider docs cited in review R3 (not re-read for this revision) | Neither is a hard limit; §5.1 and §5.6 describe the real control and the overshoot window. |
 
 ## 3. Transcription
@@ -100,7 +103,8 @@ class Transcriber:
     async def transcribe(self, audio: Audio, *, principal_key: str, deadline_s: float | None = None) -> Transcript
 ```
 
-- `Audio(mime_type: str, data: bytes)`.
+- `Audio(mime_type: str, data: bytes, trusted_seconds: int | None = None)`; `trusted_seconds` is set
+  only from Telegram's `duration` and sizes the budget reservation (§5.6).
 - Client stack: `RetryingClient(inner=MeteredClient(LiteLLMClient(), budget, principal_key),
   retries=TRANSCRIBE_RETRIES, wait_s=TRANSCRIBE_RETRY_WAIT_S, fallback_model=…,
   fallback_api_key=<resolved>)`. `MeteredClient` reserves and settles the budget around **each
@@ -350,7 +354,7 @@ MainButton `Enviar` and secondary actions `Regravar` and `Cancelar`. `Enviar` se
 | same hash, `done` | `Esse envio já foi registrado. Confira com /hoje.` |
 | same hash, `uncertain` | `Esse envio pode ter sido gravado. Confira com /hoje antes de repetir.` |
 
-After the run, by the run's outcome (§4.3, `Answer.outcome`, added in C4c):
+After the run, by the run's outcome (§4.3, `Answer.outcome`, added in C4c1):
 
 - `committed` → `done`.
 - `uncertain`, or the run was cut by the message deadline → `uncertain`. **Never** removed, never
@@ -373,34 +377,88 @@ When the launch mode changes (§6.10, step 2), the page sends the same object to
 
 ### 4.3 Write outcomes: committed, not committed, uncertain
 
-A write can reach the sheet and its answer can be lost on the way back. Today that case is reported
-as an outage (`unavailable`) and can end as "nothing was saved" (§2). Every confirmation path in
-this spec (§4.1, §4.2) depends on telling these apart, so C4c makes the outcome of every
-**mutating** sheet call explicit. Mutating ops: `diary.upsert`, `workout.upsert`, `food.add`,
-`food.copy`, `measures.upsert`, `write.undo` (one constant, `MUTATING_OPS`, in `sheet_client.py`;
-every other op is a read).
+A write can reach the sheet and its answer can be lost on the way back, or the sheet can apply it
+and still answer `ok: false`. Today both cases are reported as failures and can end as "nothing was
+saved" (§2). Every confirmation path in this spec (§4.1, §4.2) depends on telling these apart, so
+C4c1 makes the outcome of every **mutating** sheet call explicit. Mutating ops: `diary.upsert`,
+`workout.upsert`, `food.add`, `food.copy`, `measures.upsert`, `write.undo` (one constant,
+`MUTATING_OPS`, in `sheet_client.py`; every other op is a read and keeps today's handling).
 
 ```python
 WriteOutcome = Literal["committed", "not_committed", "uncertain"]
 ```
 
-Classification in `SheetClient`, for mutating ops only (reads keep today's `unavailable`):
+**The rule:** `not_committed` only when the failure is **proven** to happen before any write. Every
+other failure is `uncertain`. There is no third way to be "probably not written".
+
+#### 4.3.1 Transport
+
+`SheetClient._post` today posts with `follow_redirects=True` (`sheet_client.py:58`): Apps Script runs
+`doPost` on the POST and answers with a 302 whose GET serves the body. So anything that goes wrong
+**after the POST was answered with a redirect** happened after the script ran. C4c1 keeps
+`follow_redirects=True` and classifies with `response.history` (non-empty = a redirect happened) and
+the failing request of an exception (`err.request`):
 
 | What happened | Outcome | Error code returned |
 | --- | --- | --- |
-| `{"ok": true, …}` | `committed` | — |
-| `{"ok": false, errors}` with validation codes (the sheet validates everything before writing anything) | `not_committed` | the sheet's codes |
-| `{"ok": false}` with `internal` (uncaught exception inside the Web App, possibly mid-write) | `uncertain` | `write_uncertain` |
-| `httpx.ConnectError`, `httpx.ConnectTimeout`, `httpx.PoolTimeout`, `httpx.UnsupportedProtocol`, raised for the **original POST** (`err.request.method == "POST"` and its URL is `SHEET_API_URL`): the request never left | `not_committed` | `unavailable` |
-| any other `httpx.HTTPError` (`ReadTimeout`, `WriteTimeout`, `ReadError`, `WriteError`, `RemoteProtocolError`, …), and **any** error raised for the redirected GET (Apps Script runs the script on the POST and serves the body on a 302 → GET, so a failure there comes after the write) | `uncertain` | `write_uncertain` |
-| HTTP 5xx or 408, a 200 whose body is not JSON or not `{ok, …}` | `uncertain` | `write_uncertain` |
-| HTTP 4xx other than 408 (including 429) | `not_committed` | `unavailable` |
-| the call cancelled after it started (the message deadline) | `uncertain` | (cancellation, as today: `Journal.interrupted`) |
+| A 200 with a JSON `{"ok": …}` body (directly or after redirects) | by the body, §4.3.2 | — |
+| `httpx.ConnectError`, `httpx.ConnectTimeout`, `httpx.PoolTimeout` or `httpx.UnsupportedProtocol` raised for the **original POST** (`err.request.method == "POST"` and `err.request.url == SHEET_API_URL`): no connection, so nothing was sent | `not_committed` | `unavailable` |
+| HTTP 400, 401, 403, 404, 405, 413, 414 or 415 answered to the **original POST, with no redirect** (`response.history` empty, `response.request.method == "POST"`): Google's front end refused the request (malformed, access, unknown deployment, method, size) before `doPost` | `not_committed` | `unavailable` |
+| **Any** non-200 status, non-JSON body or body without `ok`, or exception, **after a redirect** (`response.history` non-empty, or `err.request` is not the original POST), whatever the status: 4xx included | `uncertain` | `write_uncertain` |
+| Any other exception (`ReadTimeout`, `WriteTimeout`, `ReadError`, `WriteError`, `RemoteProtocolError`, …) on the original POST: the request may have left | `uncertain` | `write_uncertain` |
+| HTTP 408, 429, 5xx or any status not listed above on the original POST with no redirect | `uncertain` | `write_uncertain` |
+| A 200 with no redirect whose body is not JSON or not `{ok, …}` | `uncertain` | `write_uncertain` |
+| The call cancelled after it started (the message deadline) | `uncertain` | (cancellation, as today: `Journal.interrupted`) |
 
 The retry without `requestId` after an `unknown_field` rejection (an older sheet deployment) is a
-second request: if it fails after sending, the outcome is `uncertain` as above.
+second request, classified by the same table.
 
-Propagation:
+#### 4.3.2 The sheet's `ok: false` answers
+
+The Web App can apply a write and still answer `ok: false`. Two paths prove it (read in
+`apps/sheet4/src` on this branch's base):
+
+- After the action commits, `ChangeLog.run` emits `action.committed` (`core_log.js:149`); a listener
+  that throws makes `run` throw **after** the data is written, and `SheetApi.error_` turns a plain
+  `Error` into `rejected` (`api.js:469`) or anything else into `internal` (`api.js:471`). `write.undo`
+  does the same after its reverts (`core_log.js:385`).
+- When the action itself throws, `ChangeLog.rollback_` reverts its changes but **swallows** a failed
+  revert (`core_log.js:245`), then rethrows the original error: the answer looks like a refusal while
+  part of the write may remain.
+
+So a code is a proof only if it is never produced after a write began. The closed list, one constant
+`PRE_WRITE_CODES` in `sheet_client.py`, each code with where it is born:
+
+| Code | Born at (all before `ChangeLog.run` or any revert starts) |
+| --- | --- |
+| `invalid_json` | `api.js:137`, body parse in `SheetApi.handle` |
+| `unauthorized` | `api.js:148`, key check in `handle` |
+| `unknown_op` | `api.js:163`, op lookup in `SheetApi.run` |
+| `wrong_type`, `unknown_field`, `empty`, `too_long` | `api.js:140, 151` (envelope) and `validateRequestId_` (`api.js:206-217`), and `ApiValidator` |
+| `required`, `out_of_range`, `invalid_date`, `date_in_future`, `invalid_range`, `not_in_catalog`, `incomplete_food`, `duplicate`, `invalid_unit` | `ApiValidator` (`api_validator.js`) only; returned, never thrown, by `exec` at `api.js:168` |
+| `conflict` | `api.js:177` (request id used by another write; returned before the write) and `core_log.js:376` (undo conflict, thrown before the first revert at `core_log.js:378`) |
+| `nothing_to_undo`, `not_found`, `already_undone`, `not_latest` | `core_log.js:337, 348-350`, thrown by `Undo.last` / `Undo.action` before `Undo.apply_` |
+| `unavailable` (in a JSON body) | `core_log.js:40`: the script lock could not be taken, before `exec` runs (`api.js:197`); nested locks are re-entrant and never throw it |
+
+Rules:
+
+- `ok: false` → `not_committed` only if **every** error's `code` is in `PRE_WRITE_CODES`; otherwise
+  (`rejected`, `internal`, `invalid`, the migration guards, an unknown code, a mix) → `uncertain`,
+  code `write_uncertain`, and the sheet's own errors are not shown to the model as a refusal to fix.
+- `ok: true` (including `deduplicated: true`) → `committed`.
+- Adding a code to `PRE_WRITE_CODES` requires the same proof (a line in `apps/sheet4` that produces
+  it only before a write) and a test in C4c1 that names it.
+- Cost, declared in §12: until task **S1** (below) ships, genuine domain refusals that the sheet
+  rolled back cleanly (`rejected`, `invalid`) are reported as `uncertain`, and the agent will not
+  correct and retry them; the person checks `/hoje`. They are rare (validation catches almost every
+  refusal first), and a false "nothing saved" is the worse error.
+
+**Forward-compatible field (filled only by S1).** If an `ok: false` answer carries
+`"writeState": "none"`, it is `not_committed` whatever its codes; `"writeState": "unknown"` is
+`uncertain`. An answer without the field follows the list above. A sheet deployment without S1
+never sends it, so the bot needs no version check and S1 is **not** a prerequisite of anything here.
+
+#### 4.3.3 Propagation
 
 - `Journal` records each mutating attempt's outcome. `Journal.outcome` is `uncertain` if any
   attempt was `uncertain` or `interrupted`; else `committed` if any write is recorded; else
@@ -412,23 +470,92 @@ Propagation:
 - `Bot.reply` (`bot.py:309` today) returns `SHEET_FAILED` only when the outcome is `not_committed`
   and the sheet was down; with `uncertain` it returns the confirmations of the committed writes plus
   `WRITE_UNCERTAIN`, and `Answer` carries `outcome`. `WRITE_UNCERTAIN` is the existing constant
-  (`bot.py:47`), reworded to cover both causes, the deadline cut and a lost answer:
-  `"⚠ Não sei se a planilha gravou: a resposta não chegou. Confira com /hoje antes de repetir."`
-- **`uncertain` never releases an automatic retry anywhere:** the handler marks the update
-  completed (`Reply.transient = False`, so a Telegram re-delivery is ignored); the Mini App form
-  path shows `WRITE_UNCERTAIN` without the `🔁 Tentar de novo` button and keeps nothing in
-  `PendingStore`; `VoiceConfirmations` and `TextSubmissions` keep their `uncertain` state; undo
-  answers `Não sei se desfez; confira com /hoje.` and keeps no retry. The person decides after
-  checking. (A form resent unchanged from the page keeps its old request id, so the sheet
-  deduplicates it; that is the person's choice, not an automatic retry.)
+  (`bot.py:47`), reworded to cover every cause: `"⚠ Não sei se a planilha gravou: a resposta não
+  chegou. Confira com /hoje antes de repetir."`
+- The Mini App form path (`miniapp.handle` / `miniapp.retry`) and undo (`undo.undo_writes`) carry
+  the outcome too: `uncertain` → `WRITE_UNCERTAIN` (undo: `Não sei se desfez; confira com /hoje.`),
+  no `🔁 Tentar de novo` button, nothing kept in `PendingStore`. (A form resent unchanged from the
+  page keeps its old request id, so the sheet deduplicates it; that is the person's choice.)
+- `Reply` gains `write_outcome: WriteOutcome | None` (None = the update attempted no write), set by
+  every path above.
 
-Test that defines the contract (C4c), "written, answer lost": a fake transport that **applies** the
-write to an in-memory sheet and then raises `httpx.ReadTimeout`. Expected: outcome `uncertain`;
-reply `WRITE_UNCERTAIN`, not `SHEET_FAILED`; update marked completed; exactly one POST observed (no
-retry by the client, the tool, the handler or a store); for the same scenario through §4.1, the
-`vid` ends `uncertain`; through §4.2, re-sending the same payload answers "pode ter sido gravado"
-and does not run. Companion tests: the same failure on the redirected GET → `uncertain`; a
-`ConnectError` on the POST → `not_committed`, `SHEET_FAILED`, retry allowed.
+#### 4.3.4 A terminal write state survives a failed reply (re-delivery)
+
+Today `_process_update` returns "not completed" when sending the reply fails, whatever happened
+before (`handler.py:271-276`), and the deduplicator then releases the `update_id`; a Telegram
+re-delivery of that update (the webhook retries when it gets no answer in time) runs the write
+again. The same holds for button taps (`_callback` returns what `_button` returned). C4c2 changes
+the completion rule, for messages and callbacks alike:
+
+- **The update is completed once its write state is terminal**: `write_outcome` is `committed` or
+  `uncertain`, or the update was cut by the hard time limit (as today). This is decided **before**
+  the reply is sent, and a failure to send the reply, answer the callback or edit the keyboard does
+  not change it. The failure is logged (§10.2) and the person, who got no reply, checks `/hoje`.
+- `not_committed` with `transient=True` (the sheet was down before any write, a download failed)
+  keeps today's behaviour: the update is released so a re-delivery can do the work.
+- Updates with no write (`write_outcome is None`) keep today's rule (`not reply.transient` and the
+  send succeeded).
+- Callbacks: `vok` relies on `VoiceConfirmations` (§4.1), which already makes a second run
+  impossible; the form `🔁 Tentar de novo` (`retry:<id>`) and `↩️ Desfazer` (`undo:…`) return
+  "completed" whenever their write ended `committed` or `uncertain`, even if the reply or the
+  callback answer then fails. `PendingStore` drops the entry of a retry that ended `uncertain`.
+- What this does not cover, declared: the deduplicator lives in memory, so a re-delivery that
+  arrives after a bot restart is not recognised (polling never re-delivers: `poll.py` advances the
+  offset before handling; this matters for the webhook only). `VoiceConfirmations` and
+  `TextSubmissions` have the same limit, and the sheet's request-id deduplication catches a re-run
+  only when the args are identical.
+
+#### 4.3.5 Tests that define the contract
+
+C4c1 (outcomes), each against a fake transport that **applies** the write to an in-memory sheet
+before failing:
+
+- "written, answer lost": the POST is applied, then `httpx.ReadTimeout` → `uncertain`;
+  `WRITE_UNCERTAIN`, not `SHEET_FAILED`; exactly one POST.
+- **redirect**: the POST is applied and answered 302; the GET answers **403** → `uncertain`; the same
+  with GET 404, GET 500, GET 200 with an HTML body, and a `ConnectError` raised for the GET.
+- **post-write rejection**: the POST is applied and the body is `{"ok": false, "errors": [{"code":
+  "rejected"}]}` → `uncertain`; the same with `internal`, `invalid`, an unknown code, and a mix of
+  `not_in_catalog` with `rejected`.
+- every code of `PRE_WRITE_CODES` alone → `not_committed`; a `writeState: "none"` answer with
+  `rejected` → `not_committed`; `writeState: "unknown"` with `not_in_catalog` → `uncertain`.
+- `ConnectError` on the original POST → `not_committed`; POST answered 403 with no redirect →
+  `not_committed`; POST answered 429 or 503 with no redirect → `uncertain`.
+- the same scenarios through the form path and undo give their `uncertain` replies with no retry.
+
+C4c2 (re-delivery), each delivering the **same update twice** to one `Handler`:
+
+- an agent write `committed`, then `send_message` fails → second delivery: the bot is not called and
+  the sheet sees no second write;
+- the same with the write `uncertain`;
+- `not_committed` and transient (sheet down before the write), then the send fails → the second
+  delivery runs again (allowed);
+- `vok` → agent run `uncertain` → the reply and `answer_callback_query` both fail → the same
+  callback update again, and a new callback update with the same `vok:<vid>` → no second run;
+- `retry:<id>` on a form → write `uncertain`, reply fails → delivered again → no second write;
+- `undo:…` → `uncertain`, reply fails → delivered again → no second undo.
+
+#### 4.3.6 Task S1 (Apps Script, separate and optional)
+
+Not required by any task here; it only narrows what is reported as `uncertain`. Its own branch, PR
+and deploy (the owner's action), in `apps/sheet4`:
+
+1. `ChangeLog.run` and `Undo.apply_` catch an exception thrown by an `action.committed` listener
+   (`core_log.js:149, 385`): log it with `console.error`, and let the API answer `ok: true` with
+   `result.warnings: ["derived_refresh_failed"]` (the derived tabs, Semanas and Painel, can be
+   refreshed by hand). A listener failure stops looking like a refusal.
+2. `ChangeLog.rollback_` stops swallowing a failed revert (`core_log.js:245`): if any revert fails it
+   throws an error with code `rollback_failed` (mapped by `SheetApi.error_`), after trying the rest.
+3. Every `ok: false` answer gets `writeState`: `"none"` when it was returned before `ChangeLog.run`
+   (or `Undo.apply_`'s first revert) started, or when the action threw and **every** revert succeeded;
+   `"unknown"` otherwise (`rollback_failed`, `internal` outside an action, anything after a commit).
+4. Tests in `apps/sheet4/test` (`api.test.js`, `core_log.test.js`): a throwing listener gives
+   `ok: true` with the warning and the data written; a failed revert gives `rollback_failed` and
+   `writeState: "unknown"`; a clean domain refusal gives `rejected` with `writeState: "none"`; every
+   `PRE_WRITE_CODES` answer has `writeState: "none"`.
+
+With S1 deployed, clean refusals (`rejected`, `invalid`) become `not_committed` again through
+`writeState`, and the agent can correct and retry them. Model: Sonnet.
 
 ## 5. Voice service
 
@@ -472,14 +599,33 @@ Owner deploy checklist (C5c's README carries it; none of it is a hard guarantee,
 | Layer | Acts | Overshoot |
 | --- | --- | --- |
 | Per-principal rate limits and concurrency gate (§5.6) | per request, per instance | none within one warm instance; multiplied by the number of instances actually running |
-| In-process token budgets (§5.6) | per attempt, per instance | one attempt's (actual − `E`) per request; reset at every cold start; multiplied by the instances running |
+| In-process token budgets (§5.6) | per attempt, per instance | none above the budget, since each attempt reserves the most it can cost (`E`); reset at every cold start; multiplied by the instances running |
 | Project spend cap | at the provider | whatever is spent in the ~10 minutes after the cap is reached |
 
-With the defaults, one principal at the rate limit spends at most about 6 × 3 880 ≈ 23 k tokens a
-minute per instance (more only if a crafted file exceeds `E`), so the cap's 10-minute window adds
-roughly 230 k tokens per abusive principal per instance on top of the cap. These are approximate
-limits: the spec makes no claim of a hard ceiling or of a single instance. Both are declared risks
-(§12). A shared store (database step) turns the in-process layer into a global one; the provider
+**Spend estimate** with the defaults (tokens; "warm period" = from a cold start until the instance
+is stopped; Cloud Run resets the counters at each cold start):
+
+- Attempts per request: with a fallback model, `2 × (1 + TRANSCRIBE_RETRIES)` = **4** at most
+  (`RetryingClient` tries each model `retries + 1` times, `llm.py:93-111`; a timeout skips to the next
+  model); without a fallback, 2. The 45 s deadline usually stops earlier (15 s per attempt), but
+  attempts that fail fast (5xx) can all happen inside it.
+- One request: honest 90 s upload ≤ 4 × 16 400 ≈ 66 k counted (normally one attempt, settled at its
+  actual ≈ 3 600); a crafted 1.5 MB body ≤ 4 × 65 000 = 260 k counted, and never more than what the
+  provider can bill for it.
+- One principal, one instance, one warm period: **≤ 120 k** counted (`VOICE_DAILY_TOKENS`), since
+  every attempt must first reserve its `E` within what is left. The provider bill for those attempts
+  is ≤ the counted amount. The rate limit (6 per minute, 60 per day) and the concurrency gate (4)
+  only shape how fast the 120 k can go: in about 2 minutes with crafted bodies.
+- One instance, all principals, one warm period: **≤ 500 k** counted (`VOICE_GLOBAL_DAILY_TOKENS`).
+- Real exposure = 500 k × (instances actually running, which can briefly exceed `max-instances`) ×
+  (cold starts during the abuse; an instance under steady traffic stays warm), plus nothing beyond
+  that from this service while counters hold. The project spend cap is the outer bound; in its
+  ~10-minute delay, spending is still bounded by the in-process budgets above, not by the cap.
+- The chat path (bot process) has its own 120 k per principal and 500 k per process, with `E` from
+  Telegram's trusted duration (≤ about 4 000 per attempt for a 90 s note).
+
+These are approximate limits: the spec makes no claim of a hard ceiling or of a single instance.
+Both are declared risks (§12). A shared store (database step) turns the in-process layer into a global one; the provider
 cap's delay remains.
 
 ### 5.2 Routes
@@ -617,11 +763,18 @@ class Reservation(Protocol):
     def release(self) -> None                # the attempt cost nothing
 ```
 
-- Before **every attempt** (primary, each retry, the fallback), `MeteredClient` reserves
-  `E = 32 × VOICE_MAX_SECONDS + TRANSCRIBE_PROMPT_TOKENS + max_tokens` (3 880 by default) against
-  both the principal's and the process's budget, atomically under one lock. Refused before the
-  first attempt → `budget_exhausted`; refused before a later attempt → stop there with
-  `budget_exhausted` (earlier attempts stay charged).
+- **Reservation per attempt, sized by what the audio can hold.** The duration bound comes from
+  the bytes, because a client can lie about the duration (§3.5):
+  `seconds_bound = duration` when it is trusted (Telegram's `voice.duration` / `audio.duration` on
+  the chat path), else `ceil(len(body) × 8 / VOICE_MIN_BITRATE_BPS)` with `VOICE_MIN_BITRATE_BPS =
+  6000` (the lowest Opus rate; AAC and MP3 go lower than that only in theory, Speex is not an
+  accepted format). Then `E = 32 × seconds_bound + TRANSCRIBE_PROMPT_TOKENS + max_tokens`. Examples:
+  a 20 s Telegram note → about 1 600; a 90 s page upload of 360 KB → about 16 400; a 1.5 MB body →
+  about 65 000.
+- Before **every attempt** (primary, each retry, the fallback), `MeteredClient` reserves `E` against
+  both the principal's and the process's budget, atomically under one lock. Refused before the first
+  attempt → `budget_exhausted`; refused before a later attempt → stop there with `budget_exhausted`
+  (earlier attempts stay charged).
 - After the attempt:
   - response with usage → `settle(prompt_tokens + completion_tokens)` (this can exceed `E` for a
     long file; the excess is charged);
@@ -629,16 +782,18 @@ class Reservation(Protocol):
   - provider error answered **before processing** (HTTP 400, 401, 403, 404, 413, 415, 429) →
     `release()`;
   - anything else (timeout, connection lost after sending, 5xx, cancelled by the deadline) →
-    `settle(E)`: paid, unknown, counted in full.
+    `settle(E)`: paid, unknown, counted at the most the audio could have cost. Because `E` bounds
+    the real bill of one attempt, the counted total is never below what the provider can charge
+    (for accepted formats at ≥ 6 kbps).
 - Fallback attempts follow the same rules; nothing is free because a fallback answered.
 - A reservation belongs to the day it was made.
 
 **This is an approximate limit, and the spec calls it that.** It is kept in process memory, so:
 each instance has its own, and Cloud Run may briefly run more than `max-instances`; a cold start
 resets it (Cloud Run scales to zero after idle, so the daily figure is really "per warm period");
-and one attempt can overshoot by its actual cost minus `E`. It limits bursts and accidents, not
-money. The spend cap of §5.1 limits money, with its ~10-minute delay; §5.1 gives the overshoot
-window of each layer. The database step backs `Budget` with shared storage.
+and the bound of each attempt assumes an accepted format at ≥ 6 kbps. Within one instance and one
+warm period it does bound what the provider can bill; across extra instances and cold starts only
+the spend cap of §5.1 bounds money, with its ~10-minute delay. §5.1 gives the estimate. The database step backs `Budget` with shared storage.
 
 The bot process uses the same `Budget` for chat voice notes (principal `telegram:<chat_id>`), with
 the same defaults.
@@ -1117,13 +1272,13 @@ without the sheet) and §13 C5c's non-Telegram acceptance test.
 On **iOS Telegram**, **Android Telegram** and **Telegram Desktop**, with a test bot and test sheet.
 Note device, OS version, Telegram version and result.
 
-Chat (after C4c and C4d):
+Chat (after C4c1, C4c2 and C4d):
 1. Voice note of ~15 s with a meal → `🎙️ Entendi:` with the right text, as a reply to the note.
 2. `✅ Confirmar` → confirmation from the sheet with ✅/↩️/✏️. Tap ✅ twice quickly on another note →
    one entry.
 3. With the same account open on two devices, tap `✖️ Cancelar` on one and, before it refreshes,
    `✅ Confirmar` on the other → `Você cancelou este áudio.`, nothing written. (The concurrent and
-   late-tap cases are covered by C4c's automated tests; this checks the real client.)
+   late-tap cases are covered by C4c2's automated tests; this checks the real client.)
 4. `✏️ Corrigir`, reply with a corrected text → one entry with the corrected values; then ✅ on the
    original → `Substituído pela correção.`
 5. Restart the bot between `Entendi` and ✅ → `Expirou…`, nothing written.
@@ -1158,7 +1313,7 @@ Mini App (after C5–C7, C6a–C6b and the owner's deploy):
     with A's old keyboard after its code expired → `Envie /app para renovar a voz` (B's session is
     never used for A).
 
-Bot write outcome (after C4c):
+Bot write outcome (after C4c1 and C4c2):
 24. With the test sheet's Web App URL pointing at a slow proxy or with the network cut **right after**
     sending a voice-confirmed or typed entry (e.g. airplane mode a second after ✅): the reply is
     `⚠ Não sei se a planilha gravou…`, no retry happens by itself, and `/hoje` shows whether it went
@@ -1178,6 +1333,9 @@ Privacy:
 | A model "transcribes" silence or loops. | `<vazio>` sentinel, minimum length, 2000-character cap, confirmation. |
 | A confirmation runs twice or after a cancel. | Atomic `pending`-only transitions with identity, TTL and fail-closed restart (§4.1); text verified by hash. |
 | A write applied by the sheet whose answer is lost is reported as "nothing saved" and retried. | Structured outcomes; `uncertain` never releases an automatic retry anywhere; the person checks `/hoje` (§4.3). **Declared residual:** an `uncertain` write may or may not be in the sheet until the person checks. |
+| A write applied by the sheet and answered `ok: false` (listener after commit, swallowed revert). | Only `PRE_WRITE_CODES` count as `not_committed`; everything else is `uncertain` (§4.3.2). **Declared cost until S1:** clean domain refusals (`rejected`, `invalid`) are also `uncertain`, so the agent does not correct and retry them. |
+| A webhook re-delivery after a failed reply re-runs a write. | Completion follows the terminal write state (§4.3.4). **Declared residual:** after a bot restart the in-memory deduplicator forgets the update. |
+| A crafted audio below 6 kbps (a codec the page never produces) makes an attempt cost more than its reservation `E`. **Declared.** | Accepted formats only (§3.2); the spend cap remains the outer bound (§5.1). |
 | Cloud Run runs more than one voice instance during a spike. **Declared.** | Per-process limits multiply and single-use sets split for that period (§5.1, §6.8 T4); the spend cap still applies, late. |
 | The Gemini project spend cap acts about 10 minutes after it is reached. **Declared.** | Budget alert below the cap; in-process limits bound the rate during the window (§5.1). |
 | A stored session used for the wrong account on a shared device. | Session bound to the account's opaque ref; mismatch deletes it (§7.2). |
@@ -1201,19 +1359,22 @@ repository); no push or deploy without the owner; existing suites stay green (`u
 | --- | --- | --- | --- |
 | C4a | Safe exception logging | — | Sonnet |
 | C4b | Transcription module, budget, settings | C4a | Sonnet |
-| C4c | Write outcomes (§4.3) and the chat confirmation lifecycle (§4.1) | C4a | **Fable 5.2, effort low** |
-| C4d | Chat voice wiring and the C1 gaps | C4b, C4c, C1 `59bf0f5` | Sonnet |
+| C4c1 | Structured write outcomes and their classification (§4.3.1–4.3.3) | C4a | **Fable 5.2, effort low** |
+| C4c2 | Confirmation lifecycle (§4.1), re-delivery and callbacks (§4.3.4) | C4c1 | **Fable 5.2, effort low** |
+| C4d | Chat voice wiring and the C1 gaps | C4b, C4c2, C1 `59bf0f5` | Sonnet |
 | C5a | Sign-in providers, sessions, directory (pure) | C4a | **Fable 5.2, effort low** |
 | C5b | Rate limits, concurrency, idempotency (pure) | C4b | Sonnet |
 | C5c | Voice service ASGI integration | C4b, C5a, C5b | Sonnet |
-| C7 | Bot glue for Mini App voice | C5a, C4c | Sonnet |
+| C7 | Bot glue for Mini App voice | C5a, C4c2 | Sonnet |
 | C6a | Mini App voice core: session, state, recording logic (pure) | contracts only | Sonnet |
 | C6b | Mini App recorder, DOM and MainButton | C6a | Sonnet |
+| S1 | Apps Script: listener failures after commit, rollback failures, `writeState` (§4.3.6); optional, not a prerequisite | — | Sonnet |
 | C8 | Device validation | see C8 | owner, manual |
 
-C4c and C5a run on Fable because a mistake there costs most: a duplicated or falsely denied write,
-or a forgeable credential. Order: C4a first; then C4b and C4c in parallel; C4d; C5a after C4a, C5b
-after C4b, C5c after both; C7 after C5a and C4c; C6a any time against the contracts, C6b after it;
+C4c1, C4c2 and C5a run on Fable because a mistake there costs most: a duplicated or falsely denied
+write, or a forgeable credential. Order: C4a first; then C4b and C4c1 in parallel; C4c2 after C4c1;
+C4d after C4b and C4c2; C5a after C4a, C5b after C4b, C5c after both; C7 after C5a and C4c2; C6a any
+time against the contracts, C6b after it; S1 any time, independently (its deploy is the owner's);
 C8 last.
 
 ### C4a — Safe exception logging (Python)
@@ -1235,7 +1396,8 @@ C8 last.
   `audio_format`, `TRANSCRIBE_PROMPT`, `TRANSCRIBE_PROMPT_TOKENS`, `implied_audio_tokens(usage) ->
   int | None`, `MeteredClient`, `Transcriber`, `build_transcriber`); new `agent/budget.py`
   (`Budget`, `Reservation`, `MemoryBudget`); `agent/settings.py` (`TranscribeSettings` mixin and its
-  checks, in `Settings`; `VOICE_DAILY_TOKENS`, `VOICE_GLOBAL_DAILY_TOKENS`); `settings.yaml`
+  checks, in `Settings`; `VOICE_DAILY_TOKENS`, `VOICE_GLOBAL_DAILY_TOKENS`, `VOICE_MIN_BITRATE_BPS`);
+  `settings.yaml`
   (defaults, no secrets); tests `tests/test_transcribe.py`, `tests/test_budget.py`,
   `tests/test_settings.py`.
 - **Closed cases (each one a test):**
@@ -1248,8 +1410,9 @@ C8 last.
     `completion_tokens` → `usage=None` (same); usage without `audio_tokens` → `Usage(…,
     audio_tokens=None)`; `implied_audio_tokens` returns `None` for `usage=None` and never a negative
     number;
-  - settlement: a 400/401/403/404/413/415/429 releases; timeout, 5xx and connection loss settle
-    `E`; budget refused before the first attempt and before the fallback; day rollover in
+  - settlement: `E` from `trusted_seconds` when given, else from the body size at
+    `VOICE_MIN_BITRATE_BPS` (the three examples of §5.6); a 400/401/403/404/413/415/429 releases;
+    timeout, 5xx and connection loss settle `E`; budget refused before the first attempt and before the fallback; day rollover in
     `TIMEZONE`; concurrent reservations never exceed the limit.
 - **Other tests:** every MIME of §3.2; prompt, `temperature=0`, `max_tokens`, `input_audio`;
   `<vazio>`, `[inaudível]`-only, >2000 characters; transient → retry → fallback with its own key and
@@ -1257,36 +1420,46 @@ C8 last.
 - **Do not:** touch the handler or the chat; add audio parsing or transcoding; change
   `RetryingClient` for the agent.
 
-### C4c — Write outcomes and the chat confirmation lifecycle (Python)
+### C4c1 — Structured write outcomes and their classification (Python)
 
-- **Goal:** §4.3 in every mutating path, and §4.1's store and taps. This task owns the outcome
-  contract that C4d, C7 and later routes rely on.
-- **Files:** `agent/sheet_client.py` (`MUTATING_OPS`, the classification table of §4.3, including
-  the redirected-GET rule); `agent/tools.py` (`Journal` outcomes; `write_uncertain` outside
-  `OUTAGE_CODES`); `agent/bot.py` (`Answer.outcome`, `WRITE_UNCERTAIN`, the `bot.py:309` rule,
-  prompt rule 9); `agent/handler.py` (`transient=False` for `uncertain`; the `vok`/`vfix`/`vno` taps
-  with early callback answers); `agent/miniapp.py` (form path: `uncertain` → no retry button, nothing
-  in `PendingStore`); `agent/undo.py` (uncertain undo message, no retry); new
-  `agent/voice_confirm.py` (`VoiceConfirmations`, states, `claim`); `agent/buttons.py` (voice
-  keyboard with `vid`, `ENTENDI_HEADER`, `transcript_from`, fix prompt); tests
-  `tests/test_write_outcome.py` (new), `tests/test_voice_confirm.py` (new), updates to
-  `test_sheet_client.py`, `test_tools.py`, `test_bot.py`, `test_handler.py`, `test_miniapp.py`,
-  `test_undo.py`, `test_buttons.py`.
-- **Done when:** every row of §4.3's classification table and every cell of §4.1's response table
-  has a test; the "written, answer lost" test of §4.3 passes in all three shapes (agent run, §4.1
-  tap, form payload); reads keep `unavailable` exactly as today.
-- **Tests (in addition to the tables):** confirm vs cancel and confirm vs fix run **concurrently**
-  (two tasks, one store): one wins, the other gets the table's answer, the agent runs at most once;
-  double confirm → one run; a new store (restart) → unknown `vid` → expired, no agent call;
-  eviction (capacity 2 in the test) → expired; TTL with a fake clock; hash mismatch and inaccessible
-  message → expired; tap from another chat → refused; a confirmed run ending `uncertain` leaves the
-  `vid` `uncertain` and a later ✅ answers `Já enviado…`. Taps are tested by creating store entries
-  directly; creating them from a voice note is C4d.
-- **Do not:** wire audio or the transcriber (C4d); store transcripts; persist state to disk; add a
-  same-request-id reconciliation for `uncertain` (§15); change the form payloads.
-- **If it is too large,** split at the seam: write outcomes first (`sheet_client`, `tools`, `bot`,
-  `handler` transient, `miniapp`, `undo`), then the confirmation store and taps. Both halves stay on
-  Fable.
+- **Goal:** §4.3.1–4.3.3 in every mutating path. This task owns the outcome contract that C4c2, C4d,
+  C7 and later routes rely on.
+- **Files:** `agent/sheet_client.py` (`MUTATING_OPS`, `PRE_WRITE_CODES`, the transport table of
+  §4.3.1 using `response.history` and `err.request`, the body rules of §4.3.2 including
+  `writeState`); `agent/tools.py` (`Journal` outcomes; `write_uncertain` outside `OUTAGE_CODES`);
+  `agent/bot.py` (`Answer.outcome`, reworded `WRITE_UNCERTAIN`, the `bot.py:309` rule, prompt rule 9);
+  `agent/commands.py` (`Reply.write_outcome`); `agent/miniapp.py` (form path and `retry`: outcome on
+  the `Reply`, `uncertain` → no retry button, nothing in `PendingStore`); `agent/undo.py` (uncertain
+  undo message, no retry); tests `tests/test_write_outcome.py` (new), updates to
+  `test_sheet_client.py`, `test_tools.py`, `test_bot.py`, `test_miniapp.py`, `test_undo.py`.
+- **Done when:** every row of §4.3.1, every code of `PRE_WRITE_CODES` and every C4c1 bullet of §4.3.5
+  has a test; reads keep `unavailable` exactly as today; the fake transport for the redirect tests
+  serves a real 302 → GET through `httpx.MockTransport`, so `follow_redirects=True` is exercised.
+- **Do not:** touch the handler's completion rule or the button handling (C4c2); add a code to
+  `PRE_WRITE_CODES` without the proof of §4.3.2; change `apps/sheet4` (that is S1); add a
+  same-request-id reconciliation for `uncertain` (§15).
+
+### C4c2 — Confirmation lifecycle, re-delivery and callbacks (Python)
+
+- **Goal:** §4.1's store and taps, and §4.3.4's completion rule for messages and callbacks.
+- **Files:** `agent/handler.py` (`_process_update` and `_callback` decide completion from
+  `Reply.write_outcome` before sending, per §4.3.4; the `vok`/`vfix`/`vno` taps with early callback
+  answers; `retry:` and `undo:` taps report completion from their outcome); new
+  `agent/voice_confirm.py` (`VoiceConfirmations`, states, `claim`); `agent/buttons.py` (voice keyboard
+  with `vid`, `ENTENDI_HEADER`, `transcript_from`, fix prompt); `agent/miniapp.py` (`PendingStore`
+  drops an entry whose retry ended `uncertain`); tests `tests/test_voice_confirm.py` (new),
+  `tests/test_redelivery.py` (new), updates to `test_handler.py`, `test_buttons.py`.
+- **Done when:** every cell of §4.1's response table and every C4c2 bullet of §4.3.5 has a test;
+  sending, answering or editing failures never make a `committed` or `uncertain` update run again.
+- **Tests (in addition):** confirm vs cancel and confirm vs fix run **concurrently** (two tasks, one
+  store): one wins, the other gets the table's answer, the agent runs at most once; double confirm →
+  one run; a new store (restart) → unknown `vid` → expired, no agent call; eviction (capacity 2 in the
+  test) → expired; TTL with a fake clock; hash mismatch and inaccessible message → expired; tap from
+  another chat → refused; a confirmed run ending `uncertain` leaves the `vid` `uncertain` and a later
+  ✅ answers `Já enviado…`. Taps are tested by creating store entries directly; creating them from a
+  voice note is C4d.
+- **Do not:** change the outcome classification (C4c1); wire audio or the transcriber (C4d); store
+  transcripts; persist state to disk.
 
 ### C4d — Chat voice wiring and the C1 gaps (Python)
 
@@ -1300,7 +1473,7 @@ C8 last.
 - **Done when:** audio never reaches `Bot.reply`; photos unchanged; the duration check happens
   before `getFile`; each `TranscribeError` code maps to its §8 message; the caption and the
   transcript appear together and hash as shown; §10.3 sentinel tests extended to the voice path.
-- **Do not:** change the confirmation store or the tap handling (C4c); change the photo path.
+- **Do not:** change the confirmation store or the tap handling (C4c2); change the photo path.
 
 ### C5a — Sign-in providers, sessions and directory (Python, pure)
 
@@ -1386,7 +1559,7 @@ C8 last.
 ### C7 — Bot glue for Mini App voice (Python)
 
 - **Goal:** `/app` links carry `vu`/`vc`/`vx`; the bot accepts `t:"text"` with §4.2's idempotency,
-  using C4c's `Answer.outcome`.
+  using C4c1's `Answer.outcome` and C4c2's completion rule.
 - **Files:** `agent/commands.py` (`Context` gains `voice: VoiceLink | None`, where
   `VoiceLink(api_url: str, codes: LinkCodes)`; `/app` issues one code for `ctx.chat_id` and passes
   the keys to `keyboard_markup`); `agent/miniapp.py` (`keyboard_markup(…, voice_keys: dict | None)`,
@@ -1400,8 +1573,9 @@ C8 last.
   a test, including **the same payload in two different updates** (one agent run), **the same id
   with a different text** (conflict, no run), and **"written, answer lost"** (outcome `uncertain` →
   entry kept, a resend answers "pode ter sido gravado", no second run); `not_committed` removes the
-  entry and a resend runs; form payloads unchanged.
-- **Do not:** change the outcome classification (C4c); change the form payloads or the launch mode;
+  entry and a resend runs; the same `t:"text"` update delivered twice after its reply failed runs the
+  agent once (§4.3.4); form payloads unchanged.
+- **Do not:** change the outcome classification (C4c1); change the form payloads or the launch mode;
   store the text.
 
 ### C6a — Mini App voice core (JS, pure)
@@ -1438,7 +1612,7 @@ C8 last.
 
 ### C8 — Device validation (owner, manual)
 
-§11.2: items 1–10 and 24 after C4c–C4d; 11–23 after C5–C7, C6a–C6b and the owner's deploy; 25 last.
+§11.2: items 1–10 and 24 after C4c1–C4d; 11–23 after C5–C7, C6a–C6b and the owner's deploy; 25 last.
 Its results decide whether the `m4a` relabel stays and close the "not verified" rows of §2.
 
 ## 14. Decisions
@@ -1482,6 +1656,16 @@ Its results decide whether the `m4a` relabel stays and close the "not verified" 
 - Photo path changes; voice replies from the bot.
 
 ## 16. Review log
+
+### 16.0 Third review (Codex, `e6e2d09`): R1a–R1d
+
+| # | Finding | Resolved in |
+| --- | --- | --- |
+| R1a | A 4xx on the redirected GET was `not_committed` (blocking) | §4.3.1 (redirects tracked with `response.history` and `err.request`; any failure after a redirect is `uncertain`; `not_committed` only for no connection or a listed 4xx on the original POST with no redirect); §2; tests in §4.3.5 (POST applied, GET 403/404/500/HTML/`ConnectError`); C4c1 |
+| R1b | A failed reply released the update, and a re-delivery re-ran the write (blocking) | §4.3.4 (completion decided from the terminal write state before sending, for messages and callbacks; `retry:`/`undo:`/`vok`); §2; §12; re-delivery tests in §4.3.5; C4c2; C7 done-when |
+| R1c | Sheet errors other than `internal` can follow a write | §4.3.2 (closed `PRE_WRITE_CODES`, each with the line in `apps/sheet4` where it is born; every other code `uncertain`; forward-compatible `writeState`); §4.3.6 (task S1, separate and optional); §2; §12; C4c1 |
+| R1d | Spend estimate ignored retries and the real reservation | §5.6 (reservation `E` sized from trusted duration or body size at 6 kbps; settlement never below the possible bill); §5.1 (estimate with 4 attempts per request, deadlines and remaining budgets); §12; C4b tests |
+| Split | C4c too large | §13: C4c1 (outcomes and classification) and C4c2 (confirmation lifecycle, re-delivery, callbacks), both Fable 5.2 low; S1 added |
 
 ### 16.1 Second review (Codex, `4e4252f`): R1–R9
 

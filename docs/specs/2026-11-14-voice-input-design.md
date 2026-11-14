@@ -1,7 +1,7 @@
 # Voice input — design
 
-Date: 2026-11-14 · Status: revision 4, after the Codex reviews of `041ed06`, `4e4252f` and
-`e6e2d09`; owner decisions taken (§14) · Branch: `claude/voz-spec`
+Date: 2026-11-14 · Status: revision 5, after the Codex reviews of `041ed06`, `4e4252f`,
+`e6e2d09` and `45e18ce`; owner decisions taken (§14) · Branch: `claude/voz-spec`
 
 Voice becomes a **primary input** of the product: on the Telegram chat and in the Mini App now,
 and later on the client PWA and the native app, through the same HTTP API. This spec decides the
@@ -454,8 +454,11 @@ Rules:
   refusal first), and a false "nothing saved" is the worse error.
 
 **Forward-compatible field (filled only by S1).** If an `ok: false` answer carries
-`"writeState": "none"`, it is `not_committed` whatever its codes; `"writeState": "unknown"` is
-`uncertain`. An answer without the field follows the list above. A sheet deployment without S1
+`"writeState": "none"`, it is `not_committed` whatever its codes, because S1 sends `none` only with
+proof that nothing remains written: no change tracked, or every change re-read equal to its `before`
+(§4.3.6 items 2–3). `"writeState": "unknown"` is `uncertain` whatever its codes, even a code of
+`PRE_WRITE_CODES`; any other value is `uncertain`. An answer without the field follows the list
+above. A sheet deployment without S1
 never sends it, so the bot needs no version check and S1 is **not** a prerequisite of anything here.
 
 #### 4.3.3 Propagation
@@ -544,15 +547,40 @@ and deploy (the owner's action), in `apps/sheet4`:
    (`core_log.js:149, 385`): log it with `console.error`, and let the API answer `ok: true` with
    `result.warnings: ["derived_refresh_failed"]` (the derived tabs, Semanas and Painel, can be
    refreshed by hand). A listener failure stops looking like a refusal.
-2. `ChangeLog.rollback_` stops swallowing a failed revert (`core_log.js:245`): if any revert fails it
-   throws an error with code `rollback_failed` (mapped by `SheetApi.error_`), after trying the rest.
-3. Every `ok: false` answer gets `writeState`: `"none"` when it was returned before `ChangeLog.run`
-   (or `Undo.apply_`'s first revert) started, or when the action threw and **every** revert succeeded;
-   `"unknown"` otherwise (`rollback_failed`, `internal` outside an action, anything after a commit).
-4. Tests in `apps/sheet4/test` (`api.test.js`, `core_log.test.js`): a throwing listener gives
-   `ok: true` with the warning and the data written; a failed revert gives `rollback_failed` and
-   `writeState: "unknown"`; a clean domain refusal gives `rejected` with `writeState: "none"`; every
-   `PRE_WRITE_CODES` answer has `writeState: "none"`.
+2. **Rollback proves restoration instead of assuming it.** Today a change can be half applied and
+   then skipped without any exception: `Tabs.update` tracks the change and then writes its cells one
+   by one (`core_tabs.js:470-471`), so a failure on the second cell leaves the first one written;
+   `Undo.applied_` then sees a conflict with `after` and answers false (`core_log.js:444-445`), and
+   `rollback_` skips the whole change (`core_log.js:245`). S1 changes `rollback_` so that, for every
+   tracked change, newest first:
+   - it restores **every cell that differs from `before`** (not only changes that look fully
+     applied), for each change kind (`update`, `append`, `delete`, `cells`);
+   - it then **re-reads** the change's cells (or row) and checks that they equal `before` exactly
+     (`Undo.restored_(change)`, new);
+   - a change counts as restored only through that check. A revert that throws, a re-read that
+     differs, a change kind without a `restored_` check, or a change skipped for any reason is **not**
+     proven.
+   If any change is not proven, `rollback_` throws `rollback_failed` (mapped by `SheetApi.error_`)
+   after trying all the others.
+3. Every `ok: false` answer gets `writeState`:
+   - `"none"` only when no change was tracked at all (the answer was returned before `ChangeLog.run`
+     started, or before `Undo.apply_`'s first revert), or when the action threw and **every** tracked
+     change was proven restored by item 2;
+   - `"unknown"` in every other case: `rollback_failed`, a partial, skipped or unverified change,
+     `internal` outside an action, anything after a commit.
+4. Tests in `apps/sheet4/test` (`api.test.js`, `core_log.test.js`), all required:
+   - a throwing listener gives `ok: true` with the warning and the data written;
+   - **partial update, restored**: `Tabs.update` writes the first cell and the second `setValue`
+     throws → rollback restores the first cell and the re-read equals `before` →
+     `writeState: "none"`, row unchanged;
+   - **partial update, not proven**: the same, but the restoring write or the re-read fails, or the
+     re-read differs → `rollback_failed`, `writeState: "unknown"`;
+   - **skipped change**: a change that today's `applied_` would skip, with a cell still different
+     from `before` after the rollback → `writeState: "unknown"`, never `"none"`;
+   - a failed revert gives `rollback_failed` and `writeState: "unknown"`;
+   - a clean domain refusal (every change proven restored) gives `rejected` with
+     `writeState: "none"`;
+   - every `PRE_WRITE_CODES` answer has `writeState: "none"`.
 
 With S1 deployed, clean refusals (`rejected`, `invalid`) become `not_committed` again through
 `writeState`, and the agent can correct and retry them. Model: Sonnet.
@@ -599,11 +627,14 @@ Owner deploy checklist (C5c's README carries it; none of it is a hard guarantee,
 | Layer | Acts | Overshoot |
 | --- | --- | --- |
 | Per-principal rate limits and concurrency gate (§5.6) | per request, per instance | none within one warm instance; multiplied by the number of instances actually running |
-| In-process token budgets (§5.6) | per attempt, per instance | none above the budget, since each attempt reserves the most it can cost (`E`); reset at every cold start; multiplied by the instances running |
+| In-process token budgets (§5.6) | per attempt, per instance, per day | none above the budget within one counter life, since each attempt reserves the most it can cost (`E`); renewed at every midnight and every cold start; multiplied by the instances running |
 | Project spend cap | at the provider | whatever is spent in the ~10 minutes after the cap is reached |
 
-**Spend estimate** with the defaults (tokens; "warm period" = from a cold start until the instance
-is stopped; Cloud Run resets the counters at each cold start):
+**Spend estimate** with the defaults. The budgets are **per day (in `TIMEZONE`) and per
+instance**: each process keeps its own counters, which start from zero at every cold start **and**
+at every midnight (a reservation belongs to the day it was made, §5.6). An instance that stays up
+across midnight therefore gets a fresh 120 k / 500 k without restarting. "Counter life" below = from
+a cold start or a midnight to the next of either.
 
 - Attempts per request: with a fallback model, `2 × (1 + TRANSCRIBE_RETRIES)` = **4** at most
   (`RetryingClient` tries each model `retries + 1` times, `llm.py:93-111`; a timeout skips to the next
@@ -612,17 +643,25 @@ is stopped; Cloud Run resets the counters at each cold start):
 - One request: honest 90 s upload ≤ 4 × 16 400 ≈ 66 k counted (normally one attempt, settled at its
   actual ≈ 3 600); a crafted 1.5 MB body ≤ 4 × 65 000 = 260 k counted, and never more than what the
   provider can bill for it.
-- One principal, one instance, one warm period: **≤ 120 k** counted (`VOICE_DAILY_TOKENS`), since
-  every attempt must first reserve its `E` within what is left. The provider bill for those attempts
+- One principal, one instance, one counter life: **≤ 120 k** counted (`VOICE_DAILY_TOKENS`), since
+  every attempt must first reserve its `E` within what is left; the provider bill for those attempts
   is ≤ the counted amount. The rate limit (6 per minute, 60 per day) and the concurrency gate (4)
-  only shape how fast the 120 k can go: in about 2 minutes with crafted bodies.
-- One instance, all principals, one warm period: **≤ 500 k** counted (`VOICE_GLOBAL_DAILY_TOKENS`).
-- Real exposure = 500 k × (instances actually running, which can briefly exceed `max-instances`) ×
-  (cold starts during the abuse; an instance under steady traffic stays warm), plus nothing beyond
-  that from this service while counters hold. The project spend cap is the outer bound; in its
-  ~10-minute delay, spending is still bounded by the in-process budgets above, not by the cap.
-- The chat path (bot process) has its own 120 k per principal and 500 k per process, with `E` from
-  Telegram's trusted duration (≤ about 4 000 per attempt for a 90 s note).
+  only shape how fast it can go: about 2 minutes with crafted bodies.
+- One instance, all principals, one counter life: **≤ 500 k** (`VOICE_GLOBAL_DAILY_TOKENS`).
+- Per day, adding the renewals:
+
+      exposure(day) ≤ 500 k × Σ over instances that ran that day (1 + cold starts of that instance that day)
+
+  and for one principal the same with 120 k. Instances can briefly exceed `max-instances` (§2). An
+  abuse sustained on one warm instance costs about 500 k for the day; each extra instance and each
+  cold start adds up to 500 k more.
+- The spend cap's ~10-minute delay: within that window spending is bounded by the counters alive
+  then. A window that **crosses midnight** covers two days, so each instance can spend what is left
+  of the old day plus a whole new day: up to **2 × 500 k per instance** (2 × 120 k per principal), plus
+  500 k for any instance that cold-starts or appears inside the window.
+- The chat path (bot process) has its own 120 k per principal and 500 k per process per day, with `E`
+  from Telegram's trusted duration (≤ about 4 000 per attempt for a 90 s note); the same midnight and
+  restart renewals apply.
 
 These are approximate limits: the spec makes no claim of a hard ceiling or of a single instance.
 Both are declared risks (§12). A shared store (database step) turns the in-process layer into a global one; the provider
@@ -790,10 +829,11 @@ class Reservation(Protocol):
 
 **This is an approximate limit, and the spec calls it that.** It is kept in process memory, so:
 each instance has its own, and Cloud Run may briefly run more than `max-instances`; a cold start
-resets it (Cloud Run scales to zero after idle, so the daily figure is really "per warm period");
-and the bound of each attempt assumes an accepted format at ≥ 6 kbps. Within one instance and one
-warm period it does bound what the provider can bill; across extra instances and cold starts only
-the spend cap of §5.1 bounds money, with its ~10-minute delay. §5.1 gives the estimate. The database step backs `Budget` with shared storage.
+resets it, and so does midnight in `TIMEZONE`, so each limit holds per day, per instance and per
+counter life (§5.1); and the bound of each attempt assumes an accepted format at ≥ 6 kbps. Within
+one counter life it does bound what the provider can bill; across extra instances, cold starts and
+midnights only the spend cap of §5.1 bounds money, with its ~10-minute delay. §5.1 gives the
+estimate, including a window that crosses midnight. The database step backs `Budget` with shared storage.
 
 The bot process uses the same `Budget` for chat voice notes (principal `telegram:<chat_id>`), with
 the same defaults.
@@ -1342,7 +1382,7 @@ Privacy:
 | The same Mini App text runs twice. | `TextSubmissions` keyed by principal, type and id, with text hash and `running`/`uncertain` states (§4.2). Residual after a restart, equal to today's. |
 | Content in logs through exceptions or libraries. | `describe`, no tracebacks on content paths, `ContentGuard` for library records, sentinel tests (§10). |
 | Leaked code or session. | §6.8. |
-| Cost runaway. **Declared:** no layer is a hard ceiling. In-process limits are per instance and reset at cold start; Cloud Run may briefly exceed `max-instances`; the project spend cap acts about 10 minutes late. | Layers and overshoot windows in §5.1; budget alert (owner deploy item 3); shared store at the database step. |
+| Cost runaway. **Declared:** no layer is a hard ceiling. In-process limits are per day and per instance and renew at every midnight and every cold start; Cloud Run may briefly exceed `max-instances`; the project spend cap acts about 10 minutes late (a window crossing midnight allows up to 2 × the budget per instance). | Layers, exposure formula and overshoot windows in §5.1; budget alert (owner deploy item 3); shared store at the database step. |
 | In-memory state is per process and reset by restarts. | Fail closed where it authorizes (confirmations); stated as approximate where it limits (budgets); the database step backs the same interfaces. |
 | The service is not deployed. | Chat voice works without it; the page hides the button without `vu`. Deploy is the owner's action. |
 | `localStorage` unavailable in some WebView. | Session kept in memory for that open; the next open needs a fresh code (`/app`). Checklist 11. |
@@ -1657,7 +1697,7 @@ Its results decide whether the `m4a` relabel stays and close the "not verified" 
 
 ## 16. Review log
 
-### 16.0 Third review (Codex, `e6e2d09`): R1a–R1d
+### 16.0 Third and fourth reviews (Codex, `e6e2d09` and `45e18ce`): R1a–R1f
 
 | # | Finding | Resolved in |
 | --- | --- | --- |
@@ -1665,6 +1705,8 @@ Its results decide whether the `m4a` relabel stays and close the "not verified" 
 | R1b | A failed reply released the update, and a re-delivery re-ran the write (blocking) | §4.3.4 (completion decided from the terminal write state before sending, for messages and callbacks; `retry:`/`undo:`/`vok`); §2; §12; re-delivery tests in §4.3.5; C4c2; C7 done-when |
 | R1c | Sheet errors other than `internal` can follow a write | §4.3.2 (closed `PRE_WRITE_CODES`, each with the line in `apps/sheet4` where it is born; every other code `uncertain`; forward-compatible `writeState`); §4.3.6 (task S1, separate and optional); §2; §12; C4c1 |
 | R1d | Spend estimate ignored retries and the real reservation | §5.6 (reservation `E` sized from trusted duration or body size at 6 kbps; settlement never below the possible bill); §5.1 (estimate with 4 attempts per request, deadlines and remaining budgets); §12; C4b tests |
+| R1e | S1 could answer `writeState: "none"` after a partial write that rollback skipped | §4.3.6 items 2–4 (restore every cell that differs from `before`, re-read and prove each change; anything partial, skipped or unverified is `unknown`; required tests for partial-restored, partial-not-proven and skipped); §4.3.2 (`none` defined as proof; `unknown` overrides even pre-write codes) |
+| R1f | Daily budgets treated as limits per active period | §5.1 (limits per day and per instance; a counter life ends at midnight and at a cold start; exposure formula with daily renewals and cold starts; a 10-minute window crossing midnight allows up to 2 × budget per instance); §5.6; layers table |
 | Split | C4c too large | §13: C4c1 (outcomes and classification) and C4c2 (confirmation lifecycle, re-delivery, callbacks), both Fable 5.2 low; S1 added |
 
 ### 16.1 Second review (Codex, `4e4252f`): R1–R9

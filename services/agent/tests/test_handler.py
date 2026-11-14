@@ -17,7 +17,7 @@ from agent.commands import Reply, help_text
 from agent.handler import CUT, DOWNLOAD_FAILED, FAILURE, Handler, UpdateDeduplicator, media_ref, too_large
 from agent.undo import ALREADY, SHEET_DOWN
 
-from .fakes import FakeSheet
+from .fakes import FakeSheet, FakeTelegram, file, media_update
 
 pytestmark = pytest.mark.unit
 
@@ -42,55 +42,6 @@ class FakeBot:
         if self._error:
             raise self._error
         return self._reply
-
-
-class FakeTelegram:
-    def __init__(
-        self, error=None, action_error=None, events=None, edit_error=None, files=None, download_error=None
-    ):
-        self.sent = []
-        self.actions = []
-        self.options = []
-        self.answered = []
-        self.edited = []
-        self.fetched = []
-        self._files = files or {}  # file_id -> (File object, bytes)
-        self._download_error = download_error
-        self._error = error
-        self._action_error = action_error
-        self._edit_error = edit_error
-        self._events = events if events is not None else []
-
-    async def send_message(self, chat_id, text, *, html=False, reply_markup=None, reply_to=None):
-        if self._error:
-            raise self._error
-        self.sent.append((chat_id, text))
-        self.options.append({"html": html, "reply_markup": reply_markup, "reply_to": reply_to})
-        return {"message_id": len(self.sent), "chat": {"id": chat_id}, "text": text}
-
-    async def send_chat_action(self, chat_id, action="typing"):
-        self.actions.append((chat_id, action))
-        self._events.append(action)
-        if self._action_error:
-            raise self._action_error
-
-    async def answer_callback_query(self, callback_query_id, text=None):
-        self.answered.append((callback_query_id, text))
-
-    async def edit_message_reply_markup(self, chat_id, message_id, reply_markup=None):
-        if self._edit_error:
-            raise self._edit_error
-        self.edited.append((chat_id, message_id, reply_markup))
-
-    async def get_file(self, file_id):
-        self.fetched.append(("getFile", file_id))
-        return self._files[file_id][0]
-
-    async def download_file(self, file_path):
-        self.fetched.append(("download", file_path))
-        if self._download_error:
-            raise self._download_error
-        return next(data for info, data in self._files.values() if info["file_path"] == file_path)
 
 
 def update(text="peso 82", chat_id=42, update_id=1):
@@ -559,15 +510,6 @@ PHOTO_SIZES = [
     {"file_id": "p-medium", "width": 600, "height": 800, "file_size": 60_000},
     {"file_id": "p-large", "width": 1200, "height": 1600, "file_size": 300_000},
 ]
-
-
-def media_update(chat_id=42, **fields):
-    return {"update_id": 2, "message": {"chat": {"id": chat_id}, **fields}}
-
-
-def file(file_id, data, path=None):
-    info = {"file_id": file_id, "file_size": len(data), "file_path": path or f"files/{file_id}"}
-    return {file_id: (info, data)}
 
 
 async def test_a_voice_message_is_downloaded_and_goes_to_the_bot_as_ogg_audio():

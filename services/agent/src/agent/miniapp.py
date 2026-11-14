@@ -49,6 +49,7 @@ from pydantic import (
 
 from agent import buttons
 from agent.commands import Reply
+from agent.logs import describe
 from agent.sheet_client import request_id_scope
 from agent.summary import confirmation
 from agent.tools import OUTAGE_CODES
@@ -569,8 +570,8 @@ def reply_for(op: str, response: dict[str, Any]) -> Reply:
     result = response.get("result") or {}
     try:
         text = "\n".join(confirmation([(op, result)]))
-    except (KeyError, TypeError, ValueError):
-        log.exception("could not build the confirmation of %s", op)
+    except (KeyError, TypeError, ValueError) as error:
+        log.warning("could not build the confirmation of %s: %s", op, describe(error))
         return Reply("✅ A planilha aceitou, mas não consegui montar o resumo. Confira com /hoje.")
     write_id = result.get("writeId")
     markup = buttons.keyboard([write_id]) if write_id else None

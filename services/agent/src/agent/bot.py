@@ -21,6 +21,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from agent.format import escape
+from agent.logs import describe, safe_code
 from agent.summary import confirmation
 from agent.tools import Journal, SheetApi, build_tools
 
@@ -285,7 +286,9 @@ class Bot:
                     if event.is_final_response() and event.content and event.content.parts:
                         final = "".join(p.text or "" for p in event.content.parts if not p.thought)
         except TimeoutError:
-            log.warning("message deadline (%ss) reached for message %r", self._deadline_s, text)
+            log.warning(
+                "message deadline (%ss) reached for a message of %d characters", self._deadline_s, len(text)
+            )
             if journal.interrupted:
                 # A write was cancelled after it left: the sheet may have applied it.
                 note = WRITE_UNCERTAIN
@@ -293,21 +296,21 @@ class Bot:
                 note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
             model_failed = True
         except LlmCallsLimitExceededError:
-            log.warning("LLM call budget exhausted for message %r", text)
+            log.warning("LLM call budget exhausted for a message of %d characters", len(text))
             note = "Parei no limite de tentativas; o que não aparece acima não foi gravado."
         except Exception as err:
             if err not in model_errors:
                 raise
             if media and media_rejected(err):
-                log.exception("model rejected the media of message %r", text)
+                log.warning("model rejected the media of a message: %s", describe(err))
                 note = MEDIA_UNREADABLE
             else:
-                log.exception("model call failed for message %r", text)
+                log.warning("model call failed: %s", describe(err))
                 note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
                 model_failed = True
         # An interrupted write may have reached the sheet: "try again" would risk a duplicate.
         if journal.sheet_failed and not journal.writes and not journal.interrupted:
-            log.warning("sheet unavailable for message %r: %s", text, journal.error_codes)
+            log.warning("sheet unavailable: %s", ", ".join(safe_code(c) for c in journal.error_codes))
             return Answer(SHEET_FAILED, failed=True)
         return Answer(
             compose(confirmation(journal.writes), final, note),

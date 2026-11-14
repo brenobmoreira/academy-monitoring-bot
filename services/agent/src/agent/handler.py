@@ -19,6 +19,7 @@ from agent.bot import MEDIA_UNREADABLE, MESSAGE_DEADLINE_AT, Answer, Bot, Media
 from agent.commands import COMMANDS, CommandSheet, Context, Reply, parse_command
 from agent.format import escape, split
 from agent.llm import build_model
+from agent.logs import describe
 from agent.settings import Settings
 from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient
@@ -235,13 +236,13 @@ class Handler:
             try:
                 await self._telegram.answer_callback_query(str(query.get("id", "")), CUT)
             except Exception as error:
-                log.warning("could not answer callback query %s: %s", query.get("id"), error)
+                log.warning("could not answer callback query %s: %s", query.get("id"), describe(error))
 
         async def tell(chat_id: int) -> None:
             try:
                 await self._send(chat_id, Reply(CUT))
             except Exception as error:
-                log.warning("could not tell chat %s the update was cut: %s", chat_id, error)
+                log.warning("could not tell chat %s the update was cut: %s", chat_id, describe(error))
 
         notices = [answer(query)] if query else []
         if chat_id in self._allowed:
@@ -270,8 +271,8 @@ class Handler:
                 reply = await self._run_bot(text, message, update_id)
         try:
             await self._send(chat_id, reply)
-        except Exception:
-            log.exception("could not send the reply to chat %s", chat_id)
+        except Exception as error:
+            log.warning("could not send the reply to chat %s: %s", chat_id, describe(error))
             return False
         return not reply.transient
 
@@ -289,8 +290,8 @@ class Handler:
                 self._clock().date(),
                 self._pending,
             )
-        except Exception:
-            log.exception("mini app data failed on update %s", update_id)
+        except Exception as error:
+            log.warning("mini app data failed on update %s: %s", update_id, describe(error))
             return Reply(FAILURE, failed=True, transient=True)
 
     async def _run_bot(
@@ -312,8 +313,8 @@ class Handler:
             return Reply(
                 answer.text, html=True, reply_markup=markup, failed=answer.failed, transient=answer.failed
             )
-        except Exception:
-            log.exception("bot failed on update %s", update_id)
+        except Exception as error:
+            log.warning("bot failed on update %s: %s", update_id, describe(error))
             return Reply(FAILURE, failed=True, transient=True)
         finally:
             typing.cancel()
@@ -338,8 +339,8 @@ class Handler:
                 data = await self._download(ref)
         except TooLarge:
             return Reply(too_large(self._media_max_bytes))
-        except Exception:
-            log.exception("could not download the file of update %s", update_id)
+        except Exception as error:
+            log.warning("could not download the file of update %s: %s", update_id, describe(error))
             return Reply(DOWNLOAD_FAILED, failed=True, transient=True)
         return await self._run_bot(caption, message, update_id, media=[Media(ref.mime_type, data)])
 
@@ -425,7 +426,7 @@ class Handler:
         try:
             await self._telegram.edit_message_reply_markup(chat_id, message_id)
         except Exception as error:
-            log.warning("could not remove the buttons of message %s: %s", message_id, error)
+            log.warning("could not remove the buttons of message %s: %s", message_id, describe(error))
 
     async def _keep_typing(self, chat_id: int) -> None:
         """Shows "typing…" until cancelled. Cosmetic: the first failure stops it, the reply is unaffected."""
@@ -433,7 +434,7 @@ class Handler:
             try:
                 await self._telegram.send_chat_action(chat_id)
             except Exception as error:
-                log.warning("could not send the typing action to chat %s: %s", chat_id, error)
+                log.warning("could not send the typing action to chat %s: %s", chat_id, describe(error))
                 return
             await asyncio.sleep(self._typing_every)
 

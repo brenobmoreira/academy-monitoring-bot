@@ -1,6 +1,9 @@
+import logging
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+import functions_framework
+import httpx
 import pytest
 from flask import Request
 from pydantic import SecretStr
@@ -282,3 +285,77 @@ def test_the_functions_entry_still_sends_other_paths_to_telegram(delivered, monk
     assert main.telegram_webhook(Request(environ)) == ("ok", 200)
     assert seen == [{"update_id": 1}]
     assert delivered[0] == []
+
+
+# ---- a reminder that cannot be prepared ------------------------------------------------------
+
+
+def sheet_answering(monkeypatch, body):
+    """The real SheetClient and TelegramClient over a transport: the sheet answers `body`, and
+    every request to Telegram is recorded."""
+    to_telegram: list[httpx.Request] = []
+
+    def answer(request):
+        if request.url.host == "x":
+            return httpx.Response(200, json=body)
+        to_telegram.append(request)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    monkeypatch.setattr(webhook, "get_settings", lambda: SETTINGS)
+    monkeypatch.setattr(
+        reminder, "http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    )
+    return to_telegram
+
+
+def flask_call(token, body):
+    """Through the Flask app Functions Framework serves, whose logger prints an unhandled error."""
+    app = functions_framework.create_app("telegram_webhook", "main.py")
+    response = app.test_client().post("/remind", headers={reminder.TOKEN_HEADER: token}, json=body)
+    return response.get_data(as_text=True), response.status_code
+
+
+def starlette_call(token, body):
+    client = TestClient(asgi.app, raise_server_exceptions=False)
+    response = client.post("/remind", headers={reminder.TOKEN_HEADER: token}, json=body)
+    return response.text, response.status_code
+
+
+@pytest.mark.parametrize("call", [flask_call, starlette_call])
+@pytest.mark.parametrize(
+    ("kind", "result"),
+    [
+        ("weekly", {"start": TEXT_SENTINEL, "end": "2026-09-27"}),
+        ("daily", {"diary": [TEXT_SENTINEL]}),
+    ],
+)
+def test_a_reminder_that_cannot_be_prepared_is_a_500_without_content_in_any_log(
+    call, kind, result, monkeypatch, caplog, capsys
+):
+    """An `ok` answer the summary cannot read: the error it raises repeats the answer."""
+    to_telegram = sheet_answering(monkeypatch, {"ok": True, "result": result})
+    caplog.set_level(logging.DEBUG)  # the root logger: Flask's, werkzeug's and the agent's records
+    assert call("rem", {"kind": kind}) == (reminder.FAILED, 500)
+    assert to_telegram == []
+    captured = capsys.readouterr()
+    for record in caplog.records:
+        assert record.exc_info is None and record.exc_text is None, record.name
+        assert TEXT_SENTINEL not in record.getMessage() and TEXT_SENTINEL not in repr(record.args)
+    for output in (caplog.text, captured.err, captured.out):
+        assert TEXT_SENTINEL not in output and "Traceback" not in output
+    prepared = [r.getMessage() for r in caplog.records if r.name == "agent.reminder"]
+    assert len(prepared) == 1 and prepared[0].startswith(f"{kind} reminder not prepared: ")
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records if r.name != "agent.reminder")
+
+
+async def test_a_delivery_that_fails_outside_the_preparation_is_a_500_logged_by_its_class(
+    monkeypatch, caplog
+):
+    async def failing_deliver(settings, kind, clock=None):
+        raise RuntimeError(f"could not start: {TEXT_SENTINEL}")
+
+    monkeypatch.setattr(webhook, "get_settings", lambda: SETTINGS)
+    monkeypatch.setattr(reminder, "deliver", failing_deliver)
+    assert await reminder.process("rem", {"kind": "daily"}) == (reminder.FAILED, 500)
+    assert [r.getMessage() for r in caplog.records] == ["daily reminder failed: RuntimeError"]
+    assert TEXT_SENTINEL not in caplog.text and caplog.records[0].exc_info is None

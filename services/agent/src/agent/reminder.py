@@ -39,6 +39,7 @@ TOKEN_HEADER = "X-Reminder-Token"
 PATH = "/remind"
 KINDS = ("daily", "weekly")
 BAD_BODY = 'body must be {"kind": "daily" | "weekly"}'
+FAILED = "reminder failed"
 
 # Diary field → (word in the reminder, example of how to send it), in the order they are listed.
 DAILY_FIELDS = {
@@ -58,6 +59,12 @@ class Sender(Protocol):
         reply_markup: dict[str, Any] | None = None,
         reply_to: int | None = None,
     ) -> dict[str, Any]: ...
+
+
+class ReminderFailed(RuntimeError):
+    """The reminder could not be prepared or delivered for a reason other than the sheet being
+    down; already logged through logs.describe(). It carries nothing of what failed: the server
+    that would log an escaping exception prints its message and traceback."""
 
 
 class SheetDown(RuntimeError):
@@ -106,12 +113,19 @@ async def weekly(sheet: CommandSheet, today: date) -> Reply:
 async def remind(
     kind: str, sheet: CommandSheet, telegram: Sender, chat_ids: Iterable[int], today: date
 ) -> tuple[int, int]:
-    """(chats reached, chats tried). A chat that fails is logged and the others still get it."""
+    """(chats reached, chats tried). A chat that fails is logged and the others still get it.
+    Raises ReminderFailed, sending nothing, when the reminder cannot be prepared for a reason
+    other than the sheet being down (an answer the summary cannot read, a bug)."""
     try:
         reply = await (daily(sheet, today) if kind == "daily" else weekly(sheet, today))
     except SheetDown as err:
         log.warning("%s reminder skipped, sheet failed: %s", kind, describe(err))
         return 0, 0
+    except Exception as error:
+        # The error can repeat what the sheet holds; left alone it becomes a 500 whose traceback
+        # the HTTP server logs.
+        log.error("%s reminder not prepared: %s", kind, describe(error))
+        raise ReminderFailed from None
     if reply is None:
         return 0, 0
     chunks = split(reply.text if reply.html else escape(reply.text))
@@ -156,7 +170,9 @@ def is_authorized(settings: Settings, given: str | None) -> bool:
 
 async def process(token: str | None, body: Any) -> tuple[str, int]:
     """Returns (text, status): 404 without REMINDER_TOKEN, 403 for a wrong token, 400 for a bad
-    body, 502 when there was something to send and no chat got it, otherwise 200."""
+    body, 502 when there was something to send and no chat got it, 500 ("reminder failed") when
+    it could not be prepared or delivered at all, otherwise 200. Never raises: the server would
+    log the exception with its message and traceback."""
     settings = webhook.get_settings()
     if settings.REMINDER_TOKEN is None:
         return "not found", 404
@@ -165,7 +181,13 @@ async def process(token: str | None, body: Any) -> tuple[str, int]:
     kind = body.get("kind") if isinstance(body, dict) else None
     if kind not in KINDS:
         return BAD_BODY, 400
-    sent, tried = await deliver(settings, kind)
+    try:
+        sent, tried = await deliver(settings, kind)
+    except ReminderFailed:
+        return FAILED, 500
+    except Exception as error:
+        log.error("%s reminder failed: %s", kind, describe(error))
+        return FAILED, 500
     if tried == 0:
         return "nothing to send", 200
     status = 502 if sent == 0 else 200

@@ -627,7 +627,7 @@ async def test_without_a_per_call_deadline_the_setting_is_the_limit():
     hang = HangClient()
     t, _, budget = make(client=hang, settings=cfg(TRANSCRIBE_DEADLINE_S=0.05, TRANSCRIBE_TIMEOUT_S=0.05))
     started = time.monotonic()
-    err = await error_of(t, ogg(2048, trusted=10), deadline_s=None)
+    err = await asyncio.wait_for(error_of(t, ogg(2048, trusted=10), deadline_s=None), 5)
     assert time.monotonic() - started < 2
     assert (err.code, err.transient) == ("timeout", True)
     assert budget.used() == budget.reserved[0]  # the cancelled attempt is paid, unknown: E
@@ -647,7 +647,7 @@ async def test_a_larger_per_call_deadline_does_not_extend_the_setting():
     hang = HangClient()
     t, _, _ = make(client=hang, settings=cfg(TRANSCRIBE_DEADLINE_S=0.05, TRANSCRIBE_TIMEOUT_S=0.05))
     started = time.monotonic()
-    err = await error_of(t, deadline_s=500)
+    err = await asyncio.wait_for(error_of(t, deadline_s=500), 5)
     assert time.monotonic() - started < 2
     assert err.code == "timeout"
 

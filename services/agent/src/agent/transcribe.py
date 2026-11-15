@@ -63,10 +63,11 @@ Regras:
 6. Se não houver fala nenhuma, responda exatamente: <vazio>
 7. Responda só com a transcrição, sem aspas, sem comentários e sem formatação.
 """
-# Text tokens of TRANSCRIBE_PROMPT as the provider counts them: an estimate (about 3.5 characters a
-# token in Portuguese, rounded up), not a measurement against the provider. It only has to be a
-# bound for the reservation and a baseline for implied_audio_tokens().
-TRANSCRIBE_PROMPT_TOKENS = math.ceil(len(TRANSCRIBE_PROMPT) / 3.5)
+# Text tokens of TRANSCRIBE_PROMPT: 454, counted with LiteLLM's token_counter for the configured
+# Gemini model (a generic tokenizer, offline; the provider's own `usage` for a real call is the check
+# to make before the first deploy). It bounds the reservation and is the baseline of
+# implied_audio_tokens(): too high only makes both more lenient.
+TRANSCRIBE_PROMPT_TOKENS = 454
 
 NO_SPEECH_MARK = "<vazio>"
 UNINTELLIGIBLE = "[inaudível]"

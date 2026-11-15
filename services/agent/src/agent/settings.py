@@ -150,10 +150,12 @@ class TranscribeSettings(BaseModel):
             getattr(self, "MEDIA_ENABLED", True)
             and _provider(self.TRANSCRIBE_MODEL) == "gemini"
             and self.transcribe_api_key() is None
+            and not _sdk_gemini_key_in_environment()
         ):
             raise ValueError(
-                "TRANSCRIBE_API_KEY is required for a gemini transcription model "
-                "(or MEDIA_ENABLED=false; LLM_API_KEY is reused only when LLM_MODEL is also gemini)"
+                "TRANSCRIBE_API_KEY is required for a gemini transcription model (or MEDIA_ENABLED=false, "
+                "or GEMINI_API_KEY in the environment; LLM_API_KEY is reused only when LLM_MODEL "
+                "is also gemini)"
             )
         fallback = self.TRANSCRIBE_FALLBACK_MODEL
         if fallback:
@@ -341,6 +343,11 @@ PROVIDER_KEY_VARIABLES = (
 
 
 TRANSCRIBE_PROVIDERS = frozenset({"gemini", "vertex_ai"})
+
+
+def _sdk_gemini_key_in_environment() -> bool:
+    """LiteLLM reads these on its own when no key is passed, so the call needs no explicit one."""
+    return any((os.environ.get(name) or "").strip() for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"))
 
 
 def _provider(model: str) -> str:

@@ -618,3 +618,18 @@ async def test_a_failing_sheet_call_logs_the_operation_and_the_http_status_only(
         "sheet call day.get answered HTTP 200 without the API envelope",
     ]
     assert_clean([r for r in caplog.records if r.name.startswith("agent")], "\n".join(lines))
+
+
+def test_describe_prints_the_transcription_error_codes():
+    from agent.transcribe import TranscribeError
+
+    for code in (
+        "unsupported_format",
+        "too_long",
+        "no_speech",
+        "failed",
+        "timeout",
+        "budget_exhausted",
+        "disabled",
+    ):
+        assert logs.describe(TranscribeError(code)).endswith(f"[code={code}]"), code

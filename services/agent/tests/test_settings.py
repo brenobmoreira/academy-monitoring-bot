@@ -23,6 +23,8 @@ ALL_KEYS = [
     "TIMEZONE",
     "MEDIA_ENABLED",
     "MEDIA_MAX_BYTES",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
     "TRANSCRIBE_MODEL",
     "TRANSCRIBE_API_KEY",
     "TRANSCRIBE_API_BASE",
@@ -400,5 +402,21 @@ def test_a_short_or_blank_transcription_key_is_refused(env, monkeypatch):
     with pytest.raises(ConfigError, match="TRANSCRIBE_API_KEY"):
         Settings.load()
     monkeypatch.setenv("TRANSCRIBE_API_KEY", "  ")
+    with pytest.raises(ConfigError, match="TRANSCRIBE_API_KEY"):
+        Settings.load()
+
+
+@pytest.mark.parametrize("variable", ["GEMINI_API_KEY", "GOOGLE_API_KEY"])
+def test_a_key_the_sdk_reads_from_the_environment_satisfies_a_gemini_model(env, monkeypatch, variable):
+    monkeypatch.delenv("TRANSCRIBE_API_KEY")
+    monkeypatch.setenv(variable, "sdk-env-key-1234")
+    s = Settings.load()
+    # Nothing is passed explicitly: LiteLLM finds the variable on its own.
+    assert s.transcribe_api_key() is None
+
+
+def test_a_blank_sdk_variable_does_not_count_as_a_key(env, monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_API_KEY")
+    monkeypatch.setenv("GEMINI_API_KEY", "  ")
     with pytest.raises(ConfigError, match="TRANSCRIBE_API_KEY"):
         Settings.load()

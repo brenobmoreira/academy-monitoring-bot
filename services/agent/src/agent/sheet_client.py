@@ -71,7 +71,8 @@ class SheetClient:
         try:
             response = await self._http.post(self._url, json=payload, follow_redirects=True, timeout=30.0)
         except httpx.HTTPError as err:
-            return _unavailable(f"falha de rede ao chamar a planilha: {err!r}")
+            # Only the exception type: its text can echo what was sent, and the payload holds the key.
+            return _unavailable(f"falha de rede ao chamar a planilha ({type(err).__name__})")
         if response.status_code != 200:
             return _unavailable(f"planilha respondeu HTTP {response.status_code}")
         try:

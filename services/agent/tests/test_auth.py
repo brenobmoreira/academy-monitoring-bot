@@ -1088,6 +1088,9 @@ def test_a_sign_in_outside_telegram_plugs_into_the_same_sessions(world):
     principal = sessions.verify(grant.session, "voice", NOW)
     assert principal == auth.Principal("test", "u1", None, frozenset({"voice"}))
     assert grant.expires_at == T0 + 600
+    with pytest.raises(auth.AuthError) as err:  # the scope is checked by Sessions, whatever the authorizer
+        sessions.verify(grant.session, "write", NOW)
+    assert err.value.code == "forbidden"
     assert session_error(world, grant.session) == "forbidden"  # the Telegram directory does not know it
     with pytest.raises(auth.BadRequest):
         sign_in.handle(body(v=1, kind="tg_link", credential=world.code()), NOW)

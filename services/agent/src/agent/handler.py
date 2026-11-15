@@ -312,7 +312,12 @@ class Handler:
                     answer = await self._bot.reply(text, user_id=str(chat_id), context=context)
             markup = buttons.keyboard(answer.write_ids) if answer.wrote else None
             return Reply(
-                answer.text, html=True, reply_markup=markup, failed=answer.failed, transient=answer.failed
+                answer.text,
+                html=True,
+                reply_markup=markup,
+                failed=answer.failed,
+                transient=answer.failed,
+                write_outcome=answer.outcome,
             )
         except Exception as error:
             log.warning("bot failed on update %s: %s", update_id, describe(error))

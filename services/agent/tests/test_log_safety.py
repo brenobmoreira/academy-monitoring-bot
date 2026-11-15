@@ -21,7 +21,14 @@ import pytest
 from google.adk.models import LlmRequest, LlmResponse
 
 from agent import buttons, logs, miniapp
-from agent.bot import MEDIA_UNREADABLE, MODEL_FAILED_NOTHING_WRITTEN, SHEET_FAILED, Bot, Media
+from agent.bot import (
+    MEDIA_UNREADABLE,
+    MODEL_FAILED_NOTHING_WRITTEN,
+    SHEET_FAILED,
+    WRITE_UNCERTAIN,
+    Bot,
+    Media,
+)
 from agent.handler import DOWNLOAD_FAILED, FAILURE, Handler
 from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient, TelegramError
@@ -394,15 +401,31 @@ async def test_a_sheet_outage_logs_only_listed_error_codes(captured):
         "ok": False,
         "errors": [{"code": "unavailable", "message": TEXT_SENTINEL}, {"code": TEXT_SENTINEL}],
     }
-    sheet = FakeSheet(diary_upsert=[down])
-    script = [
-        call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
-        say("A planilha não respondeu."),
-    ]
+    sheet = FakeSheet(catalog=[down])
+    script = [call("get_catalog"), say("A planilha não respondeu.")]
     answer = await bot(sheet, script).reply(TEXT_SENTINEL)
     assert answer.text == SHEET_FAILED
     assert_clean(caplog.records, stream.getvalue())
     assert "sheet unavailable: unavailable, other" in caplog.text
+
+
+async def test_an_uncertain_write_logs_only_listed_error_codes(captured):
+    caplog, stream = captured
+    # A code outside the closed pre-write list, mixed with a listed one: the write may have landed.
+    mixed = {
+        "ok": False,
+        "errors": [{"code": "unavailable", "message": TEXT_SENTINEL}, {"code": TEXT_SENTINEL}],
+        "writeState": TEXT_SENTINEL,
+    }
+    sheet = FakeSheet(diary_upsert=[mixed])
+    script = [
+        call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+        say("Pode ter gravado."),
+    ]
+    answer = await bot(sheet, script).reply(TEXT_SENTINEL)
+    assert WRITE_UNCERTAIN in answer.text and answer.outcome == "uncertain"
+    assert_clean(caplog.records, stream.getvalue())
+    assert "write outcome uncertain: write_uncertain" in caplog.text
 
 
 async def test_the_handler_logs_a_failing_bot_without_content(captured):

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from agent import miniapp
+from agent.bot import WRITE_UNCERTAIN
 from agent.commands import COMMANDS, Context, Reply
 from agent.handler import Handler
 from agent.miniapp import (
@@ -332,11 +333,30 @@ async def test_sheet_refusal_lists_errors_and_suggestions():
     assert not reply.transient and reply.reply_markup is None
 
 
-@pytest.mark.parametrize("code", ["unavailable", "internal"])
-async def test_outage_codes_are_transient(code):
-    down = {"ok": False, "errors": [{"path": "", "code": code, "message": "x"}]}
-    reply = await handle(FakeSheet(food_add=[down] * 3), raw(FOOD), 5, TODAY)
+async def test_a_sheet_proven_down_is_transient():
+    down = {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": "x"}]}
+    sheet = FakeSheet(food_add=[down] * 3)
+    reply = await handle(sheet, raw(FOOD), 5, TODAY)
     assert reply.text == UNAVAILABLE and reply.transient and reply.reply_markup is None
+    assert reply.write_outcome == "not_committed" and len(sheet.calls) == 3
+
+
+async def test_an_internal_error_on_a_write_is_uncertain_and_not_tried_again():
+    # `internal` can follow a write (a listener that throws after the commit): never retried.
+    boom = {"ok": False, "errors": [{"path": "", "code": "internal", "message": "x"}]}
+    sheet, store = FakeSheet(food_add=[boom, FOOD_OK]), PendingStore()
+    reply = await handle(sheet, raw(FOOD), 5, TODAY, store)
+    assert reply.text == WRITE_UNCERTAIN and reply.write_outcome == "uncertain"
+    assert not reply.transient and reply.reply_markup is None
+    assert len(sheet.calls) == 1 and len(store) == 0
+
+
+async def test_replies_carry_the_outcome_of_the_form_write():
+    assert (await handle(FakeSheet(food_add=[FOOD_OK]), raw(FOOD), 5, TODAY)).write_outcome == "committed"
+    refusal = {"ok": False, "errors": [{"path": "args.meal", "code": "too_long", "message": "m"}]}
+    refused = await handle(FakeSheet(food_add=[refusal]), raw(FOOD), 5, TODAY)
+    assert refused.write_outcome == "not_committed" and not refused.transient
+    assert (await handle(FakeSheet(), "{not json", 5, TODAY)).write_outcome is None
 
 
 # ---- handler --------------------------------------------------------------------------------

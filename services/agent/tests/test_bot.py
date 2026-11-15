@@ -10,6 +10,7 @@ from agent.bot import (
     MODEL_FAILED,
     MODEL_FAILED_NOTHING_WRITTEN,
     SHEET_FAILED,
+    WRITE_UNCERTAIN,
     Bot,
     Media,
     instruction,
@@ -400,3 +401,53 @@ async def test_a_meal_is_saved_and_confirmed_with_calculo_and_fonte():
         "Dia: 192 kcal · P 4 g · 1 sem cálculo",
     ]
     assert answer.write_ids == ("f1",)
+
+
+# ---- write outcomes (spec §4.3.3) ------------------------------------------------------------
+
+SAVE = call("save_diary", date="2026-09-21", fields={"weightKg": 82.4})
+UNCERTAIN = {"ok": False, "errors": [{"path": "", "code": "write_uncertain", "message": "m"}]}
+
+
+def test_write_uncertain_covers_every_cause_in_the_spec_words():
+    assert WRITE_UNCERTAIN == (
+        "⚠ Não sei se a planilha gravou: a resposta não chegou. Confira com /hoje antes de repetir."
+    )
+
+
+def test_rule_9_forbids_repeating_an_uncertain_write():
+    text = instruction(NOW)
+    assert 'Se o erro tiver code "write_uncertain", não repita nem refaça essa gravação de outro' in text
+    assert "diga que ela pode ter entrado na planilha." in text
+
+
+async def test_an_answer_carries_the_outcome_of_its_writes(sheet):
+    b, _ = bot(sheet, [say("oi")])
+    assert (await b.reply("oi")).outcome is None  # no write attempted
+    b, _ = bot(FakeSheet(catalog=[UNAVAILABLE]), [call("get_catalog"), say("caiu")])
+    down = await b.reply("upper")
+    assert down.text == SHEET_FAILED and down.outcome is None  # a read is not a write attempt
+    b, _ = bot(FakeSheet(diary_upsert=[OK_DIARY]), [SAVE, say("ok")])
+    assert (await b.reply("peso 82,4")).outcome == "committed"
+    b, _ = bot(FakeSheet(diary_upsert=[UNAVAILABLE]), [SAVE, say("caiu")])
+    assert (await b.reply("peso 82,4")).outcome == "not_committed"
+
+
+async def test_an_uncertain_write_is_never_reported_as_a_sheet_outage():
+    # The sheet was down for the catalog and then a write got lost: "try again" would be wrong.
+    sheet = FakeSheet(catalog=[UNAVAILABLE], diary_upsert=[UNCERTAIN])
+    b, _ = bot(sheet, [call("get_catalog"), SAVE, say("ok")])
+    answer = await b.reply("peso 82,4")
+    assert answer.text == WRITE_UNCERTAIN and answer.outcome == "uncertain"
+
+
+async def test_an_uncertain_write_replaces_the_note_that_nothing_else_was_saved():
+    b, _ = bot(FakeSheet(diary_upsert=[UNCERTAIN]), [SAVE, RuntimeError("provider down")])
+    answer = await b.reply("peso 82,4")
+    assert answer.text == WRITE_UNCERTAIN
+    assert MODEL_FAILED_NOTHING_WRITTEN not in answer.text and answer.failed
+
+
+async def test_the_models_words_stay_next_to_the_uncertain_note():
+    b, _ = bot(FakeSheet(diary_upsert=[UNCERTAIN]), [SAVE, say("Pode ter gravado o peso.")])
+    assert (await b.reply("peso 82,4")).text == f"Pode ter gravado o peso.\n\n{WRITE_UNCERTAIN}"

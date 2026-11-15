@@ -20,7 +20,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
-from agent.sheet_client import request_id_scope
+from agent.sheet_client import WriteOutcome, request_id_scope, settle_write, write_outcome
 
 _current_update_key: ContextVar[str | None] = ContextVar("telegram_update_key", default=None)
 
@@ -156,7 +156,10 @@ class FoodItem(BaseModel):
 
 
 # Codes the sheet client (network, HTTP, bad body) and the API (uncaught exception) use when the
-# sheet itself failed, as opposed to rejecting the payload.
+# sheet itself failed, as opposed to rejecting the payload. "write_uncertain" is not one of them on
+# purpose: a write that may have landed is not a sheet that was down, so its request-id sequence
+# is not handed back for a retry and `sheet_failed` does not count it. ("internal" reaches this
+# set only from reads: on a write it is already "write_uncertain".)
 OUTAGE_CODES = frozenset({"unavailable", "internal"})
 
 
@@ -177,6 +180,21 @@ class Journal:
     # A write cancelled after it left (the message deadline): the sheet may or may not have
     # applied it, so the reply cannot say that nothing was saved.
     interrupted: bool = False
+    # The outcome of each mutating attempt that got an answer, in order (see sheet_client).
+    outcomes: list[WriteOutcome] = field(default_factory=list)
+
+    @property
+    def attempted(self) -> bool:
+        """Whether this message tried any write at all."""
+        return bool(self.outcomes) or self.interrupted
+
+    @property
+    def outcome(self) -> WriteOutcome:
+        """`uncertain` if any attempt was uncertain or interrupted; else `committed` if any write
+        is recorded; else `not_committed`."""
+        if self.interrupted or "uncertain" in self.outcomes:
+            return "uncertain"
+        return "committed" if self.writes else "not_committed"
 
     @contextmanager
     def writing(self) -> Iterator[None]:
@@ -209,7 +227,14 @@ class Journal:
         """For writes: journals the result on success, the error codes otherwise.
         If a retried write returns an already-recorded writeId, updates it in place instead of
         duplicating the confirmation entry; if the action was already undone by the user, leaves
-        `writes` untouched and informs the model."""
+        `writes` untouched and informs the model. An answer that does not prove whether the write
+        landed is recorded as `uncertain` and returned as the single "write_uncertain" error."""
+        response = settle_write(response)
+        outcome = write_outcome(response)
+        self.outcomes.append(outcome)
+        if outcome == "uncertain":
+            # Not an outage: the sequence number stays used, so nothing reuses this request id.
+            return self.check(response, op=op, token=token)
         if response.get("ok"):
             result = response["result"]
             if result.get("undone"):

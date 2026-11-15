@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from agent.tools import (
+    OUTAGE_CODES,
     DiaryFields,
     Exercise,
     FoodItem,
@@ -327,3 +328,65 @@ async def test_get_catalog_keeps_the_food_value_table_away_from_the_model():
     assert await t["get_catalog"]() == {"ok": True, "result": {"foods": ["Arroz"]}}
     assert "foodTable" in result  # the sheet's response itself is left untouched
     assert await t["get_catalog"]() == {"ok": False, "errors": []}
+
+
+# ---- write outcomes (spec §4.3.3) ------------------------------------------------------------
+
+UNCERTAIN = {"ok": False, "errors": [{"path": "", "code": "write_uncertain", "message": "m"}]}
+DOWN = {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": "m"}]}
+WRITTEN = {"ok": True, "result": {"date": "2026-09-21", "writeId": "a1"}}
+
+
+def test_a_journal_without_writes_attempted_nothing_and_committed_nothing():
+    journal = Journal()
+    journal.check(DOWN, op="catalog")
+    assert not journal.attempted and journal.outcome == "not_committed"
+
+
+def test_the_journal_outcome_follows_its_attempts():
+    journal = Journal()
+    journal.record("diary.upsert", {"ok": False, "errors": [{"code": "invalid_date"}]})
+    assert journal.attempted and journal.outcome == "not_committed"
+    journal.record("diary.upsert", WRITTEN)
+    assert journal.outcome == "committed"
+    journal.record("food.add", UNCERTAIN)
+    assert journal.outcome == "uncertain"
+    journal.record("food.add", WRITTEN)  # a later success does not make the earlier one known
+    assert journal.outcome == "uncertain"
+    assert journal.outcomes == ["not_committed", "committed", "uncertain", "committed"]
+
+
+async def test_a_write_cancelled_after_it_started_is_uncertain():
+    journal = Journal()
+    with pytest.raises(asyncio.CancelledError), journal.writing():
+        raise asyncio.CancelledError
+    assert journal.attempted and journal.outcome == "uncertain"
+
+
+def test_write_uncertain_is_not_an_outage():
+    assert "write_uncertain" not in OUTAGE_CODES
+    journal = Journal()
+    journal.record("diary.upsert", UNCERTAIN)
+    assert journal.error_codes == ["write_uncertain"]
+    assert not journal.sheet_failed
+
+
+@pytest.mark.parametrize("code", ["internal", "rejected", "invalid", "something_new"])
+def test_a_write_answer_outside_the_pre_write_list_reaches_the_model_as_write_uncertain(code):
+    journal = Journal()
+    shown = journal.record("diary.upsert", {"ok": False, "errors": [{"code": code, "message": "m"}]})
+    assert [e["code"] for e in shown["errors"]] == ["write_uncertain"]
+    assert journal.outcome == "uncertain" and not journal.sheet_failed
+
+
+async def test_the_request_id_of_an_uncertain_write_is_never_reused():
+    food_ok = {"ok": True, "result": {"date": "2026-09-21", "meal": "Almoço", "items": [], "writeId": "w2"}}
+    sheet = FakeSheet(food_add=[UNCERTAIN, food_ok])
+    with update_key_scope("tg:99"):
+        journal = Journal()
+        t = tools(sheet, journal)
+        items = [FoodItem(description="arroz")]
+        await t["save_food"]("2026-09-21", "Almoço", items)  # uncertain: its sequence stays used
+        await t["save_food"]("2026-09-21", "Almoço", items)  # the model insisting gets a new id
+    assert sheet.request_ids[1] == f"{sheet.request_ids[0]}:2"
+    assert journal.outcome == "uncertain"

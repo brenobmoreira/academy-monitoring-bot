@@ -186,16 +186,21 @@ class SheetClient:
         # Each failure is logged here with the operation (a name written in this file) and the HTTP
         # status: the libraries' own records of the request are silenced or rewritten (logs.py).
         op = payload["op"]
+        # The request is built here so that it can be recognised afterwards: httpx builds a new
+        # object for every redirect it follows, so a failure belongs to the original POST only
+        # when it names this very object. Method and URL do not tell: a 307/308 back to the same
+        # URL repeats the POST after the script already ran.
+        original = self._http.build_request("POST", self._url, json=payload, timeout=30.0)
         try:
-            response = await self._http.post(self._url, json=payload, follow_redirects=True, timeout=30.0)
+            response = await self._http.send(original, follow_redirects=True)
         except httpx.HTTPError as err:
             log.warning("sheet call %s got no answer: %s", op, describe(err))
-            if mutating and not (isinstance(err, _NOT_SENT) and self._is_original_post(_request_of(err))):
+            if mutating and not (isinstance(err, _NOT_SENT) and _request_of(err) is original):
                 # The request may have left, or the script already ran and its redirect failed.
                 return _uncertain()
             return _unavailable(f"falha de rede ao chamar a planilha: {err!r}")
         # A redirect means the POST was answered: the script ran before anything that follows.
-        redirected = bool(response.history) or not self._is_original_post(response.request)
+        redirected = bool(response.history) or response.request is not original
         if response.status_code != 200:
             log.warning("sheet call %s answered HTTP %d", op, response.status_code)
             if mutating and (redirected or response.status_code not in _PRE_SCRIPT_STATUSES):
@@ -217,9 +222,6 @@ class SheetClient:
                 return _uncertain()
             return _unavailable("resposta da planilha fora do formato {ok, ...}")
         return body
-
-    def _is_original_post(self, request: httpx.Request | None) -> bool:
-        return request is not None and request.method == "POST" and request.url == httpx.URL(self._url)
 
     async def catalog(self) -> Response:
         return await self.call("catalog", {})

@@ -4,11 +4,13 @@ import pytest
 
 from agent.tools import (
     OUTAGE_CODES,
+    WRITES_STOPPED,
     DiaryFields,
     Exercise,
     FoodItem,
     Journal,
     LoadSet,
+    MeasureFields,
     WorkSet,
     build_tools,
     update_key_scope,
@@ -379,14 +381,46 @@ def test_a_write_answer_outside_the_pre_write_list_reaches_the_model_as_write_un
     assert journal.outcome == "uncertain" and not journal.sheet_failed
 
 
-async def test_the_request_id_of_an_uncertain_write_is_never_reused():
-    food_ok = {"ok": True, "result": {"date": "2026-09-21", "meal": "Almoço", "items": [], "writeId": "w2"}}
-    sheet = FakeSheet(food_add=[UNCERTAIN, food_ok])
+async def test_after_an_uncertain_write_the_write_tools_refuse_without_calling_the_sheet():
+    sheet = FakeSheet(food_add=[UNCERTAIN])
     with update_key_scope("tg:99"):
         journal = Journal()
         t = tools(sheet, journal)
         items = [FoodItem(description="arroz")]
-        await t["save_food"]("2026-09-21", "Almoço", items)  # uncertain: its sequence stays used
-        await t["save_food"]("2026-09-21", "Almoço", items)  # the model insisting gets a new id
-    assert sheet.request_ids[1] == f"{sheet.request_ids[0]}:2"
-    assert journal.outcome == "uncertain"
+        await t["save_food"]("2026-09-21", "Almoço", items)
+        refused = [
+            await t["save_food"]("2026-09-21", "Almoço", items),
+            await t["save_diary"]("2026-09-21", DiaryFields(sleepH=7)),
+            await t["save_workout"]("2026-09-21", "Upper", []),
+            await t["copy_food"]("2026-09-20", "2026-09-21"),
+            await t["save_measures"]("2026-09-21", MeasureFields(hipCm=98)),
+        ]
+        catalog = await t["get_catalog"]()
+    assert [op for op, _ in sheet.calls] == ["food.add", "catalog"]  # reads stay allowed
+    assert catalog["ok"] is True
+    for response in refused:
+        assert response == {
+            "ok": False,
+            "errors": [{"path": "", "code": "write_uncertain", "message": WRITES_STOPPED}],
+        }
+    assert journal.outcome == "uncertain" and journal.outcomes == ["uncertain"]
+
+
+def test_the_request_id_of_an_uncertain_write_is_never_handed_out_again():
+    with update_key_scope("tg:99"):
+        journal = Journal()
+    first, token = journal.request_id_for("food.add", {"meal": "Almoço"})
+    journal.record("food.add", UNCERTAIN, token)
+    again, _ = journal.request_id_for("food.add", {"meal": "Almoço"})
+    assert again == f"{first}:2"  # unlike an outage, whose sequence goes back to the pool
+
+
+def test_a_journal_refuses_nothing_until_a_write_is_uncertain():
+    journal = Journal()
+    assert journal.refusal() is None
+    journal.record("diary.upsert", DOWN)
+    journal.record("diary.upsert", {"ok": False, "errors": [{"code": "invalid_date"}]})
+    journal.record("diary.upsert", WRITTEN)
+    assert journal.refusal() is None
+    journal.interrupted = True
+    assert journal.refusal() is not None

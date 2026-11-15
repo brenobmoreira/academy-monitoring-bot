@@ -176,8 +176,36 @@ async def test_any_other_exception_on_the_original_post_is_uncertain(error):
     assert len(app.posts) == 1
 
 
+REDIRECT_ERRORS = [httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ReadTimeout]
+
+
+@pytest.mark.parametrize("error", REDIRECT_ERRORS)
+@pytest.mark.parametrize("code", [307, 308])
+@pytest.mark.parametrize("same_url", [True, False], ids=["same url", "other url"])
+async def test_an_exception_on_a_redirected_post_is_uncertain_even_to_the_same_url(same_url, code, error):
+    # 307/308 repeat the POST. Sent back to /exec itself, the failing request has the method and
+    # the URL of the original: only the fact that a redirect happened tells them apart.
+    if same_url:
+        app = WebApp([redirect(code, URL), error("down")])
+    else:
+        app = WebApp(redirect(code, OTHER), error("down"))
+    response = await diary(app)
+    assert len(app.seen) == 2 and app.seen[1][0] == "POST"
+    assert write_outcome(response) == "uncertain"
+    assert code_of(response) == ["write_uncertain"]
+
+
+@pytest.mark.parametrize("code", [307, 308])
+async def test_a_front_end_refusal_of_a_post_redirected_to_the_same_url_is_uncertain(code):
+    response = await diary(WebApp([redirect(code, URL), status(403)]))
+    assert write_outcome(response) == "uncertain"
+
+
 class NoRequestHttp:
-    async def post(self, *args, **kwargs):
+    def build_request(self, *args, **kwargs):
+        return httpx.Request("POST", URL)
+
+    async def send(self, *args, **kwargs):
         raise httpx.ConnectError("down")  # no request attached: which one failed is unknown
 
 
@@ -459,6 +487,51 @@ async def test_the_agent_answers_write_uncertain_not_sheet_failed_after_exactly_
     # What the model was told: one write_uncertain error, none of the sheet's own.
     told = llm.requests[-1].contents[-1].parts[0].function_response.response
     assert told["ok"] is False and code_of(told) == ["write_uncertain"]
+
+
+FOOD_CALL = call("save_food", date="2026-09-21", meal="Almoço", items=[{"description": "arroz"}])
+INSISTING = {
+    "the same write": [FOOD_CALL, FOOD_CALL],
+    "the same data another way": [FOOD_CALL, call("copy_food", date_from="2026-09-20", date_to="2026-09-21")],
+    "every write tool": [
+        FOOD_CALL,
+        SAVE,
+        call("save_workout", date="2026-09-21", session="Upper", exercises=[]),
+        call("copy_food", date_from="2026-09-20", date_to="2026-09-21"),
+        call("save_measures", date="2026-09-21", fields={"hipCm": 98}),
+        FOOD_CALL,
+    ],
+}
+
+
+@pytest.mark.parametrize("calls", INSISTING.values(), ids=INSISTING.keys())
+async def test_after_an_uncertain_write_nothing_else_is_written_in_the_message(calls):
+    # The answer of the first write is lost; every later answer would be a success.
+    app = WebApp([httpx.ReadTimeout("slow"), *[body(OK)] * len(calls)])
+    b, llm = bot(app.client(), [*calls, say("ok")])
+    answer = await b.reply("almoço: arroz")
+    assert len(app.posts) == 1 and len(app.rows) == 1  # a second POST would be a duplicate row
+    assert answer.text == WRITE_UNCERTAIN and answer.outcome == "uncertain"
+    assert not answer.wrote
+    for request in llm.requests[1:]:  # each insistence was told the same fixed refusal
+        told = request.contents[-1].parts[0].function_response.response
+        assert told["ok"] is False and code_of(told) == ["write_uncertain"]
+
+
+async def test_reads_stay_allowed_after_an_uncertain_write():
+    app = WebApp([httpx.ReadTimeout("slow"), body({"ok": True, "result": {"today": "2026-09-21"}})])
+    b, llm = bot(app.client(), [FOOD_CALL, call("get_catalog"), say("ok")])
+    answer = await b.reply("almoço: arroz")
+    assert [row["op"] for row in app.rows] == ["food.add", "catalog"]
+    assert llm.requests[-1].contents[-1].parts[0].function_response.response["ok"] is True
+    assert answer.text == WRITE_UNCERTAIN
+
+
+async def test_a_proven_refusal_does_not_block_the_next_write():
+    app = WebApp([httpx.ConnectError("down"), body(OK)])
+    b, _ = bot(app.client(), [SAVE, SAVE, say("ok")])
+    answer = await b.reply("peso 82,4")
+    assert len(app.posts) == 2 and answer.outcome == "committed"
 
 
 NOT_COMMITTED_APPS = {

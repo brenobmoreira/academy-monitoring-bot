@@ -20,7 +20,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
-from agent.sheet_client import WriteOutcome, request_id_scope, settle_write, write_outcome
+from agent.sheet_client import UNCERTAIN_CODE, WriteOutcome, request_id_scope, settle_write, write_outcome
 
 _current_update_key: ContextVar[str | None] = ContextVar("telegram_update_key", default=None)
 
@@ -162,6 +162,13 @@ class FoodItem(BaseModel):
 # set only from reads: on a write it is already "write_uncertain".)
 OUTAGE_CODES = frozenset({"unavailable", "internal"})
 
+# The fixed answer of every write tool after an uncertain write (see Journal.refusal).
+WRITES_STOPPED = (
+    "uma gravação anterior desta mensagem ficou incerta (pode ter entrado na planilha). Nada mais "
+    "será gravado nesta mensagem: não chame mais ferramentas de gravação e diga à pessoa para "
+    "conferir com /hoje antes de repetir."
+)
+
 
 RequestToken = tuple[str, int]
 
@@ -182,6 +189,15 @@ class Journal:
     interrupted: bool = False
     # The outcome of each mutating attempt that got an answer, in order (see sheet_client).
     outcomes: list[WriteOutcome] = field(default_factory=list)
+
+    def refusal(self) -> dict[str, Any] | None:
+        """What a write tool answers instead of calling the sheet once a write of this message
+        ended uncertain: that write may be in the sheet, so repeating it, or saving the same data
+        another way, could duplicate it. Under another request id the sheet would not notice.
+        None while no write is uncertain. Reads are never refused."""
+        if self.outcome != "uncertain":
+            return None
+        return {"ok": False, "errors": [{"path": "", "code": UNCERTAIN_CODE, "message": WRITES_STOPPED}]}
 
     @property
     def attempted(self) -> bool:
@@ -320,6 +336,8 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         values = _plain(fields)
         for key in clear or []:
             values[key] = None
+        if (refusal := journal.refusal()) is not None:
+            return refusal
         req_id, token = journal.request_id_for("diary.upsert", {"date": date, "fields": values})
         with request_id_scope(req_id), journal.writing():
             response = await sheet.upsert_diary(date, values)
@@ -344,6 +362,8 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         args: dict[str, Any] = {"date": date, "session": session, "exercises": plain_ex}
         if done is not None:
             args["complete"] = done
+        if (refusal := journal.refusal()) is not None:
+            return refusal
         req_id, token = journal.request_id_for("workout.upsert", args)
         with request_id_scope(req_id), journal.writing():
             response = await sheet.upsert_workout(date, session, plain_ex, done)
@@ -360,6 +380,8 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
             items: itens da refeição.
         """
         plain_items = _plain(items)
+        if (refusal := journal.refusal()) is not None:
+            return refusal
         req_id, token = journal.request_id_for("food.add", {"date": date, "meal": meal, "items": plain_items})
         with request_id_scope(req_id), journal.writing():
             response = await sheet.add_food(date, meal, plain_items)
@@ -377,6 +399,8 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         args: dict[str, Any] = {"from": date_from, "to": date_to}
         if meal is not None:
             args["meal"] = meal
+        if (refusal := journal.refusal()) is not None:
+            return refusal
         req_id, token = journal.request_id_for("food.copy", args)
         with request_id_scope(req_id), journal.writing():
             response = await sheet.copy_food(date_from, date_to, meal)
@@ -397,6 +421,8 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         values = _plain(fields)
         for key in clear or []:
             values[key] = None
+        if (refusal := journal.refusal()) is not None:
+            return refusal
         req_id, token = journal.request_id_for("measures.upsert", {"date": date, "fields": values})
         with request_id_scope(req_id), journal.writing():
             response = await sheet.upsert_measures(date, values)

@@ -5,6 +5,7 @@ an in-memory sheet before it fails, and serves a real 302 -> GET, so `follow_red
 `response.history` are the ones of httpx.
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -12,6 +13,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+from google.adk.agents.run_config import RunConfig
+from google.genai import types
 
 from agent import miniapp
 from agent.bot import SHEET_FAILED, WRITE_UNCERTAIN, Bot
@@ -25,9 +28,10 @@ from agent.sheet_client import (
     settle_write,
     write_outcome,
 )
+from agent.tools import DiaryFields, FoodItem, Journal, build_tools
 from agent.undo import UNDO_UNCERTAIN, undo_last, undo_run, undo_writes
 
-from .fakes import ScriptedLlm, call, say
+from .fakes import FakeSheet, ScriptedLlm, call, say
 from .test_miniapp import FOOD, TODAY, raw
 
 pytestmark = pytest.mark.unit
@@ -651,3 +655,95 @@ async def test_an_undo_the_sheet_never_received_keeps_the_button():
     result = await undo_run(app.client(), ["w1", "w2"])
     assert result.sheet_down and result.outcome == "not_committed"
     assert len(app.posts) == 1
+
+
+# ---- parallel write tools (ADK runs the calls of one model turn as tasks on one loop) ---------
+
+
+class SlowClient(SheetClient):
+    """Every call yields before it is sent, so calls started together really overlap."""
+
+    async def call(self, op, args, *, request_id=None):
+        await asyncio.sleep(0.01)
+        return await super().call(op, args, request_id=request_id)
+
+
+def together(*calls):
+    """One model turn asking for several tools at once."""
+    return types.Content(role="model", parts=[part for c in calls for part in c.parts])
+
+
+def slow(app):
+    return SlowClient(URL, "k", httpx.AsyncClient(transport=httpx.MockTransport(app)))
+
+
+WORKOUT_CALL = call("save_workout", date="2026-09-21", session="Upper", exercises=[])
+AT_ONCE = {
+    "two of the same": [FOOD_CALL, FOOD_CALL],
+    "three of the same": [FOOD_CALL, FOOD_CALL, FOOD_CALL],
+    "three different tools": [FOOD_CALL, SAVE, WORKOUT_CALL],
+}
+
+
+@pytest.mark.parametrize("calls", AT_ONCE.values(), ids=AT_ONCE.keys())
+async def test_writes_asked_at_once_stop_at_the_first_uncertain_one(calls):
+    app = WebApp([httpx.ReadTimeout("slow"), *[body(OK)] * len(calls)])
+    b, llm = bot(slow(app), [together(*calls), say("ok")])
+    answer = await b.reply("almoço: arroz")
+    assert len(app.posts) == 1 and len(app.rows) == 1  # the others never reached the sheet
+    assert answer.text == WRITE_UNCERTAIN and answer.outcome == "uncertain"
+    told = [p.function_response.response for p in llm.requests[-1].contents[-1].parts]
+    assert len(told) == len(calls)
+    assert all(code_of(t) == ["write_uncertain"] for t in told)
+
+
+async def test_writes_asked_at_once_all_land_when_each_is_committed():
+    second = {
+        "ok": True,
+        "result": {"date": "2026-09-21", "row": 7, "fields": {"sleepH": 7}, "writeId": "w2"},
+    }
+    app = WebApp([body(OK), body(second)])
+    b, _ = bot(slow(app), [together(SAVE, SAVE), say("ok")])
+    answer = await b.reply("peso 82,4")
+    assert len(app.posts) == 2
+    assert answer.outcome == "committed" and answer.write_ids == ("w1", "w2")
+
+
+async def test_a_write_waits_for_the_one_before_it_and_a_read_does_not():
+    release = asyncio.Event()
+    order = []
+
+    class HeldSheet(FakeSheet):
+        async def add_food(self, date, meal, items):
+            order.append("write starts")
+            await release.wait()
+            order.append("write ends")
+            return {"ok": False, "errors": [{"path": "", "code": "write_uncertain", "message": "m"}]}
+
+        async def upsert_diary(self, date, fields):
+            order.append("second write reached the sheet")
+            return OK
+
+        async def catalog(self):
+            order.append("read")
+            release.set()  # were reads behind the lock, nothing would ever release the write
+            return {"ok": True, "result": {}}
+
+    journal = Journal()
+    t = {f.__name__: f for f in build_tools(HeldSheet(), journal)}
+    async with asyncio.timeout(5):
+        food, diary_answer, catalog = await asyncio.gather(
+            t["save_food"]("2026-09-21", "Almoço", [FoodItem(description="arroz")]),
+            t["save_diary"]("2026-09-21", DiaryFields(weightKg=82.4)),
+            t["get_catalog"](),
+        )
+    assert order == ["write starts", "read", "write ends"]
+    assert catalog["ok"] is True
+    assert code_of(food) == ["write_uncertain"] and code_of(diary_answer) == ["write_uncertain"]
+    assert journal.outcomes == ["uncertain"]
+
+
+def test_the_bot_leaves_the_tools_on_the_event_loop():
+    # The write lock is an asyncio.Lock: it holds while ADK runs tools as tasks on the bot's loop.
+    # A thread pool for tools (each with a loop of its own) would need another kind of lock.
+    assert RunConfig(max_llm_calls=8).tool_thread_pool_config is None

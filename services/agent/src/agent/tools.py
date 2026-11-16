@@ -11,8 +11,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import FunctionType
@@ -189,6 +189,20 @@ class Journal:
     interrupted: bool = False
     # The outcome of each mutating attempt that got an answer, in order (see sheet_client).
     outcomes: list[WriteOutcome] = field(default_factory=list)
+    # Serialises the write tools of this message (see write_turn). An asyncio lock, because the
+    # tools are coroutines that ADK runs as tasks on the bot's event loop; RunConfig's
+    # tool_thread_pool_config, which would move them to threads with their own loops, is not set.
+    _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+
+    @asynccontextmanager
+    async def write_turn(self) -> AsyncIterator[dict[str, Any] | None]:
+        """One write at a time per message: a write tool holds this from the decision to write
+        until its result is recorded, so the next one decides knowing how this one ended. ADK
+        runs the tool calls of one model answer together (one asyncio task each, on this loop),
+        and without the turn two of them would both be sent before either could come back
+        uncertain. Yields the refusal to return instead of writing, or None. Reads do not wait."""
+        async with self._write_lock:
+            yield self.refusal()
 
     def refusal(self) -> dict[str, Any] | None:
         """What a write tool answers instead of calling the sheet once a write of this message
@@ -336,12 +350,13 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         values = _plain(fields)
         for key in clear or []:
             values[key] = None
-        if (refusal := journal.refusal()) is not None:
-            return refusal
-        req_id, token = journal.request_id_for("diary.upsert", {"date": date, "fields": values})
-        with request_id_scope(req_id), journal.writing():
-            response = await sheet.upsert_diary(date, values)
-        return journal.record("diary.upsert", response, token)
+        async with journal.write_turn() as refusal:
+            if refusal is not None:
+                return refusal
+            req_id, token = journal.request_id_for("diary.upsert", {"date": date, "fields": values})
+            with request_id_scope(req_id), journal.writing():
+                response = await sheet.upsert_diary(date, values)
+            return journal.record("diary.upsert", response, token)
 
     async def save_workout(
         date: str, session: str, exercises: list[Exercise], complete: bool = False
@@ -362,12 +377,13 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         args: dict[str, Any] = {"date": date, "session": session, "exercises": plain_ex}
         if done is not None:
             args["complete"] = done
-        if (refusal := journal.refusal()) is not None:
-            return refusal
-        req_id, token = journal.request_id_for("workout.upsert", args)
-        with request_id_scope(req_id), journal.writing():
-            response = await sheet.upsert_workout(date, session, plain_ex, done)
-        return journal.record("workout.upsert", response, token)
+        async with journal.write_turn() as refusal:
+            if refusal is not None:
+                return refusal
+            req_id, token = journal.request_id_for("workout.upsert", args)
+            with request_id_scope(req_id), journal.writing():
+                response = await sheet.upsert_workout(date, session, plain_ex, done)
+            return journal.record("workout.upsert", response, token)
 
     async def save_food(date: str, meal: str, items: list[FoodItem]) -> dict[str, Any]:
         """Lança o que foi comido numa refeição na Alimentação. Cada item é um alimento do
@@ -380,12 +396,15 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
             items: itens da refeição.
         """
         plain_items = _plain(items)
-        if (refusal := journal.refusal()) is not None:
-            return refusal
-        req_id, token = journal.request_id_for("food.add", {"date": date, "meal": meal, "items": plain_items})
-        with request_id_scope(req_id), journal.writing():
-            response = await sheet.add_food(date, meal, plain_items)
-        return journal.record("food.add", response, token)
+        async with journal.write_turn() as refusal:
+            if refusal is not None:
+                return refusal
+            req_id, token = journal.request_id_for(
+                "food.add", {"date": date, "meal": meal, "items": plain_items}
+            )
+            with request_id_scope(req_id), journal.writing():
+                response = await sheet.add_food(date, meal, plain_items)
+            return journal.record("food.add", response, token)
 
     async def copy_food(date_from: str, date_to: str, meal: str | None = None) -> dict[str, Any]:
         """Copia uma refeição (ou todas as refeições do dia, se meal for omitido) de date_from para
@@ -399,12 +418,13 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         args: dict[str, Any] = {"from": date_from, "to": date_to}
         if meal is not None:
             args["meal"] = meal
-        if (refusal := journal.refusal()) is not None:
-            return refusal
-        req_id, token = journal.request_id_for("food.copy", args)
-        with request_id_scope(req_id), journal.writing():
-            response = await sheet.copy_food(date_from, date_to, meal)
-        return journal.record("food.copy", response, token)
+        async with journal.write_turn() as refusal:
+            if refusal is not None:
+                return refusal
+            req_id, token = journal.request_id_for("food.copy", args)
+            with request_id_scope(req_id), journal.writing():
+                response = await sheet.copy_food(date_from, date_to, meal)
+            return journal.record("food.copy", response, token)
 
     async def save_measures(
         date: str, fields: MeasureFields, clear: list[MeasureKey] | None = None
@@ -421,12 +441,13 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         values = _plain(fields)
         for key in clear or []:
             values[key] = None
-        if (refusal := journal.refusal()) is not None:
-            return refusal
-        req_id, token = journal.request_id_for("measures.upsert", {"date": date, "fields": values})
-        with request_id_scope(req_id), journal.writing():
-            response = await sheet.upsert_measures(date, values)
-        return journal.record("measures.upsert", response, token)
+        async with journal.write_turn() as refusal:
+            if refusal is not None:
+                return refusal
+            req_id, token = journal.request_id_for("measures.upsert", {"date": date, "fields": values})
+            with request_id_scope(req_id), journal.writing():
+                response = await sheet.upsert_measures(date, values)
+            return journal.record("measures.upsert", response, token)
 
     async def get_exercise_history(name: str, limit: int | None = None) -> dict[str, Any]:
         """Sessões anteriores de um exercício (só work sets), da mais recente para a mais antiga.

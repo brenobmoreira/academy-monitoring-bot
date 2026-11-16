@@ -1673,7 +1673,7 @@
     if (!trimmed) {
       return { ok: false, payload: null, json: '', bytes: 0, error: 'Digite ou grave o texto antes de enviar.' };
     }
-    if (trimmed.length > VOICE_LIMITS.TEXT_MAX) {
+    if (Array.from(trimmed).length > VOICE_LIMITS.TEXT_MAX) {
       return { ok: false, payload: null, json: '', bytes: 0, error: 'Texto longo demais; encurte para no máximo ' + VOICE_LIMITS.TEXT_MAX + ' caracteres.' };
     }
     var payload = { v: 1, t: 'text', id: subId, src: source, text: trimmed };

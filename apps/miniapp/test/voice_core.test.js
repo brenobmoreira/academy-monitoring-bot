@@ -582,3 +582,33 @@ test('textPayload builds exact v1 text payload and enforces trimming, chars, con
   assert.equal(C.textPayload('ok', 'NOT-HEX').ok, false);
   assert.equal(C.textPayload('ok', id, 'other').ok, false);
 });
+
+test('textPayload counts Unicode code points rather than UTF-16 code units for TEXT_MAX', () => {
+  const id = '0123456789abcdef0123456789abcdef';
+  const max = C.VOICE_LIMITS.TEXT_MAX;
+
+  // Exactly TEXT_MAX ASCII chars passes; TEXT_MAX + 1 fails with char-limit message
+  assert.equal(C.textPayload('a'.repeat(max), id).ok, true);
+  const asciiOver = C.textPayload('a'.repeat(max + 1), id);
+  assert.equal(asciiOver.ok, false);
+  assert.equal(asciiOver.error, `Texto longo demais; encurte para no máximo ${max} caracteres.`);
+
+  // Exactly TEXT_MAX 4-byte emojis: passes code-point check, fails only on 4096-byte JSON limit
+  const maxEmojis = '😀'.repeat(max);
+  assert.equal(Array.from(maxEmojis).length, max);
+  assert.equal(maxEmojis.length, max * 2);
+  const emojiRes = C.textPayload(maxEmojis, id);
+  assert.equal(emojiRes.ok, false);
+  assert.ok(emojiRes.bytes > C.LIMITS.PAYLOAD_BYTES);
+  assert.equal(emojiRes.error, 'Texto longo demais para o Telegram; encurte um pouco.');
+  assert.doesNotMatch(emojiRes.error, /no máximo/);
+
+  // UTF-16 .length > TEXT_MAX, code points <= TEXT_MAX, UTF-8 JSON bytes <= 4096 -> ok: true
+  const mixed = '😀'.repeat(500) + 'a'.repeat(max - 500);
+  assert.ok(mixed.length > max);
+  assert.equal(Array.from(mixed).length, max);
+  const mixedRes = C.textPayload(mixed, id);
+  assert.equal(mixedRes.ok, true);
+  assert.ok(mixedRes.bytes <= C.LIMITS.PAYLOAD_BYTES);
+  assert.equal(mixedRes.error, null);
+});

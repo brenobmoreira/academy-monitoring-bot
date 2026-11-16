@@ -579,6 +579,143 @@ test('voiceReducer: stale PERMISSION_GRANTED stops tracks without changing statu
   assert.deepEqual(granted.effects, [{ type: 'start_recorder', generation: asking.generation }]);
 });
 
+test('voiceReducer + keepBlob: RETRY requires a finite clock and matches keepBlob across invalid clocks and window edges', () => {
+  let sending = C.voiceReducer(C.initialVoiceState(), { type: 'START', consented: true });
+  sending = C.voiceReducer(sending, { type: 'PERMISSION_GRANTED', generation: sending.generation, now: 1000 });
+  sending = C.voiceReducer(sending, { type: 'STOP', durationMs: 1200, now: 2200, idempotencyKey: 'k-clock' });
+
+  const errState = C.voiceReducer(sending, {
+    type: 'TRANSCRIBE_ERROR',
+    generation: sending.generation,
+    error: 'timeout',
+    now: 10000,
+  });
+  assert.equal(errState.status, 'error');
+  assert.equal(errState.failedAt, 10000);
+  assert.equal(errState.error.canRetry, true);
+
+  const expiredCases = [
+    { label: 'missing now', ev: { type: 'RETRY' }, now: undefined },
+    { label: 'NaN now', ev: { type: 'RETRY', now: NaN }, now: NaN },
+    { label: 'string now', ev: { type: 'RETRY', now: '10000' }, now: '10000' },
+    { label: 'now < failedAt', ev: { type: 'RETRY', now: 9999 }, now: 9999 },
+    { label: 'now - failedAt = 120001', ev: { type: 'RETRY', now: 130001 }, now: 130001 },
+  ];
+
+  for (const c of expiredCases) {
+    assert.equal(C.keepBlob({ type: 'RETRY' }, errState, c.now), false, c.label);
+    const next = C.voiceReducer(errState, c.ev);
+    assert.equal(next.status, 'error', c.label);
+    assert.equal(next.changed, true, c.label);
+    assert.equal(next.error.canRetry, false, c.label);
+    assert.ok(!next.error.actions.includes('retry'), c.label);
+    assert.ok(!next.error.buttons.some((b) => b.id === 'retry'), c.label);
+    assert.equal(next.idempotencyKey, null, c.label);
+    assert.equal(next.failedAt, null, c.label);
+    assert.ok(!next.effects.some((e) => e.type === 'upload'), c.label);
+    assert.deepEqual(next.effects, [{ type: 'drop_blob' }], c.label);
+  }
+
+  // Edges inside window: now - failedAt = 0 and 120000
+  for (const now of [10000, 130000]) {
+    assert.equal(C.keepBlob({ type: 'RETRY' }, errState, now), true, 'keepBlob at ' + now);
+    const retried = C.voiceReducer(errState, { type: 'RETRY', now });
+    assert.equal(retried.status, 'sending', 'status at ' + now);
+    assert.equal(retried.changed, true, 'changed at ' + now);
+    assert.equal(retried.idempotencyKey, 'k-clock', 'key at ' + now);
+    assert.deepEqual(
+      retried.effects,
+      [{ type: 'upload', generation: errState.generation, idempotencyKey: 'k-clock' }],
+      'upload at ' + now
+    );
+  }
+});
+
+test('voiceReducer + keepBlob: retryable TRANSCRIBE_ERROR without valid now is non-retryable and drops blob', () => {
+  let sending = C.voiceReducer(C.initialVoiceState(), { type: 'START', consented: true });
+  sending = C.voiceReducer(sending, { type: 'PERMISSION_GRANTED', generation: sending.generation, now: 1000 });
+  sending = C.voiceReducer(sending, { type: 'STOP', durationMs: 1200, now: 2200, idempotencyKey: 'k-no-clock' });
+
+  for (const badNow of [undefined, NaN, '1000']) {
+    const ev = badNow === undefined
+      ? { type: 'TRANSCRIBE_ERROR', generation: sending.generation, error: 'timeout' }
+      : { type: 'TRANSCRIBE_ERROR', generation: sending.generation, error: 'timeout', now: badNow };
+    assert.equal(C.keepBlob({ type: 'TRANSCRIBE_ERROR', error: 'timeout' }, sending, badNow), false);
+    const err = C.voiceReducer(sending, ev);
+    assert.equal(err.status, 'error');
+    assert.equal(err.failedAt, null);
+    assert.equal(err.idempotencyKey, null);
+    assert.equal(err.error.canRetry, false);
+    assert.ok(!err.error.actions.includes('retry'));
+    assert.ok(!err.error.buttons.some((b) => b.id === 'retry'));
+    assert.deepEqual(err.effects, [{ type: 'drop_blob' }]);
+  }
+
+  // Second failure after a valid first failure also drops if now is missing
+  const firstFail = C.voiceReducer(sending, { type: 'TRANSCRIBE_ERROR', generation: sending.generation, error: 'timeout', now: 10000 });
+  const retried = C.voiceReducer(firstFail, { type: 'RETRY', now: 12000 });
+  const secondFail = C.voiceReducer(retried, { type: 'TRANSCRIBE_ERROR', generation: retried.generation, error: 'timeout' });
+  assert.equal(secondFail.failedAt, null);
+  assert.equal(secondFail.error.canRetry, false);
+  assert.ok(!secondFail.error.buttons.some((b) => b.id === 'retry'));
+  assert.deepEqual(secondFail.effects, [{ type: 'drop_blob' }]);
+});
+
+test('voiceReducer: RETRY_EXPIRED removes retry and drops blob only in retryable error state', () => {
+  const reachSending = (idempotencyKey) => {
+    let s = C.voiceReducer(C.initialVoiceState(), { type: 'START', consented: true });
+    s = C.voiceReducer(s, { type: 'PERMISSION_GRANTED', generation: s.generation, now: 1000 });
+    return C.voiceReducer(s, { type: 'STOP', durationMs: 1200, now: 2200, idempotencyKey });
+  };
+
+  const retryErr = C.voiceReducer(reachSending('k-exp'), {
+    type: 'TRANSCRIBE_ERROR',
+    generation: 1,
+    error: 'timeout',
+    now: 10000,
+  });
+  assert.equal(retryErr.error.canRetry, true);
+  assert.ok(retryErr.error.buttons.some((b) => b.id === 'retry'));
+
+  const expired = C.voiceReducer(retryErr, { type: 'RETRY_EXPIRED' });
+  assert.equal(expired.status, 'error');
+  assert.equal(expired.changed, true);
+  assert.equal(expired.error.canRetry, false);
+  assert.ok(!expired.error.actions.includes('retry'));
+  assert.ok(!expired.error.buttons.some((b) => b.id === 'retry'));
+  assert.equal(expired.idempotencyKey, null);
+  assert.equal(expired.failedAt, null);
+  assert.deepEqual(expired.effects, [{ type: 'drop_blob' }]);
+  assert.equal(C.keepBlob({ type: 'RETRY_EXPIRED' }, retryErr, 10000), false);
+
+  // Non-retryable error state: RETRY_EXPIRED changes nothing
+  const nonRetryErr = C.voiceReducer(reachSending('k-no'), {
+    type: 'TRANSCRIBE_ERROR',
+    generation: 1,
+    error: 'no_speech',
+    now: 10000,
+  });
+  const unchanged = C.voiceReducer(nonRetryErr, { type: 'RETRY_EXPIRED' });
+  assert.equal(unchanged.status, 'error');
+  assert.equal(unchanged.changed, false);
+  assert.deepEqual(unchanged.effects, []);
+  assert.deepEqual(unchanged.error, nonRetryErr.error);
+
+  // Other states ignore RETRY_EXPIRED
+  const idle = C.initialVoiceState();
+  const consent = C.voiceReducer(idle, { type: 'START', consented: false });
+  const asking = C.voiceReducer(idle, { type: 'START', consented: true });
+  const listening = C.voiceReducer(asking, { type: 'PERMISSION_GRANTED', generation: asking.generation, now: 1000 });
+  const sending = C.voiceReducer(listening, { type: 'STOP', durationMs: 1200, now: 2200, idempotencyKey: 'k-other' });
+  const transcribed = C.voiceReducer(sending, { type: 'TRANSCRIBE_OK', generation: sending.generation, text: 'arroz' });
+  for (const s of [idle, consent, asking, listening, sending, transcribed]) {
+    const next = C.voiceReducer(s, { type: 'RETRY_EXPIRED' });
+    assert.equal(next.status, s.status, s.status);
+    assert.equal(next.changed, false, s.status);
+    assert.deepEqual(next.effects, [], s.status);
+  }
+});
+
 /* §7.4 keepBlob retention rule ----------------------------------------------------------------- */
 
 test('keepBlob keeps only while sendable/retryable within 120 s and drops in every §7.4 case', () => {

@@ -1399,6 +1399,27 @@
     return Object.assign({}, state, { effects: effects || [], changed: false });
   }
 
+  function isValidVoiceClock(now) {
+    return typeof now === 'number' && Number.isFinite(now);
+  }
+
+  function disableVoiceRetry(err) {
+    if (!err || !err.canRetry) return err;
+    return Object.assign({}, err, {
+      canRetry: false,
+      actions: err.actions.filter(function (a) { return a !== 'retry'; }),
+      buttons: err.buttons.filter(function (b) { return b.id !== 'retry'; }),
+    });
+  }
+
+  function expireVoiceRetry(state) {
+    return nextVoiceState(state, {
+      error: disableVoiceRetry(state.error),
+      idempotencyKey: null,
+      failedAt: null,
+    }, [{ type: 'drop_blob' }]);
+  }
+
   /** §7.4 state machine with generation guard for async permission & upload results. */
   function voiceReducer(state, event) {
     var s = state || initialVoiceState();
@@ -1498,17 +1519,13 @@
           return keepVoiceState(s, []);
         }
         var mapped = voiceError(ev.error);
-        var nowMs = typeof ev.now === 'number' && Number.isFinite(ev.now) ? ev.now : 0;
-        var windowExpired = s.failedAt !== null && (nowMs < s.failedAt || (nowMs - s.failedAt) > VOICE_LIMITS.RETRY_WINDOW_MS);
+        var hasNow = isValidVoiceClock(ev.now);
+        var windowExpired = !hasNow || (s.failedAt !== null && (ev.now < s.failedAt || (ev.now - s.failedAt) > VOICE_LIMITS.RETRY_WINDOW_MS));
         var canRetryNow = mapped.canRetry && !windowExpired;
         if (mapped.canRetry && windowExpired) {
-          mapped = Object.assign({}, mapped, {
-            canRetry: false,
-            actions: mapped.actions.filter(function (a) { return a !== 'retry'; }),
-            buttons: mapped.buttons.filter(function (b) { return b.id !== 'retry'; }),
-          });
+          mapped = disableVoiceRetry(mapped);
         }
-        var failedAt = canRetryNow ? (s.failedAt !== null ? s.failedAt : nowMs) : null;
+        var failedAt = canRetryNow ? (s.failedAt !== null ? s.failedAt : ev.now) : null;
         var effects = [];
         if (mapped.clearSession) effects.push({ type: 'delete_session' });
         if (!canRetryNow) effects.push({ type: 'drop_blob' });
@@ -1557,21 +1574,21 @@
 
     if (st === 'error') {
       if (type === 'RETRY') {
-        if (!s.error || !s.error.canRetry || s.failedAt === null) {
+        if (!s.error || !s.error.canRetry || !isValidVoiceClock(s.failedAt)) {
           return keepVoiceState(s, []);
         }
-        var retryNow = typeof ev.now === 'number' && Number.isFinite(ev.now) ? ev.now : s.failedAt;
-        if (retryNow < s.failedAt || (retryNow - s.failedAt) > VOICE_LIMITS.RETRY_WINDOW_MS) {
-          var noRetryErr = Object.assign({}, s.error, {
-            canRetry: false,
-            actions: s.error.actions.filter(function (a) { return a !== 'retry'; }),
-            buttons: s.error.buttons.filter(function (b) { return b.id !== 'retry'; }),
-          });
-          return nextVoiceState(s, { error: noRetryErr, idempotencyKey: null, failedAt: null }, [{ type: 'drop_blob' }]);
+        if (!isValidVoiceClock(ev.now) || ev.now < s.failedAt || (ev.now - s.failedAt) > VOICE_LIMITS.RETRY_WINDOW_MS) {
+          return expireVoiceRetry(s);
         }
         return nextVoiceState(s, {
           status: 'sending', mascot: 'thinking',
         }, [{ type: 'upload', generation: s.generation, idempotencyKey: s.idempotencyKey }]);
+      }
+      if (type === 'RETRY_EXPIRED') {
+        if (s.error && s.error.canRetry) {
+          return expireVoiceRetry(s);
+        }
+        return keepVoiceState(s, []);
       }
       if (type === 'RERECORD' || type === 'RETRY_PERMISSION') {
         var gen3 = s.generation + 1;
@@ -1622,8 +1639,9 @@
     if (type === 'TRANSCRIBE_ERROR') {
       var mapped = voiceError(event && event.error);
       if (!mapped.canRetry) return false;
+      if (!isValidVoiceClock(now)) return false;
       if (state && state.failedAt !== null && state.failedAt !== undefined) {
-        return typeof now === 'number' && Number.isFinite(now) &&
+        return isValidVoiceClock(state.failedAt) &&
           now >= state.failedAt && (now - state.failedAt) <= VOICE_LIMITS.RETRY_WINDOW_MS;
       }
       return true;

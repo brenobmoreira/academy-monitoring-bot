@@ -821,3 +821,109 @@ test('textPayload counts Unicode code points rather than UTF-16 code units for T
   assert.ok(mixedRes.bytes <= C.LIMITS.PAYLOAD_BYTES);
   assert.equal(mixedRes.error, null);
 });
+
+/* Clock units integration: pickSession (seconds) vs voiceReducer/keepBlob (milliseconds) ----- */
+
+test('clock units: pickSession uses seconds while voiceReducer and keepBlob use milliseconds', () => {
+  const T_MS = 1_800_000_000_000;
+  const T_S = T_MS / 1000;
+
+  // pickSession works in seconds; passing ms (T_MS) treats the session as expired.
+  const stored = {
+    vu: VALID_VU,
+    ref: REF_A,
+    session: 's1.tokenA',
+    expires_at: T_S + C.VOICE_LIMITS.SESSION_REFRESH_MARGIN_S + 60,
+  };
+  const launch = { vu: VALID_VU, vc: CODE_A, vx: T_S + 600, initData: '' };
+
+  const okSession = C.pickSession(stored, launch, T_S);
+  assert.equal(okSession.action, 'use');
+  assert.deepEqual(okSession.session, stored);
+  assert.equal(okSession.deleteStored, false);
+  assert.equal(okSession.currentRef, REF_A);
+
+  const msSession = C.pickSession(stored, launch, T_MS);
+  assert.notEqual(msSession.action, 'use');
+  assert.equal(msSession.action, 'disabled');
+  assert.equal(msSession.reason, 'auth_expired');
+  assert.equal(msSession.deleteStored, true);
+
+  // Reducer flow up to retryable error with T_MS (milliseconds).
+  let s = C.voiceReducer(C.initialVoiceState(), { type: 'START', consented: true });
+  s = C.voiceReducer(s, { type: 'PERMISSION_GRANTED', generation: s.generation, now: T_MS - 1200 });
+  const sending = C.voiceReducer(s, {
+    type: 'STOP',
+    durationMs: 1200,
+    now: T_MS,
+    idempotencyKey: 'k-unit-e2e',
+  });
+  assert.equal(sending.status, 'sending');
+
+  const errMs = C.voiceReducer(sending, {
+    type: 'TRANSCRIBE_ERROR',
+    generation: sending.generation,
+    error: 'timeout',
+    now: T_MS,
+  });
+  assert.equal(errMs.status, 'error');
+  assert.equal(errMs.failedAt, T_MS);
+  assert.equal(errMs.error.canRetry, true);
+  assert.equal(C.keepBlob({ type: 'TRANSCRIBE_ERROR', error: 'timeout' }, sending, T_MS), true);
+
+  // RETRY within 120 s (T_MS + 119_000) -> upload
+  assert.equal(C.keepBlob({ type: 'RETRY' }, errMs, T_MS + 119_000), true);
+  const retryOk = C.voiceReducer(errMs, { type: 'RETRY', now: T_MS + 119_000 });
+  assert.equal(retryOk.status, 'sending');
+  assert.equal(retryOk.changed, true);
+  assert.equal(retryOk.idempotencyKey, 'k-unit-e2e');
+  assert.deepEqual(retryOk.effects, [
+    { type: 'upload', generation: errMs.generation, idempotencyKey: 'k-unit-e2e' },
+  ]);
+
+  // RETRY past 120 s (T_MS + 121_000 on fresh errMs) -> expired, drops blob
+  assert.equal(C.keepBlob({ type: 'RETRY' }, errMs, T_MS + 121_000), false);
+  const retryExpired = C.voiceReducer(errMs, { type: 'RETRY', now: T_MS + 121_000 });
+  assert.equal(retryExpired.status, 'error');
+  assert.equal(retryExpired.changed, true);
+  assert.equal(retryExpired.error.canRetry, false);
+  assert.equal(retryExpired.idempotencyKey, null);
+  assert.equal(retryExpired.failedAt, null);
+  assert.deepEqual(retryExpired.effects, [{ type: 'drop_blob' }]);
+
+  // Unit-swap gap (documented without modifying src/): isValidVoiceClock only checks
+  // typeof === 'number' && Number.isFinite(now), so passing seconds (T_S) by mistake
+  // passes silently. RETRY at T_S + 119 (and even T_S + 121, past 120 s in real time)
+  // sees delta <= RETRY_WINDOW_MS (120_000) and still emits upload (stretching the
+  // 120 s window to 120_000 s).
+  const errSec = C.voiceReducer(sending, {
+    type: 'TRANSCRIBE_ERROR',
+    generation: sending.generation,
+    error: 'timeout',
+    now: T_S,
+  });
+  assert.equal(errSec.status, 'error');
+  assert.equal(errSec.failedAt, T_S);
+  assert.equal(errSec.error.canRetry, true);
+
+  assert.equal(C.keepBlob({ type: 'RETRY' }, errSec, T_S + 119), true);
+  const retrySec119 = C.voiceReducer(errSec, { type: 'RETRY', now: T_S + 119 });
+  assert.equal(retrySec119.status, 'sending');
+  assert.ok(retrySec119.effects.some((e) => e.type === 'upload'));
+
+  assert.equal(C.keepBlob({ type: 'RETRY' }, errSec, T_S + 121), true);
+  const retrySec121 = C.voiceReducer(errSec, { type: 'RETRY', now: T_S + 121 });
+  assert.equal(retrySec121.status, 'sending');
+  assert.ok(retrySec121.effects.some((e) => e.type === 'upload'));
+
+  // Mixed units (ms failure + s retry, or s failure + ms retry) expire immediately.
+  assert.equal(C.keepBlob({ type: 'RETRY' }, errMs, T_S + 119), false);
+  const mixedMsThenSec = C.voiceReducer(errMs, { type: 'RETRY', now: T_S + 119 });
+  assert.equal(mixedMsThenSec.error.canRetry, false);
+  assert.deepEqual(mixedMsThenSec.effects, [{ type: 'drop_blob' }]);
+
+  assert.equal(C.keepBlob({ type: 'RETRY' }, errSec, T_MS + 119_000), false);
+  const mixedSecThenMs = C.voiceReducer(errSec, { type: 'RETRY', now: T_MS + 119_000 });
+  assert.equal(mixedSecThenMs.error.canRetry, false);
+  assert.deepEqual(mixedSecThenMs.effects, [{ type: 'drop_blob' }]);
+});

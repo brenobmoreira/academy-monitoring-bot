@@ -8,12 +8,14 @@ an in-memory sheet before it fails, and serves a real 302 -> GET, so `follow_red
 import asyncio
 import json
 import logging
+import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
 from google.adk.agents.run_config import RunConfig
+from google.adk.runners import Runner
 from google.genai import types
 
 from agent import miniapp
@@ -743,7 +745,40 @@ async def test_a_write_waits_for_the_one_before_it_and_a_read_does_not():
     assert journal.outcomes == ["uncertain"]
 
 
-def test_the_bot_leaves_the_tools_on_the_event_loop():
+async def test_the_bot_leaves_the_tools_on_the_event_loop(monkeypatch):
     # The write lock is an asyncio.Lock: it holds while ADK runs tools as tasks on the bot's loop.
-    # A thread pool for tools (each with a loop of its own) would need another kind of lock.
-    assert RunConfig(max_llm_calls=8).tool_thread_pool_config is None
+    # Capture the RunConfig actually passed by Bot.reply and verify the write tool executes on
+    # this test's running loop and thread (not a worker thread from tool_thread_pool_config).
+    seen_configs: list[RunConfig | None] = []
+    real_run_async = Runner.run_async
+
+    def spy_run_async(self, *args, **kwargs):
+        seen_configs.append(kwargs.get("run_config"))
+        return real_run_async(self, *args, **kwargs)
+
+    monkeypatch.setattr(Runner, "run_async", spy_run_async)
+
+    class RecordingSheet(SlowClient):
+        def __init__(self, app: WebApp) -> None:
+            super().__init__(URL, "k", httpx.AsyncClient(transport=httpx.MockTransport(app)))
+            self.contexts: list[tuple[asyncio.AbstractEventLoop, int]] = []
+
+        async def call(self, op, args, *, request_id=None):
+            self.contexts.append((asyncio.get_running_loop(), threading.get_ident()))
+            return await super().call(op, args, request_id=request_id)
+
+    test_loop = asyncio.get_running_loop()
+    test_thread = threading.get_ident()
+    app = WebApp([body(OK)])
+    sheet = RecordingSheet(app)
+    b, _ = bot(sheet, [SAVE, say("ok")])
+
+    answer = await b.reply("peso 82,4")
+
+    assert answer.outcome == "committed" and len(app.posts) == 1
+    assert len(seen_configs) == 1
+    cfg = seen_configs[0]
+    assert cfg is None or cfg.tool_thread_pool_config is None
+    assert len(sheet.contexts) == 1
+    tool_loop, tool_thread = sheet.contexts[0]
+    assert tool_loop is test_loop and tool_thread == test_thread

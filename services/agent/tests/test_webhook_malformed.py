@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from agent import logs, webhook
-from agent.handler import Handler
+from agent.handler import Handler, media_ref, strict_int
 
 from .fakes import FakeSheet
 from .test_handler import FakeBot, FakeTelegram, tap, update
@@ -228,6 +228,99 @@ def test_a_photo_field_of_the_wrong_type_is_a_message_with_nothing_to_read(world
     output.assert_clean()
 
 
+# integers: a bool is never one -----------------------------------------------------------------
+
+BUTTONS = ["ok", "undo:w1", "retry:k1", "fix", f"{SENTINEL}:x"]
+NOT_A_MESSAGE_ID = [True, False, "9", 9.5, [9], {"id": 9}]
+
+
+def id_tap(data: str, message_id: Any, chat_id: int = 42) -> dict[str, Any]:
+    message = {"message_id": message_id, "chat": {"id": chat_id}, "text": SENTINEL}
+    return tap_update({"id": f"cb-{SENTINEL}", "data": data, "message": message})
+
+
+@pytest.mark.parametrize("call", ENTRY_POINTS)
+@pytest.mark.parametrize("data", BUTTONS)
+@pytest.mark.parametrize("message_id", NOT_A_MESSAGE_ID)
+def test_a_tap_whose_message_id_is_not_an_integer_does_nothing_at_all(world, output, call, data, message_id):
+    """Not the undo, not the retry, not a message, and not the answer to the tap either."""
+    assert call("sec", id_tap(data, message_id)) == ("ok", 200)
+    assert world.untouched()
+    assert "ignoring malformed Telegram update 502: bad callback_query.message.message_id" in output.text
+    output.assert_clean()
+
+
+@pytest.mark.parametrize("call", ENTRY_POINTS)
+def test_the_same_undo_tap_with_an_integer_message_id_reaches_the_sheet(world, call):
+    """The control of the test above: only the type of `message_id` differs."""
+    assert call("sec", id_tap("undo:w1", 9)) == ("ok", 200)
+    assert [op for op, _ in world.sheet.calls] == ["write.undo"]
+    assert len(world.telegram.answered) == 1
+
+
+@pytest.mark.parametrize("call", ENTRY_POINTS)
+@pytest.mark.parametrize("message_id", NOT_A_MESSAGE_ID)
+def test_a_message_whose_message_id_is_not_an_integer_is_ignored(world, output, call, message_id):
+    body = message_update({"message_id": message_id, "chat": {"id": 42}, "text": SENTINEL})
+    assert call("sec", body) == ("ok", 200)
+    assert world.untouched()
+    assert "ignoring malformed Telegram update 501: bad message.message_id" in output.text
+    output.assert_clean()
+
+
+@pytest.mark.parametrize("call", ENTRY_POINTS)
+@pytest.mark.parametrize("chat_id", [True, False])
+def test_a_boolean_chat_id_is_malformed_in_a_tap_too(world, output, call, chat_id):
+    assert call("sec", id_tap("undo:w1", 9, chat_id=chat_id)) == ("ok", 200)
+    assert world.untouched()
+    assert "bad callback_query.message.chat.id" in output.text
+
+
+def test_strict_int_takes_integers_only():
+    assert [strict_int(v) for v in (0, 7, -3)] == [0, 7, -3]
+    assert [strict_int(v) for v in (True, False, 1.0, "1", None, [1])] == [None] * 6
+
+
+def test_a_boolean_file_size_is_an_unknown_size():
+    voice = {"voice": {"file_id": "v1", "file_size": True}}
+    photo = {"photo": [{"file_id": "p1", "file_size": True}, {"file_id": "p2", "file_size": 10}]}
+    assert media_ref(voice, 100) == ("v1", None, "audio/ogg")
+    assert media_ref(photo, 100) == ("p2", 10, "image/jpeg")
+
+
+# optional fields of the wrong type --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("call", ENTRY_POINTS)
+@pytest.mark.parametrize("form", [SENTINEL, [SENTINEL], 7, True, {}, {"data": 7}, {"data": [SENTINEL]}])
+def test_an_invalid_web_app_data_does_not_drop_the_text_of_the_message(world, output, call, form):
+    body = message_update({"chat": {"id": 42}, "text": "peso 82", "web_app_data": form})
+    assert call("sec", body) == ("ok", 200)
+    assert world.bot.texts == [("peso 82", "42")]
+    assert world.telegram.sent == [(42, "ok")]
+    assert world.sheet.calls == []
+    output.assert_clean()
+
+
+@pytest.mark.parametrize("call", ENTRY_POINTS)
+@pytest.mark.parametrize(
+    ("is_bot", "context"),
+    [
+        (True, "21/09 · Peso kg 82,4"),
+        ("false", None),
+        ("true", None),
+        (1, None),
+        (False, None),
+        ([True], None),
+    ],
+)
+def test_only_is_bot_true_makes_the_replied_text_context_for_the_model(world, call, is_bot, context):
+    replied = {"from": {"is_bot": is_bot}, "text": "21/09 · Peso kg 82,4"}
+    body = message_update({"chat": {"id": 42}, "text": "peso 82", "reply_to_message": replied})
+    assert call("sec", body) == ("ok", 200)
+    assert world.bot.contexts == [context]
+
+
 # the net in webhook.process ---------------------------------------------------------------------
 
 
@@ -247,7 +340,7 @@ def leaky() -> LeakyError:
         return err
 
 
-NET_LINE = "update {} failed: tests.test_webhook_malformed.LeakyError <- ValueError"
+NET_LINE = "update {} failed: phase={} tests.test_webhook_malformed.LeakyError <- ValueError"
 
 
 @pytest.mark.parametrize("call", ENTRY_POINTS)
@@ -261,7 +354,7 @@ def test_an_exception_of_the_processing_is_answered_200_and_logged_by_its_class(
     monkeypatch.setattr(webhook, "handle_update", explode)
     body = message_update({"chat": {"id": CHAT}, "text": SENTINEL}, update_id=update_id)
     assert call("sec", body) == ("ok", 200)
-    assert NET_LINE.format(logged) in output.text
+    assert NET_LINE.format(logged, "handle") in output.text
     assert world.untouched()
     output.assert_clean()
 
@@ -275,7 +368,7 @@ def test_a_handler_that_cannot_be_built_is_answered_200_and_logged_by_its_class(
 
     monkeypatch.setattr(webhook, "build_handler", build)
     assert call("sec", update(text=SENTINEL, chat_id=CHAT, update_id=505)) == ("ok", 200)
-    assert NET_LINE.format(505) in output.text
+    assert NET_LINE.format(505, "build") in output.text
     assert world.untouched()
     output.assert_clean()
 

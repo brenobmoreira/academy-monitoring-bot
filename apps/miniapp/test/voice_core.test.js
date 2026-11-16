@@ -507,6 +507,78 @@ test('voiceReducer: invalid transitions are refused without state change or acti
   assert.equal(listening.changed, false);
 });
 
+test('voiceReducer: stale PERMISSION_GRANTED stops tracks without changing status in every state', () => {
+  const afterPriorCancel = () => {
+    const first = C.voiceReducer(C.initialVoiceState(), { type: 'START', consented: true }); // gen 1
+    return C.voiceReducer(first, { type: 'CANCEL' }); // idle, gen 2
+  };
+
+  const cases = [
+    {
+      status: 'idle',
+      setup: () => afterPriorCancel(),
+    },
+    {
+      status: 'consent',
+      setup: () => C.voiceReducer(afterPriorCancel(), { type: 'START', consented: false }),
+    },
+    {
+      status: 'asking_permission',
+      setup: () => C.voiceReducer(afterPriorCancel(), { type: 'START', consented: true }),
+    },
+    {
+      status: 'listening',
+      setup: () => {
+        const asking = C.voiceReducer(afterPriorCancel(), { type: 'START', consented: true });
+        return C.voiceReducer(asking, { type: 'PERMISSION_GRANTED', generation: asking.generation, now: 1000 });
+      },
+    },
+    {
+      status: 'sending',
+      setup: () => {
+        const asking = C.voiceReducer(afterPriorCancel(), { type: 'START', consented: true });
+        const listening = C.voiceReducer(asking, { type: 'PERMISSION_GRANTED', generation: asking.generation, now: 1000 });
+        return C.voiceReducer(listening, { type: 'STOP', durationMs: 1200, now: 2200, idempotencyKey: 'k-stale' });
+      },
+    },
+    {
+      status: 'transcribed',
+      setup: () => {
+        const asking = C.voiceReducer(afterPriorCancel(), { type: 'START', consented: true });
+        const listening = C.voiceReducer(asking, { type: 'PERMISSION_GRANTED', generation: asking.generation, now: 1000 });
+        const sending = C.voiceReducer(listening, { type: 'STOP', durationMs: 1200, now: 2200, idempotencyKey: 'k-stale' });
+        return C.voiceReducer(sending, { type: 'TRANSCRIBE_OK', generation: sending.generation, text: 'arroz' });
+      },
+    },
+    {
+      status: 'error',
+      setup: () => {
+        const asking = C.voiceReducer(afterPriorCancel(), { type: 'START', consented: true });
+        const listening = C.voiceReducer(asking, { type: 'PERMISSION_GRANTED', generation: asking.generation, now: 1000 });
+        const sending = C.voiceReducer(listening, { type: 'STOP', durationMs: 1200, now: 2200, idempotencyKey: 'k-stale' });
+        return C.voiceReducer(sending, { type: 'TRANSCRIBE_ERROR', generation: sending.generation, error: 'timeout', now: 3000 });
+      },
+    },
+  ];
+
+  for (const c of cases) {
+    const state = c.setup();
+    assert.equal(state.status, c.status, 'setup ' + c.status);
+    assert.notEqual(state.generation, 1, 'stale generation differs in ' + c.status);
+    const next = C.voiceReducer(state, { type: 'PERMISSION_GRANTED', generation: 1, now: 5000 });
+    assert.equal(next.status, c.status, 'status unchanged in ' + c.status);
+    assert.equal(next.changed, false, 'changed=false in ' + c.status);
+    assert.deepEqual(next.effects, [{ type: 'stop_tracks' }], 'stop_tracks in ' + c.status);
+  }
+
+  // Control: asking_permission with matching generation transitions to listening and starts recorder
+  const asking = C.voiceReducer(afterPriorCancel(), { type: 'START', consented: true });
+  const granted = C.voiceReducer(asking, { type: 'PERMISSION_GRANTED', generation: asking.generation, now: 5000 });
+  assert.equal(granted.status, 'listening');
+  assert.equal(granted.changed, true);
+  assert.deepEqual(granted.effects, [{ type: 'start_recorder', generation: asking.generation }]);
+});
+
 /* §7.4 keepBlob retention rule ----------------------------------------------------------------- */
 
 test('keepBlob keeps only while sendable/retryable within 120 s and drops in every §7.4 case', () => {

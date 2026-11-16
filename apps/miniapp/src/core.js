@@ -1406,6 +1406,10 @@
     var type = typeof ev.type === 'string' ? ev.type : '';
     var st = s.status;
 
+    if (type === 'PERMISSION_GRANTED' && !(st === 'asking_permission' && ev.generation === s.generation)) {
+      return keepVoiceState(s, [{ type: 'stop_tracks' }]);
+    }
+
     if (st === 'idle') {
       if (type === 'START') {
         if (!ev.consented) {
@@ -1416,9 +1420,6 @@
           status: 'asking_permission', generation: gen0, mascot: 'listening',
           text: '', textError: '', error: null, idempotencyKey: null, failedAt: null,
         }, [{ type: 'request_mic', generation: gen0 }]);
-      }
-      if (type === 'PERMISSION_GRANTED') {
-        return keepVoiceState(s, [{ type: 'stop_tracks' }]);
       }
       return keepVoiceState(s, []);
     }
@@ -1439,9 +1440,6 @@
 
     if (st === 'asking_permission') {
       if (type === 'PERMISSION_GRANTED') {
-        if (ev.generation !== s.generation) {
-          return keepVoiceState(s, [{ type: 'stop_tracks' }]);
-        }
         return nextVoiceState(s, { status: 'listening', mascot: 'listening' }, [{ type: 'start_recorder', generation: s.generation }]);
       }
       if (type === 'PERMISSION_DENIED') {
@@ -1481,9 +1479,6 @@
         return nextVoiceState(s, {
           status: 'idle', generation: s.generation + 1, mascot: null, idempotencyKey: null, failedAt: null,
         }, [{ type: 'stop_recorder' }, { type: 'stop_tracks' }, { type: 'drop_blob' }]);
-      }
-      if (type === 'PERMISSION_GRANTED' && ev.generation !== s.generation) {
-        return keepVoiceState(s, [{ type: 'stop_tracks' }]);
       }
       return keepVoiceState(s, []);
     }

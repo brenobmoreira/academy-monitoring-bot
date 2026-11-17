@@ -19,6 +19,7 @@ import httpx
 import litellm
 import pytest
 from google.adk.models import LlmRequest, LlmResponse
+from pydantic import SecretStr
 
 from agent import buttons, logs, miniapp
 from agent.bot import (
@@ -29,10 +30,13 @@ from agent.bot import (
     Bot,
     Media,
 )
+from agent.budget import MemoryBudget
 from agent.handler import DOWNLOAD_FAILED, FAILURE, Handler
 from agent.llm import RetryingClient
+from agent.settings import TranscribeSettings
 from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient, TelegramError
+from agent.transcribe import MIN_BODY_BYTES, Audio, TranscribeError, Transcriber
 
 from .fakes import FakeLiteLLMClient, FakeSheet, ScriptedLlm, call, say, text_response
 from .test_handler import FakeBot, FakeTelegram, tap, update, voice_update
@@ -388,6 +392,46 @@ async def test_a_transient_model_retry_logs_through_describe_without_sentinel_cl
     )
 
 
+async def test_a_transient_transcription_retry_logs_through_describe_without_sentinel_class_name(
+    captured, capsys
+):
+    caplog, stream = captured
+    smuggled = type(f"Leak {TEXT_SENTINEL}", (litellm.ServiceUnavailableError,), {})
+    err = smuggled(
+        f"overloaded {TEXT_SENTINEL} {AUDIO_B64}",
+        llm_provider=TEXT_SENTINEL,
+        model="gemini/gemini-3.8-flash",
+    )
+    err.code = TEXT_SENTINEL
+    audio_bytes = (AUDIO_SENTINEL * (MIN_BODY_BYTES // len(AUDIO_SENTINEL) + 1))[:MIN_BODY_BYTES]
+    transcript_text = f"peso 82,5 {TEXT_SENTINEL}"
+    client = FakeLiteLLMClient([err, text_response(transcript_text)])
+    settings = TranscribeSettings.model_construct(
+        TRANSCRIBE_MODEL="gemini/gemini-3.8-flash",
+        TRANSCRIBE_API_KEY=SecretStr("key-for-tests"),
+        TRANSCRIBE_RETRIES=1,
+        TRANSCRIBE_RETRY_WAIT_S=0.0,
+    )
+    budget = MemoryBudget(principal_daily=100_000, global_daily=100_000, timezone="America/Sao_Paulo")
+    transcriber = Transcriber(settings, budget, client=client, clock=lambda: NOW)
+
+    transcript = await transcriber.transcribe(
+        Audio("audio/ogg", audio_bytes),
+        principal_key=f"tg:{CHAT}",
+    )
+
+    assert transcript.text == transcript_text
+    assert len(client.requests) == 2
+    std = capsys.readouterr()
+    assert_clean(caplog.records, stream.getvalue() + std.out + std.err)
+    assert str(CHAT) not in caplog.text + stream.getvalue() + std.out + std.err
+    assert (
+        "model gemini/gemini-3.8-flash unavailable (Exception[status=503 code=other]), attempt 1 of 2"
+        in caplog.text
+    )
+    assert "transcribed: model=gemini/gemini-3.8-flash" in caplog.text
+
+
 async def test_a_rejected_audio_logs_no_audio_no_caption_and_no_provider_text(captured):
     caplog, stream = captured
     answer = await bot(FakeSheet(), [leaky_bad_request()]).reply(
@@ -673,8 +717,6 @@ async def test_a_failing_sheet_call_logs_the_operation_and_the_http_status_only(
 
 
 def test_describe_prints_the_transcription_error_codes():
-    from agent.transcribe import TranscribeError
-
     for code in (
         "unsupported_format",
         "too_long",

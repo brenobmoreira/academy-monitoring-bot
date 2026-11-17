@@ -25,11 +25,19 @@ updates:
         patterns:
           - google-adk
           - litellm
-          - functions-framework
           - google-genai
           - google-auth
           - google-cloud-*
+          - functions-framework
+          - flask
+          - starlette
+          - fastapi
+          - uvicorn*
+          - httpx
+          - pydantic*
+          - python-dotenv
         update-types:
+          - minor
           - patch
       other:
         patterns:
@@ -40,10 +48,17 @@ updates:
           - pytest*
           - google-adk
           - litellm
-          - functions-framework
           - google-genai
           - google-auth
           - google-cloud-*
+          - functions-framework
+          - flask
+          - starlette
+          - fastapi
+          - uvicorn*
+          - httpx
+          - pydantic*
+          - python-dotenv
         update-types:
           - minor
           - patch

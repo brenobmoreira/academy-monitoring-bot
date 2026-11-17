@@ -359,3 +359,127 @@ test('body map: without the component the page works as before', async () => {
   const p = await inReview(storageWith(doneWorkoutDraft(today(), SAMPLE.next)));
   assert.equal(p.review.hidden, false);
 });
+
+/* sheet focus trap & scrollInto -------------------------------------------------------------- */
+
+function keyEvent(key, shiftKey = false) {
+  let prevented = false;
+  return {
+    type: 'keydown',
+    key,
+    shiftKey,
+    preventDefault() { prevented = true; },
+    get prevented() { return prevented; },
+  };
+}
+
+test('sheet: openSheet traps Tab/Shift+Tab circularly, focuses fallback element, and restores opener on close', async () => {
+  const p = await boot({ storage: storageWith(doneWorkoutDraft(today(), SAMPLE.next)) });
+  const addBtn = button(p.doc.getElementById('view'), 'Adicionar exercício');
+  p.focus(addBtn);
+  addBtn.click();
+
+  const sheet = p.doc.getElementById('sheet');
+  assert.equal(sheet.hidden, false);
+  assert.equal(p.doc.getElementById('sheet-title').getAttribute('tabindex'), '-1');
+
+  p.timers.run(60);
+  const input = sheet.querySelector('input');
+  const results = sheet.querySelectorAll('.result');
+  assert.ok(results.length >= 2, 'exercise picker has at least 2 focusable result buttons');
+  assert.equal(p.doc.activeElement, input, 'explicit focusEl receives initial focus');
+
+  // Shift+Tab on first focusable wraps to last focusable
+  const shiftFirst = keyEvent('Tab', true);
+  p.doc.dispatchEvent(shiftFirst);
+  assert.equal(shiftFirst.prevented, true);
+  assert.equal(p.doc.activeElement, results[results.length - 1]);
+
+  // Tab on last focusable wraps back to first focusable
+  const tabLast = keyEvent('Tab', false);
+  p.doc.dispatchEvent(tabLast);
+  assert.equal(tabLast.prevented, true);
+  assert.equal(p.doc.activeElement, input);
+
+  // Tab from a middle item is allowed without trapping override
+  p.focus(results[0]);
+  const tabMid = keyEvent('Tab', false);
+  p.doc.dispatchEvent(tabMid);
+  assert.equal(tabMid.prevented, false);
+
+  // Escape closes the sheet, clears the trap, and restores focus to the opener
+  p.doc.dispatchEvent(keyEvent('Escape'));
+  assert.equal(sheet.hidden, true);
+  assert.equal(p.doc.activeElement, addBtn);
+
+  // Trap listener is cleaned up after closeSheet
+  const outsideTab = keyEvent('Tab', false);
+  p.doc.dispatchEvent(outsideTab);
+  assert.equal(outsideTab.prevented, false);
+
+  // If opener was detached before closing, closeSheet does not restore focus to it
+  p.focus(addBtn);
+  addBtn.click();
+  p.timers.run(60);
+  addBtn.parentNode.removeChild(addBtn);
+  p.doc.dispatchEvent(keyEvent('Escape'));
+  assert.notEqual(p.doc.activeElement, addBtn);
+});
+
+test('sheet: openSheet without focusEl focuses the first focusable item (openRestore)', async () => {
+  const storage = storageWith(foodDraft(today()));
+  const first = await inReview(storage, 'food');
+  first.press();
+
+  const p = await boot({ storage, view: 'food' });
+  const restoreBtn = button(p.doc.getElementById('view'), 'Restaurar último envio');
+  p.focus(restoreBtn);
+  restoreBtn.click();
+  p.timers.run(60);
+
+  const firstResult = p.doc.getElementById('sheet').querySelector('.result');
+  assert.equal(p.doc.activeElement, firstResult);
+
+  // Backdrop click closes and restores focus to restoreBtn
+  p.doc.getElementById('sheet-backdrop').click();
+  assert.equal(p.doc.getElementById('sheet').hidden, true);
+  assert.equal(p.doc.activeElement, restoreBtn);
+});
+
+test('scrollInto: uses auto when ShapeMotion.enabled() is false and smooth when true', async () => {
+  const calls = [];
+  let motionEnabled = false;
+  let origScroll = null;
+  const card = C.planCards(C.normalizeCatalog(SAMPLE), SAMPLE.next)[0];
+  card.sets[0].reps = '8'; // missing kg triggers validation scrollInto(el, 'start')
+
+  const p = await boot({
+    storage: pulsoWorkout([card]),
+    globals(ctx) {
+      origScroll = ctx.Element.prototype.scrollIntoView;
+      ctx.Element.prototype.scrollIntoView = function (opts) { calls.push({ ...opts }); };
+      return { ShapeMotion: { enabled: () => motionEnabled } };
+    },
+  });
+
+  try {
+    p.press();
+    assert.deepEqual(calls.at(-1), { behavior: 'auto', block: 'start' });
+
+    motionEnabled = true;
+    p.press();
+    assert.deepEqual(calls.at(-1), { behavior: 'smooth', block: 'start' });
+
+    // Exercise picker uses block: 'center' and respects ShapeMotion.enabled()
+    button(p.doc.getElementById('view'), 'Adicionar exercício').click();
+    p.doc.getElementById('sheet').querySelector('.result').click();
+    assert.deepEqual(calls.at(-1), { behavior: 'smooth', block: 'center' });
+
+    motionEnabled = false;
+    button(p.doc.getElementById('view'), 'Adicionar exercício').click();
+    p.doc.getElementById('sheet').querySelector('.result').click();
+    assert.deepEqual(calls.at(-1), { behavior: 'auto', block: 'center' });
+  } finally {
+    if (origScroll) p.doc.body.constructor.prototype.scrollIntoView = origScroll;
+  }
+});

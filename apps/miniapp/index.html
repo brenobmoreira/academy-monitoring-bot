@@ -33,11 +33,14 @@
 
     <main id="view" class="view"></main>
 
+    <section id="voice-panel" class="voice-panel" hidden></section>
+
     <section id="review" class="review" hidden></section>
 
     <div class="dock" id="dock" hidden>
       <button type="button" class="dock-secondary" id="dock-secondary" hidden></button>
       <button type="button" class="dock-primary" id="dock-primary"></button>
+      <button type="button" class="dock-mic" id="dock-mic" aria-label="Gravar por voz" hidden></button>
     </div>
 
     <div class="sheet-backdrop" id="sheet-backdrop" hidden></div>
@@ -48,6 +51,8 @@
   <script src="src/avatar.js"></script>
   <script src="src/body.js"></script>
   <script src="src/motion.js"></script>
+  <script src="src/voice.js"></script>
+  <script src="dev/voice-stub.js"></script>
   <script src="src/app.js"></script>
   <script>
     // Runs right after app.js: if it never started (a WebView too old for it), say so plainly.

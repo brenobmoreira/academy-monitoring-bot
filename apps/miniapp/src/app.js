@@ -190,6 +190,11 @@
     if (!M || typeof M[name] !== 'function') return null;
     try { return M[name].apply(M, Array.prototype.slice.call(arguments, 1)); } catch (e) { return null; }
   }
+  function scrollInto(el, block) {
+    if (!el || typeof el.scrollIntoView !== 'function') return;
+    var smooth = !!(window.ShapeMotion && typeof window.ShapeMotion.enabled === 'function' && window.ShapeMotion.enabled());
+    el.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: block || 'center' });
+  }
   /** Run a re-render that drops `el`: its ghost fades out and what was below closes the gap. */
   function dropping(el, fn) {
     var after = motion('leave', el, els.view);
@@ -989,7 +994,7 @@
             say('idle', e.name + ' entrou na lista. Preencha as séries.');
             var el = cardEls[cardEls.length - 1];
             motion('enter', el);
-            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            scrollInto(el, 'center');
           },
         }, h('span', { text: e.name }), h('span', { class: 'tag', text: e.group })));
       }) : [h('li', { class: 'hint', text: options.length ? 'Nada com esse nome no catálogo.' : 'Todos os exercícios do catálogo já estão na lista.' })]);
@@ -1284,7 +1289,7 @@
         if (firstCard) cards()[firstCard.card].open = true;
         renderWorkout();
         var el = firstCard ? cardEls[firstCard.card] : null;
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        scrollInto(el, 'start');
         nudge(el);
       } else {
         renderFood();

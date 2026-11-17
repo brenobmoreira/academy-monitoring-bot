@@ -268,7 +268,10 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   overflow: hidden;
-  scroll-margin-top: calc(var(--safe-top) + 96px);
+}
+.card, .panel, .step-input, .text-input, .textarea {
+  scroll-margin-top: calc(var(--safe-top) + 104px);
+  scroll-margin-bottom: calc(var(--dock-h) + var(--safe-bottom) + 16px);
 }
 .card[data-status="error"] { box-shadow: inset 0 0 0 2px var(--alert), var(--shadow); }
 .card-head {

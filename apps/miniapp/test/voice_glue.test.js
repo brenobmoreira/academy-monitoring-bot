@@ -1245,4 +1245,120 @@ test('C6b-3: abort_fetch on cancel/hide/collapse, 401 clears session, and no aud
   assert.equal(rawStorage.raw(C.VOICE_SESSION_KEY), null);
 });
 
+test('C6b-fix1: cancelled recording late ondataavailable/onstop/onerror cannot pollute or trigger next recording upload', async () => {
+  let nowMs = T_MS;
+  const storage = memoryStorage({ [C.VOICE_CONSENT_KEY]: '1' });
+  const recorders = [];
+
+  class BrowserLikeMediaRecorder {
+    static isTypeSupported(mime) {
+      return mime === 'audio/webm;codecs=opus';
+    }
+    constructor(stream, opts) {
+      this.stream = stream;
+      this.opts = opts;
+      this.state = 'inactive';
+      this.ondataavailable = null;
+      this.onstop = null;
+      this.onerror = null;
+      recorders.push(this);
+    }
+    start() {
+      this.state = 'recording';
+    }
+    stop() {
+      if (this.state === 'inactive') return;
+      this.state = 'inactive';
+      // Real browsers emit final ondataavailable and onstop asynchronously AFTER stop() returns.
+    }
+    deliverLateStop(finalBytes) {
+      if (this.ondataavailable) this.ondataavailable({ data: new Uint8Array(finalBytes) });
+      if (this.onstop) this.onstop();
+    }
+  }
+
+  const uploads = [];
+  const fetchCalls = [];
+  const timers = makeFakeTimers();
+
+  const ctrl = V.createVoiceController({
+    storage,
+    session: makeTestSession(),
+    clock: () => nowMs,
+    getUserMedia: async () => makeFakeStream(1),
+    MediaRecorder: BrowserLikeMediaRecorder,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    onUpload: (u) => uploads.push(u),
+    fetch: async (url, init) => {
+      fetchCalls.push({ url, init });
+      return jsonResponse(200, { v: 1, id: 'a'.repeat(32), text: 'ok' });
+    },
+  });
+
+  // Scenario 1: Cancel A -> start B -> B stops (sending) -> A's late events arrive BEFORE B's onstop
+  ctrl.start();
+  await flushMicrotasks();
+  const recA = recorders[0];
+  recA.ondataavailable({ data: new Uint8Array([1, 1]) });
+  ctrl.cancel();
+  assert.equal(ctrl.state().status, 'idle');
+
+  ctrl.start();
+  await flushMicrotasks();
+  const recB = recorders[1];
+  recB.ondataavailable({ data: new Uint8Array([2, 2]) });
+  nowMs += 1500;
+  ctrl.stop();
+  assert.equal(ctrl.state().status, 'sending');
+  assert.equal(uploads.length, 0, 'B must wait for B.onstop before uploading');
+  assert.equal(fetchCalls.length, 0);
+
+  // Late events from cancelled A arrive while B is waiting for B.onstop
+  recA.deliverLateStop([9, 9]);
+  if (recA.onerror) recA.onerror({ error: { name: 'NotReadableError' } });
+  await flushMicrotasks();
+
+  assert.equal(ctrl.state().status, 'sending', 'late events from A must not trigger upload or error B');
+  assert.equal(uploads.length, 0, 'A.onstop must NOT trigger B upload');
+  assert.equal(fetchCalls.length, 0);
+
+  // Now B's async post-stop ondataavailable and delayed onstop arrive
+  recB.deliverLateStop([3, 3]);
+  assert.equal(uploads.length, 1);
+  assert.equal(fetchCalls.length, 1);
+  const uploadedBytes = new Uint8Array(await fetchCalls[0].init.body.arrayBuffer());
+  assert.deepEqual([...uploadedBytes], [2, 2, 3, 3]);
+
+  await flushMicrotasks();
+  assert.equal(ctrl.state().status, 'transcribed');
+
+  // Scenario 2: Cancel C -> start D (still listening) -> C's late events arrive while D is listening -> D stops
+  ctrl.rerecord();
+  await flushMicrotasks();
+  const recC = recorders[2];
+  recC.ondataavailable({ data: new Uint8Array([7, 7]) });
+  ctrl.cancel();
+
+  ctrl.start();
+  await flushMicrotasks();
+  const recD = recorders[3];
+  recD.ondataavailable({ data: new Uint8Array([4, 4]) });
+
+  // C's late events arrive while D is listening
+  recC.deliverLateStop([8, 8]);
+  if (recC.onerror) recC.onerror({ error: { name: 'AbortError' } });
+  assert.equal(ctrl.state().status, 'listening');
+
+  nowMs += 1200;
+  ctrl.stop();
+  recD.deliverLateStop([5, 5]);
+  assert.equal(fetchCalls.length, 2);
+  const uploadedBytes2 = new Uint8Array(await fetchCalls[1].init.body.arrayBuffer());
+  assert.deepEqual([...uploadedBytes2], [4, 4, 5, 5]);
+  await flushMicrotasks();
+  assert.equal(ctrl.state().status, 'transcribed');
+});
+
+
 

@@ -401,13 +401,12 @@
     var activeSession = o.session !== undefined ? o.session : null;
     var activeStream = null;
     var activeRecorder = null;
+    var activeRecording = null;
     var autoStopTimer = null;
     var retryExpiryTimer = null;
     var activeUpload = null;
     var startedAtMs = 0;
-    var activeMime = '';
-    var chunks = [];
-    var discardRecording = false;
+    var currentMime = '';
     var currentBlob = null;
     var pendingUpload = null;
     var lastDurationMs = 0;
@@ -476,10 +475,14 @@
     }
 
     function dropBlobState() {
-      discardRecording = true;
+      if (activeRecording) {
+        activeRecording.discarded = true;
+        activeRecording.chunks = [];
+        activeRecording = null;
+      }
       pendingUpload = null;
       currentBlob = null;
-      chunks = [];
+      currentMime = '';
     }
 
     function uploadTranscription(meta) {
@@ -520,7 +523,7 @@
 
       var headers = {
         Authorization: 'Bearer ' + info.token,
-        'Content-Type': activeMime || (blobToSend && blobToSend.type) || 'application/octet-stream',
+        'Content-Type': currentMime || (blobToSend && blobToSend.type) || 'application/octet-stream',
         'Idempotency-Key': meta.idempotencyKey,
       };
       if (typeof lastDurationMs === 'number' && Number.isFinite(lastDurationMs) && lastDurationMs > 0) {
@@ -616,7 +619,7 @@
           generation: meta.generation,
           idempotencyKey: meta.idempotencyKey,
           blob: currentBlob,
-          mimeType: activeMime,
+          mimeType: currentMime,
           durationMs: lastDurationMs,
         });
       }
@@ -638,6 +641,7 @@
     }
 
     function startRecorder(generation) {
+      if (generation !== state.generation) return;
       var stream = activeStream;
       if (!stream || typeof MediaRecorderCtor !== 'function') {
         dispatch({ type: 'RECORDER_ERROR', error: 'no_supported_format' });
@@ -664,37 +668,59 @@
         return;
       }
 
+      var recCtx = {
+        generation: generation,
+        mime: mime,
+        chunks: [],
+        discarded: false,
+        stopped: false,
+        rec: rec,
+      };
+
       activeRecorder = rec;
-      activeMime = mime;
-      chunks = [];
+      activeRecording = recCtx;
       currentBlob = null;
+      currentMime = '';
       pendingUpload = null;
-      discardRecording = false;
       startedAtMs = clockFn();
       lastDurationMs = 0;
 
       rec.ondataavailable = function (e) {
-        if (!discardRecording && e && e.data && (e.data.size === undefined || e.data.size > 0)) {
-          chunks.push(e.data);
+        if (recCtx.discarded || recCtx.stopped || recCtx.generation !== state.generation || activeRecording !== recCtx) {
+          return;
+        }
+        if (e && e.data && (e.data.size === undefined || e.data.size > 0)) {
+          recCtx.chunks.push(e.data);
         }
       };
 
       rec.onerror = function (e) {
-        if (activeRecorder !== rec) return;
-        discardRecording = true;
-        chunks = [];
+        if (recCtx.discarded || recCtx.stopped || recCtx.generation !== state.generation || activeRecording !== recCtx || activeRecorder !== rec) {
+          return;
+        }
+        recCtx.discarded = true;
+        recCtx.chunks = [];
+        if (activeRecording === recCtx) activeRecording = null;
         dispatch({ type: 'RECORDER_ERROR', error: (e && e.error) || e || 'recorder_error' });
       };
 
       rec.onstop = function () {
-        var shouldKeep = !discardRecording && state.status === 'sending';
-        if (shouldKeep) {
-          currentBlob = buildAudioBlob(o, chunks, activeMime);
-        } else {
-          currentBlob = null;
+        if (recCtx.stopped) return;
+        recCtx.stopped = true;
+        var shouldKeep = !recCtx.discarded &&
+          recCtx.generation === state.generation &&
+          activeRecording === recCtx &&
+          state.status === 'sending';
+        var builtChunks = recCtx.chunks;
+        recCtx.chunks = [];
+        if (!shouldKeep) {
+          if (activeRecording === recCtx) activeRecording = null;
+          return;
         }
-        chunks = [];
-        if (shouldKeep && pendingUpload && state.generation === pendingUpload.generation) {
+        currentBlob = buildAudioBlob(o, builtChunks, recCtx.mime);
+        currentMime = recCtx.mime;
+        if (activeRecording === recCtx) activeRecording = null;
+        if (pendingUpload && pendingUpload.generation === recCtx.generation && state.generation === pendingUpload.generation) {
           var meta = pendingUpload;
           pendingUpload = null;
           deliverUpload(meta);
@@ -704,7 +730,7 @@
       clearAutoStop();
       autoStopTimer = setTimer(function () {
         autoStopTimer = null;
-        if (state.status !== 'listening' || activeRecorder !== rec) return;
+        if (state.status !== 'listening' || activeRecorder !== rec || recCtx.generation !== state.generation) return;
         lastDurationMs = Math.max(0, clockFn() - startedAtMs);
         dispatch({ type: 'AUTO_STOP', durationMs: lastDurationMs });
       }, C.VOICE_LIMITS.MAX_SECONDS * 1000);
@@ -712,6 +738,9 @@
       try {
         rec.start();
       } catch (startErr) {
+        recCtx.discarded = true;
+        recCtx.chunks = [];
+        if (activeRecording === recCtx) activeRecording = null;
         clearAutoStop();
         activeRecorder = null;
         dispatch({ type: 'RECORDER_ERROR', error: startErr || 'recorder_error' });

@@ -2057,7 +2057,8 @@
       els.dockPrimary.addEventListener('click', onMain);
       if (window.matchMedia) {
         var mq = window.matchMedia('(prefers-color-scheme: dark)');
-        if (mq.addEventListener) mq.addEventListener('change', applyScheme);
+        if (mq && mq.addEventListener) mq.addEventListener('change', applyScheme);
+        else if (mq && mq.addListener) mq.addListener(applyScheme);
       }
     }
 

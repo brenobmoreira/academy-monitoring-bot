@@ -63,6 +63,67 @@ test('WCAG AA palette tokens, placeholders, selected chip tags and error dot ink
   assert.match(errorDot, /\bcolor:\s*var\(--alert-ink\)/);
 });
 
+function parseHexColor(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function parseRgbaColor(rgba) {
+  const m = /^rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([0-9.]+)\s*\)$/.exec(rgba.trim());
+  assert.ok(m, `expected rgba color, got ${rgba}`);
+  return [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+}
+
+function blendOver(fgRgba, bgRgb) {
+  const a = fgRgba[3];
+  return [0, 1, 2].map((i) => fgRgba[i] * a + bgRgb[i] * (1 - a));
+}
+
+function relLuminance(rgb) {
+  const [r, g, b] = rgb.map((v) => {
+    const s = v / 255;
+    return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrastRatio(rgbA, rgbB) {
+  const l1 = relLuminance(rgbA);
+  const l2 = relLuminance(rgbB);
+  return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+}
+
+function tokenValue(body, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = new RegExp(`${escaped}:\\s*([^;]+);`).exec(body);
+  assert.ok(m, `expected token ${name}`);
+  const val = m[1].trim();
+  const fb = /var\([^,]+,\s*([^)]+)\)/.exec(val);
+  return (fb ? fb[1] : val).trim();
+}
+
+test('light theme composite WCAG AA contrast (>= 4.5:1) on translucent surfaces', () => {
+  const root = ruleBody(':root');
+  const bg = parseHexColor(tokenValue(root, '--bg'));
+  const surface = parseHexColor(tokenValue(root, '--surface'));
+  const accentText = parseHexColor(tokenValue(root, '--accent-text'));
+  const accentSoft = parseRgbaColor(tokenValue(root, '--accent-soft'));
+  const alert = parseHexColor(tokenValue(root, '--alert'));
+  const alertInk = parseHexColor(tokenValue(root, '--alert-ink'));
+  const alertSoft = parseRgbaColor(tokenValue(root, '--alert-soft'));
+
+  const dateChipBg = blendOver(accentSoft, bg);
+  const dateChipRatio = contrastRatio(accentText, dateChipBg);
+  assert.ok(dateChipRatio >= 4.5, `.date-chip[aria-checked="true"] composite contrast ${dateChipRatio.toFixed(2)} must be >= 4.5`);
+
+  const alertSoftBg = blendOver(alertSoft, surface);
+  const alertSoftRatio = contrastRatio(alert, alertSoftBg);
+  assert.ok(alertSoftRatio >= 4.5, `.errors/.voice-error composite contrast ${alertSoftRatio.toFixed(2)} must be >= 4.5`);
+
+  const errorDotRatio = contrastRatio(alertInk, alert);
+  assert.ok(errorDotRatio >= 4.5, `.card[data-status="error"] .dot ink contrast ${errorDotRatio.toFixed(2)} must be >= 4.5`);
+});
+
 test('M4 360px layout rules wrap card summaries, favorite plates, pair steppers, and facts', () => {
   const summary = ruleBody('.card-summary');
   assert.match(summary, /\bwhite-space:\s*normal\b/);

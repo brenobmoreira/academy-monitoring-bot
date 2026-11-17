@@ -12,7 +12,7 @@
   --line: rgba(28, 25, 23, 0.1);
 
   --accent: #c9410c;
-  --accent-text: #c2410c;
+  --accent-text: #b43b0a;
   --accent-ink: #ffffff;
   --accent-soft: rgba(224, 78, 20, 0.09);
   --accent-line: rgba(224, 78, 20, 0.45);
@@ -21,7 +21,7 @@
   --amber: #b45309;
   --amber-soft: rgba(245, 158, 11, 0.13);
   --cool: #2563c9;
-  --alert: #dc2626;
+  --alert: #c81e1e;
   --alert-ink: #ffffff;
   --alert-soft: rgba(220, 38, 38, 0.08);
 

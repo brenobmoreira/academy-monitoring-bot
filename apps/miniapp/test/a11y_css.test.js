@@ -122,6 +122,19 @@ test('light theme composite WCAG AA contrast (>= 4.5:1) on translucent surfaces'
 
   const errorDotRatio = contrastRatio(alertInk, alert);
   assert.ok(errorDotRatio >= 4.5, `.card[data-status="error"] .dot ink contrast ${errorDotRatio.toFixed(2)} must be >= 4.5`);
+
+  const dateChip = ruleBody('.date-chip[aria-checked="true"]');
+  assert.match(dateChip, /color:\s*var\(--accent-text\)/);
+  assert.match(dateChip, /background:\s*var\(--accent-soft\)/);
+
+  for (const sel of ['.errors', '.voice-error']) {
+    const body = ruleBody(sel);
+    assert.match(body, /color:\s*var\(--alert\)/, `${sel} must use --alert`);
+    assert.match(body, /background:\s*var\(--alert-soft\)/, `${sel} must use --alert-soft`);
+  }
+
+  assert.doesNotMatch(CSS, /\.chip\.fav::before/);
+  assert.match(ruleBody('.chip.fav svg'), /\bcolor:\s*var\(--amber\)/);
 });
 
 test('M4 360px layout rules wrap card summaries, favorite plates, pair steppers, and facts', () => {

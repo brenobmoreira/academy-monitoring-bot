@@ -115,6 +115,7 @@ class FakeElement extends FakeNode {
   removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] || []).filter((f) => f !== fn); }
   dispatchEvent(ev) {
     ev.currentTarget = this;
+    if (ev.type === 'click' && typeof this.onclick === 'function') this.onclick.call(this, ev);
     (this.listeners[ev.type] || []).slice().forEach((fn) => fn.call(this, ev));
     if (ev.bubbles && this.parentNode) this.parentNode.dispatchEvent(ev);
     return true;
@@ -264,15 +265,19 @@ async function boot(opts = {}) {
   const doc = new FakeDocument();
   page(doc);
   const timers = fakeTimers();
-  const tg = fakeTelegram();
+  const tg = opts.telegram === null ? null : (opts.telegram || fakeTelegram());
   const storage = opts.storage || storageWith();
   const catalog = opts.catalog || SAMPLE;
   const ctx = {
     document: doc,
     Element: FakeElement,
-    location: { hash: `#v=${opts.view || 'workout'}&c=${blob(catalog)}`, search: '' },
+    location: {
+      hash: opts.hash !== undefined ? opts.hash : (tg ? `#v=${opts.view || 'workout'}&c=${blob(catalog)}` : ''),
+      search: '',
+    },
     localStorage: storage,
-    navigator: {},
+    navigator: opts.navigator || {},
+    fetch: opts.fetch,
     getComputedStyle: () => ({ getPropertyValue: () => '' }),
     setTimeout: timers.setTimeout,
     clearTimeout: timers.clearTimeout,
@@ -281,7 +286,7 @@ async function boot(opts = {}) {
     confirm: () => true,
     console,
     ShapeCore: C,
-    Telegram: { WebApp: tg },
+    Telegram: tg ? { WebApp: tg } : undefined,
   };
   Object.assign(ctx, typeof opts.globals === 'function' ? opts.globals(ctx) : opts.globals || {});
   ctx.window = ctx;
@@ -290,8 +295,12 @@ async function boot(opts = {}) {
   // DecompressionStream completes off-thread. Count elapsed time rather than event-loop turns:
   // 500 immediates could elapse before zlib got CPU when the sheet suite ran concurrently.
   const deadline = Date.now() + 5000;
-  while (!tg.MainButton.params.text && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1));
-  if (!tg.MainButton.params.text) throw new Error(`the page did not start: ${doc.getElementById('say').textContent}`);
+  const started = () => {
+    if (opts.expectFatal) return !!doc.querySelector('#view .empty-plan');
+    return tg ? !!tg.MainButton.params.text : doc.getElementById('dock-primary').textContent !== '';
+  };
+  while (!started() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1));
+  if (!started()) throw new Error(`the page did not start: ${doc.getElementById('say').textContent}`);
   return {
     doc,
     tg,
@@ -299,7 +308,10 @@ async function boot(opts = {}) {
     storage,
     review: doc.getElementById('review'),
     /** A Telegram MainButton tap (the client ignores taps while the button is inactive). */
-    press() { if (tg.MainButton.params.is_active !== false) tg.MainButton.handler(); },
+    press() {
+      if (tg) { if (tg.MainButton.params.is_active !== false) tg.MainButton.handler(); }
+      else doc.getElementById('dock-primary').click();
+    },
     tab(view) { doc.getElementById(`tab-${view}`).click(); },
     say() { return doc.getElementById('say').textContent; },
     focus(field) {

@@ -1,19 +1,32 @@
 from __future__ import annotations
 
+import asyncio
+import gc
+import logging
 import threading
+import warnings
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from agent.voice_limits import (
+    CONCURRENCY_RETRY_AFTER,
     DAY_WINDOW_S,
     EXCHANGE_RATE_PER_DAY,
     EXCHANGE_RATE_PER_MIN,
+    IDEMPOTENCY_TTL_S,
     MINUTE_WINDOW_S,
+    VOICE_MAX_CONCURRENT,
     VOICE_RATE_PER_DAY,
     VOICE_RATE_PER_MIN,
+    CachedResponse,
+    ConcurrencyGate,
+    ConcurrencyLimitError,
     ExchangeLimiter,
+    IdempotencyCache,
+    IdempotencyConflictError,
+    OwnerAborted,
     RateLimiter,
 )
 
@@ -473,3 +486,452 @@ def test_invalid_limits_and_clock_values_rejected():
     bool_limiter = RateLimiter(clock=lambda: True)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         bool_limiter.allow("test:u1")
+
+
+# ---- ConcurrencyGate (§5.6) ----------------------------------------------------------------------
+
+
+async def test_concurrency_gate_enforces_limit_and_retry_after():
+    gate = ConcurrencyGate()
+    assert gate.max_concurrent == VOICE_MAX_CONCURRENT == 4
+    entered = [asyncio.Event() for _ in range(4)]
+    release = asyncio.Event()
+
+    async def holder(idx: int) -> None:
+        async with gate.slot():
+            entered[idx].set()
+            await release.wait()
+
+    tasks = [asyncio.create_task(holder(i)) for i in range(4)]
+    await asyncio.gather(*(ev.wait() for ev in entered))
+    assert gate.active == 4
+
+    with pytest.raises(ConcurrencyLimitError) as exc_info:
+        async with gate.slot():
+            pass
+    assert exc_info.value.retry_after == CONCURRENCY_RETRY_AFTER == 2
+    assert gate.active == 4
+
+    release.set()
+    await asyncio.gather(*tasks)
+    assert gate.active == 0
+
+
+async def test_concurrency_gate_releases_slot_on_exception_and_cancellation():
+    gate = ConcurrencyGate(max_concurrent=2)
+
+    async def failing() -> None:
+        async with gate.slot():
+            assert gate.active == 1
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await failing()
+    assert gate.active == 0
+
+    entered = asyncio.Event()
+    never = asyncio.Event()
+
+    async def cancellable() -> None:
+        async with gate.slot():
+            entered.set()
+            await never.wait()
+
+    task = asyncio.create_task(cancellable())
+    await entered.wait()
+    assert gate.active == 1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert gate.active == 0
+
+    # Both slots are reusable after exception and cancellation.
+    async with gate.slot(), gate.slot():
+        assert gate.active == 2
+    assert gate.active == 0
+
+
+def test_concurrency_gate_and_idempotency_cache_validate_args():
+    with pytest.raises(ValueError):
+        ConcurrencyGate(max_concurrent=0)
+    with pytest.raises(ValueError):
+        ConcurrencyGate(retry_after=0)
+    with pytest.raises(ValueError):
+        IdempotencyCache(ttl_s=0)
+
+
+# ---- IdempotencyCache (§5.5) ---------------------------------------------------------------------
+
+
+class FakeTranscribeError(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+async def test_idempotency_in_flight_join_runs_once_and_shares_result():
+    clock = FakeClock(10.0)
+    cache = IdempotencyCache(clock=clock)
+    started = asyncio.Event()
+    proceed = asyncio.Event()
+    calls = 0
+
+    async def work() -> CachedResponse:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await proceed.wait()
+        return CachedResponse(status=200, body={"text": "supino 80 por 8"})
+
+    owner = asyncio.create_task(cache.run("test:u1", "k1", "digest-a", work))
+    await started.wait()
+
+    waiter_calls = 0
+
+    async def waiter_work() -> CachedResponse:
+        nonlocal waiter_calls
+        waiter_calls += 1
+        return CachedResponse(status=200, body={"text": "should not run"})
+
+    waiter = asyncio.create_task(cache.run("test:u1", "k1", "digest-a", waiter_work))
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    proceed.set()
+    res_owner, res_waiter = await asyncio.gather(owner, waiter)
+    assert res_owner == CachedResponse(status=200, body={"text": "supino 80 por 8"})
+    assert res_waiter == res_owner
+    assert calls == 1
+    assert waiter_calls == 0
+
+
+async def test_idempotency_finished_replay_without_running_and_principal_isolation():
+    clock = FakeClock(10.0)
+    cache = IdempotencyCache(clock=clock)
+    calls = 0
+
+    async def work() -> CachedResponse:
+        nonlocal calls
+        calls += 1
+        return CachedResponse(status=200, body={"id": "k1", "text": "ok"})
+
+    first = await cache.run("test:u1", "k1", "digest-a", work)
+    replay = await cache.run("test:u1", "k1", "digest-a", work)
+    assert first == replay
+    assert calls == 1
+
+    # Different principal with the same Idempotency-Key and digest runs independently.
+    other = await cache.run("test:u2", "k1", "digest-a", work)
+    assert other == first
+    assert calls == 2
+
+
+async def test_idempotency_different_digest_conflicts_in_flight_and_finished_never_returns_cached():
+    clock = FakeClock(10.0)
+    cache = IdempotencyCache(clock=clock)
+    started = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def owner_work() -> CachedResponse:
+        started.set()
+        await proceed.wait()
+        return CachedResponse(status=200, body={"text": "secret-transcript"})
+
+    async def conflicting_work() -> CachedResponse:
+        raise AssertionError("conflicting call must not execute fn")
+
+    owner = asyncio.create_task(cache.run("test:u1", "k1", "digest-a", owner_work))
+    await started.wait()
+
+    try:
+        # Conflict while in-flight: raises immediately without waiting for `proceed`.
+        with pytest.raises(IdempotencyConflictError):
+            await asyncio.wait_for(cache.run("test:u1", "k1", "digest-b", conflicting_work), timeout=0.5)
+    finally:
+        proceed.set()
+    expected = await owner
+    assert expected.status == 200
+
+    # Conflict after finished: raises and NEVER returns the cached result.
+    with pytest.raises(IdempotencyConflictError):
+        await cache.run("test:u1", "k1", "digest-b", conflicting_work)
+
+
+async def test_idempotency_only_200_and_no_speech_are_cached():
+    clock = FakeClock(0.0)
+    cache = IdempotencyCache(clock=clock)
+
+    # Non-cacheable statuses/codes must NOT be stored: retry executes again.
+    non_cacheable = [
+        CachedResponse(status=502, code="transcription_failed", body={"error": "transcription_failed"}),
+        CachedResponse(status=504, code="timeout", body={"error": "timeout"}),
+        CachedResponse(status=429, code="budget_exhausted", body={"error": "budget_exhausted"}),
+        CachedResponse(status=422, code="too_long", body={"error": "too_long"}),
+        CachedResponse(status=415, code="unsupported_format", body={"error": "unsupported_format"}),
+        CachedResponse(status=500, code="internal", body={"error": "internal"}),
+        CachedResponse(status=201, body={"created": True}),
+    ]
+    for idx, response in enumerate(non_cacheable):
+        key = f"k-{idx}"
+        runs = 0
+
+        async def run_once(resp: CachedResponse = response) -> CachedResponse:
+            nonlocal runs
+            runs += 1
+            return resp
+
+        out1 = await cache.run("test:u1", key, "d1", run_once)
+        assert out1 == response
+        assert len(cache) == 0
+        out2 = await cache.run("test:u1", key, "d1", run_once)
+        assert out2 == response
+        assert runs == 2
+
+    # 422 no_speech as CachedResponse IS cached (replay without running, conflict on other digest).
+    no_speech_runs = 0
+
+    async def no_speech_resp() -> CachedResponse:
+        nonlocal no_speech_runs
+        no_speech_runs += 1
+        return CachedResponse(status=422, code="no_speech", body={"error": "no_speech"})
+
+    r1 = await cache.run("test:u1", "k-ns-resp", "d1", no_speech_resp)
+    r2 = await cache.run("test:u1", "k-ns-resp", "d1", no_speech_resp)
+    assert r1 == r2
+    assert no_speech_runs == 1
+    with pytest.raises(IdempotencyConflictError):
+        await cache.run("test:u1", "k-ns-resp", "d2", no_speech_resp)
+
+    # Raised TranscribeError(code="no_speech") IS also cached as finished.
+    exc_runs = 0
+
+    async def no_speech_exc() -> CachedResponse:
+        nonlocal exc_runs
+        exc_runs += 1
+        raise FakeTranscribeError("no_speech")
+
+    with pytest.raises(FakeTranscribeError) as err1:
+        await cache.run("test:u1", "k-ns-exc", "d1", no_speech_exc)
+    assert err1.value.code == "no_speech"
+    with pytest.raises(FakeTranscribeError) as err2:
+        await cache.run("test:u1", "k-ns-exc", "d1", no_speech_exc)
+    assert err2.value.code == "no_speech"
+    assert exc_runs == 1
+
+
+async def test_idempotency_expires_at_5_minutes_with_fake_clock():
+    clock = FakeClock(100.0)
+    cache = IdempotencyCache(clock=clock)
+    assert IDEMPOTENCY_TTL_S == 300.0
+    runs = 0
+
+    async def work() -> CachedResponse:
+        nonlocal runs
+        runs += 1
+        return CachedResponse(status=200, body={"run": runs})
+
+    first = await cache.run("test:u1", "k1", "d1", work)
+    assert first.body == {"run": 1}
+
+    # At 299.9 s later (399.9): still cached and still conflicts on another digest.
+    clock.now = 399.9
+    assert (await cache.run("test:u1", "k1", "d1", work)).body == {"run": 1}
+    assert runs == 1
+    with pytest.raises(IdempotencyConflictError):
+        await cache.run("test:u1", "k1", "d2", work)
+
+    # At exact 300.0 s (400.0): expired; same key can run again (even with a new digest).
+    clock.now = 400.0
+    assert len(cache) == 0
+    second = await cache.run("test:u1", "k1", "d2", work)
+    assert second.body == {"run": 2}
+    assert runs == 2
+
+
+async def test_idempotency_waiter_cancelled_leaves_owner_untouched_and_caches_result():
+    clock = FakeClock(0.0)
+    cache = IdempotencyCache(clock=clock)
+    started = asyncio.Event()
+    proceed = asyncio.Event()
+    runs = 0
+
+    async def work() -> CachedResponse:
+        nonlocal runs
+        runs += 1
+        started.set()
+        await proceed.wait()
+        return CachedResponse(status=200, body={"text": "treino ok"})
+
+    owner = asyncio.create_task(cache.run("test:u1", "k1", "d1", work))
+    await started.wait()
+
+    waiter = asyncio.create_task(cache.run("test:u1", "k1", "d1", work))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    # Owner still runs to completion and populates the finished cache entry.
+    assert not owner.done()
+    proceed.set()
+    result = await owner
+    assert result == CachedResponse(status=200, body={"text": "treino ok"})
+    assert len(cache) == 1
+
+    # Later request with the same key gets the cached response without a second run.
+    replayed = await cache.run("test:u1", "k1", "d1", work)
+    assert replayed == result
+    assert runs == 1
+
+
+async def test_idempotency_owner_cancelled_raises_owner_aborted_in_both_waiters_and_allows_retry():
+    clock = FakeClock(0.0)
+    cache = IdempotencyCache(clock=clock)
+    started = asyncio.Event()
+    never = asyncio.Event()
+    runs = 0
+
+    async def work() -> CachedResponse:
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            started.set()
+            await never.wait()
+        return CachedResponse(status=200, body={"text": "retried ok"})
+
+    owner = asyncio.create_task(cache.run("test:u1", "k1", "d1", work))
+    await started.wait()
+
+    w1 = asyncio.create_task(cache.run("test:u1", "k1", "d1", work))
+    w2 = asyncio.create_task(cache.run("test:u1", "k1", "d1", work))
+    await asyncio.sleep(0)
+
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    for waiter in (w1, w2):
+        with pytest.raises(OwnerAborted):
+            await waiter
+
+    assert len(cache) == 0
+
+    # Next request finds no entry and runs a fresh transcription.
+    retried = await cache.run("test:u1", "k1", "d1", work)
+    assert retried == CachedResponse(status=200, body={"text": "retried ok"})
+    assert runs == 2
+
+
+async def test_idempotency_owner_transcription_failed_propagates_code_to_waiters_and_clears_entry():
+    clock = FakeClock(0.0)
+    cache = IdempotencyCache(clock=clock)
+    started = asyncio.Event()
+    proceed = asyncio.Event()
+    runs = 0
+
+    async def failing_work() -> CachedResponse:
+        nonlocal runs
+        runs += 1
+        started.set()
+        await proceed.wait()
+        raise FakeTranscribeError("transcription_failed")
+
+    owner = asyncio.create_task(cache.run("test:u1", "k1", "d1", failing_work))
+    await started.wait()
+    w1 = asyncio.create_task(cache.run("test:u1", "k1", "d1", failing_work))
+    w2 = asyncio.create_task(cache.run("test:u1", "k1", "d1", failing_work))
+    await asyncio.sleep(0)
+
+    proceed.set()
+    for task in (owner, w1, w2):
+        with pytest.raises(FakeTranscribeError) as exc_info:
+            await task
+        assert exc_info.value.code == "transcription_failed"
+
+    assert len(cache) == 0
+
+    # Retry executes again cleanly.
+    async def ok_work() -> CachedResponse:
+        nonlocal runs
+        runs += 1
+        return CachedResponse(status=200, body={"ok": True})
+
+    assert (await cache.run("test:u1", "k1", "d1", ok_work)).status == 200
+    assert runs == 2
+
+
+async def test_idempotency_owner_unexpected_error_aborts_waiters_and_deletes_entry():
+    clock = FakeClock(0.0)
+    cache = IdempotencyCache(clock=clock)
+    started = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def crashing_work() -> CachedResponse:
+        started.set()
+        await proceed.wait()
+        raise RuntimeError("unexpected")
+
+    owner = asyncio.create_task(cache.run("test:u1", "k1", "d1", crashing_work))
+    await started.wait()
+    waiter = asyncio.create_task(cache.run("test:u1", "k1", "d1", crashing_work))
+    await asyncio.sleep(0)
+
+    proceed.set()
+    with pytest.raises(RuntimeError, match="unexpected"):
+        await owner
+    with pytest.raises(OwnerAborted):
+        await waiter
+    assert len(cache) == 0
+
+
+async def test_idempotency_owner_aborts_without_waiters_logs_no_unretrieved_exception(caplog):
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop_exceptions: list[dict[str, object]] = []
+    loop.set_exception_handler(lambda _loop, ctx: loop_exceptions.append(ctx))
+
+    try:
+        with warnings.catch_warnings(record=True) as recorded_warnings:
+            warnings.simplefilter("always")
+            with caplog.at_level(logging.WARNING, logger="asyncio"):
+                clock = FakeClock(0.0)
+                cache = IdempotencyCache(clock=clock)
+
+                # 1) Owner cancelled with no waiters.
+                started = asyncio.Event()
+                never = asyncio.Event()
+
+                async def slow_work() -> CachedResponse:
+                    started.set()
+                    await never.wait()
+                    return CachedResponse(status=200)
+
+                t_cancel = asyncio.create_task(cache.run("test:u1", "k-cancel", "d1", slow_work))
+                await started.wait()
+                t_cancel.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await t_cancel
+                del t_cancel
+
+                # 2) Owner raises unexpected error with no waiters.
+                async def crash_work() -> CachedResponse:
+                    raise RuntimeError("boom")
+
+                with pytest.raises(RuntimeError):
+                    await cache.run("test:u1", "k-crash", "d1", crash_work)
+
+                # 3) Owner raises domain error with no waiters.
+                async def fail_work() -> CachedResponse:
+                    raise FakeTranscribeError("transcription_failed")
+
+                with pytest.raises(FakeTranscribeError):
+                    await cache.run("test:u1", "k-fail", "d1", fail_work)
+
+                gc.collect()
+                await asyncio.sleep(0)
+
+        assert loop_exceptions == []
+        assert not [r for r in caplog.records if "never retrieved" in r.getMessage()]
+        assert recorded_warnings == []
+    finally:
+        loop.set_exception_handler(previous_handler)

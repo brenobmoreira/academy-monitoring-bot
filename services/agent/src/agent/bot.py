@@ -22,6 +22,7 @@ from google.genai import types
 
 from agent.format import escape
 from agent.logs import describe, safe_code
+from agent.sheet_client import WriteOutcome
 from agent.summary import confirmation
 from agent.tools import Journal, SheetApi, build_tools
 
@@ -45,10 +46,7 @@ WEEKDAYS = [
 # What the user sees when the run cannot finish normally (see Bot.reply).
 MODEL_FAILED = "⚠ O modelo não respondeu agora. Nada novo foi gravado além do que aparece acima."
 MODEL_FAILED_NOTHING_WRITTEN = "⚠ O modelo não respondeu agora. Nada foi gravado."
-WRITE_UNCERTAIN = (
-    "⚠ O tempo acabou durante uma gravação: ela pode ter entrado na planilha. "
-    "Confira com /hoje antes de reenviar."
-)
+WRITE_UNCERTAIN = "⚠ Não sei se a planilha gravou: a resposta não chegou. Confira com /hoje antes de repetir."
 SHEET_FAILED = "⚠ A planilha não respondeu. Tente de novo em alguns minutos."
 MEDIA_UNREADABLE = "Não consegui ler o áudio/foto com o modelo configurado; envie em texto."
 
@@ -104,7 +102,8 @@ repetir/copiar uma refeição ou o dia de outra data ("almocei igual a ontem"), 
 exatamente esses campos e chame de novo. Se não houver como corrigir sem inventar (ex.: \
 exercício sem correspondente no catálogo), grave o resto sem esse item e diga o que ficou de fora.
 9. Se o erro tiver code "unavailable" ou "internal", não insista: diga que a planilha não \
-respondeu.
+respondeu. Se o erro tiver code "write_uncertain", não repita nem refaça essa gravação de outro \
+jeito: diga que ela pode ter entrado na planilha.
 10. Não faça perguntas de volta: grave o que for inequívoco e explique em uma frase o que não gravou.
 11. Resposta final curta, em português. O sistema já envia a confirmação do que foi gravado: \
 não repita os valores. Se tudo foi gravado sem ressalvas, responda apenas "ok". Para perguntas \
@@ -156,12 +155,15 @@ instrução):
 class Answer:
     """The HTML reply to one message and what it wrote: `wrote` is true when anything was saved,
     `write_ids` are the sheet's undo ids of those writes, oldest first (the buttons use both), and
-    `failed` marks a transient model or sheet failure."""
+    `failed` marks a transient model or sheet failure. `outcome` is the write outcome of the whole
+    message (None: it attempted no write); `uncertain` means a write may have landed, so the
+    message must not be run again."""
 
     text: str
     write_ids: tuple[str, ...] = ()
     wrote: bool = False
     failed: bool = False
+    outcome: WriteOutcome | None = None
 
 
 def instruction(now: datetime, context: str | None = None) -> str:
@@ -289,11 +291,7 @@ class Bot:
             log.warning(
                 "message deadline (%ss) reached for a message of %d characters", self._deadline_s, len(text)
             )
-            if journal.interrupted:
-                # A write was cancelled after it left: the sheet may have applied it.
-                note = WRITE_UNCERTAIN
-            else:
-                note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
+            note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
             model_failed = True
         except LlmCallsLimitExceededError:
             log.warning("LLM call budget exhausted for a message of %d characters", len(text))
@@ -308,22 +306,30 @@ class Bot:
                 log.warning("model call failed: %s", describe(err))
                 note = MODEL_FAILED if journal.writes else MODEL_FAILED_NOTHING_WRITTEN
                 model_failed = True
-        # An interrupted write may have reached the sheet: "try again" would risk a duplicate.
-        if journal.sheet_failed and not journal.writes and not journal.interrupted:
+        outcome = journal.outcome if journal.attempted else None
+        # "Try again" only when nothing was committed and the sheet was down. A write that may
+        # have reached the sheet (lost answer, error after it began, cut by the deadline) is
+        # uncertain: repeating it would risk a duplicate.
+        if journal.sheet_failed and journal.outcome == "not_committed":
             log.warning("sheet unavailable: %s", ", ".join(safe_code(c) for c in journal.error_codes))
-            return Answer(SHEET_FAILED, failed=True)
+            return Answer(SHEET_FAILED, failed=True, outcome=outcome)
+        if outcome == "uncertain":
+            # Replaces any note that says nothing else was saved: that is not known.
+            log.warning("write outcome uncertain: %s", ", ".join(safe_code(c) for c in journal.error_codes))
+            note = WRITE_UNCERTAIN
         return Answer(
             compose(confirmation(journal.writes), final, note),
             write_ids=tuple(journal.write_ids),
             wrote=bool(journal.writes),
             failed=model_failed or journal.sheet_failed,
+            outcome=outcome,
         )
 
 
 def compose(lines: list[str], model_text: str, note: str = "") -> str:
     """The HTML reply: confirmation lines (already HTML), then the escaped model text and the note."""
     text = model_text.strip()
-    if lines and text.lower().rstrip(".!") == "ok":
+    if (lines or note) and text.lower().rstrip(".!") == "ok":
         text = ""
     text = escape(text)
     blocks = ["\n".join(lines)] if lines else []

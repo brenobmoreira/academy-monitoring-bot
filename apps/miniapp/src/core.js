@@ -422,11 +422,15 @@
 
     var meals = strList(raw.meals);
     var units = strList(raw.units);
+    var hasVoice = isValidVoiceOrigin(raw.vu) && isValidVoiceCode(raw.vc) && isValidVoiceExp(raw.vx);
     return {
       v: 1,
       view: raw.view === 'food' || raw.view === 'workout' ? raw.view : '',
       ft: raw.ft === 'taco4' ? raw.ft : '',
       fh: typeof raw.fh === 'string' && /^[a-f0-9]{64}$/.test(raw.fh) ? raw.fh : '',
+      vu: hasVoice ? raw.vu : '',
+      vc: hasVoice ? raw.vc : '',
+      vx: hasVoice ? raw.vx : null,
       nutrition: ownNutrition(raw.foods, raw.fv, raw.fu),
       freeFoods: !Array.isArray(raw.foods),
       tableStatus: raw.ft === 'taco4' ? 'loading' : '',
@@ -1130,6 +1134,570 @@
     return dates.length > 0 && dates.every(function (d) { return allowed.indexOf(d) >= 0; });
   }
 
+  /* voice core (pure, C6a: docs/specs/2026-11-14-voice-input-design.md §7, §4.2, §9.2) -------- */
+
+  var VOICE_SESSION_KEY = 'shape-miniapp:voice-session:v1';
+  var VOICE_CONSENT_KEY = 'shape-miniapp:voice-consent:v1';
+  var VOICE_MIMES = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'];
+  var VOICE_LIMITS = {
+    MAX_SECONDS: 90,
+    MIN_MS: 700,
+    UPLOAD_TIMEOUT_MS: 45000,
+    RETRY_WINDOW_MS: 120000,
+    SESSION_REFRESH_MARGIN_S: 300,
+    TEXT_MAX: 2000,
+    AUDIO_BPS: 32000,
+  };
+  var VOICE_ORIGIN_RE = /^https:\/\/[a-z0-9.-]+(:[0-9]{1,5})?$/;
+  var VOICE_CODE_RE = /^c1\.[A-Za-z0-9_-]{20,200}\.[A-Za-z0-9_-]{43}$/;
+  // Every ASCII control char except \n (0x0A), plus DEL (0x7F).
+  var VOICE_CONTROL_RE = /[\u0000-\u0009\u000b-\u001f\u007f]/;
+
+  function isValidVoiceOrigin(vu) {
+    return typeof vu === 'string' && VOICE_ORIGIN_RE.test(vu);
+  }
+
+  function isValidVoiceCode(vc) {
+    return typeof vc === 'string' && VOICE_CODE_RE.test(vc);
+  }
+
+  function isValidVoiceExp(vx) {
+    return typeof vx === 'number' && Number.isInteger(vx) && vx > 0;
+  }
+
+  /** Read the opaque `r` field from a `c1.<payload>.<sig>` link code without verifying the MAC. */
+  function codeRef(vc) {
+    if (typeof vc !== 'string') return null;
+    var parts = vc.split('.');
+    if (parts.length !== 3 || parts[0] !== 'c1') return null;
+    if (!/^[A-Za-z0-9_-]+$/.test(parts[1]) || !/^[A-Za-z0-9_-]+$/.test(parts[2])) return null;
+    try {
+      var payload = JSON.parse(utf8Decode(base64UrlToBytes(parts[1])));
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+      return typeof payload.r === 'string' && payload.r.length > 0 ? payload.r : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function isValidStoredSession(stored) {
+    return !!(stored && typeof stored === 'object' && !Array.isArray(stored) &&
+      isValidVoiceOrigin(stored.vu) &&
+      typeof stored.ref === 'string' && stored.ref.length > 0 &&
+      typeof stored.session === 'string' && stored.session.length > 0 &&
+      typeof stored.expires_at === 'number' && Number.isFinite(stored.expires_at));
+  }
+
+  /**
+   * §7.2 start-up session decision. Returns one of:
+   *   { action: 'use', session, deleteStored: false, currentRef }
+   *   { action: 'exchange', kind: 'tg_link'|'tg_init_data', credential, deleteStored, currentRef }
+   *   { action: 'disabled', reason, message, deleteStored, currentRef }
+   */
+  function pickSession(stored, launch, now) {
+    var hasStored = stored !== null && stored !== undefined;
+    var vu = launch && isValidVoiceOrigin(launch.vu) ? launch.vu : '';
+    if (!vu) {
+      return { action: 'disabled', reason: 'unavailable', message: '', deleteStored: false, currentRef: null };
+    }
+    var nowSec = launch && launch.now !== undefined ? launch.now : (now !== undefined ? now : Math.floor(Date.now() / 1000));
+    var initData = launch && typeof launch.initData === 'string' ? launch.initData : '';
+    var hasInitData = initData.length > 0;
+    var currentRef = hasInitData ? null : codeRef(launch && launch.vc);
+
+    if (hasStored && !hasInitData && isValidStoredSession(stored) &&
+        stored.vu === vu && stored.ref === currentRef &&
+        (stored.expires_at - nowSec) > VOICE_LIMITS.SESSION_REFRESH_MARGIN_S) {
+      return { action: 'use', session: stored, deleteStored: false, currentRef: currentRef };
+    }
+
+    if (hasInitData) {
+      return { action: 'exchange', kind: 'tg_init_data', credential: initData, deleteStored: hasStored, currentRef: null };
+    }
+
+    if (currentRef && isValidVoiceCode(launch && launch.vc) && isValidVoiceExp(launch && launch.vx) && launch.vx > nowSec) {
+      return { action: 'exchange', kind: 'tg_link', credential: launch.vc, deleteStored: hasStored, currentRef: currentRef };
+    }
+
+    var reason = currentRef ? 'auth_expired' : 'unauthenticated';
+    return { action: 'disabled', reason: reason, message: voiceError(reason).message, deleteStored: hasStored, currentRef: currentRef };
+  }
+
+  /** §7.2 item 5: validate exchange JSON and enforce `ref === currentRef` on keyboard launches. */
+  function acceptExchange(response, currentRef, vu) {
+    var renewMsg = 'Envie /app para renovar a voz.';
+    if (!response || typeof response !== 'object' || Array.isArray(response)) {
+      return { ok: false, reason: 'invalid_response', message: renewMsg };
+    }
+    if (response.v !== undefined && response.v !== 1) {
+      return { ok: false, reason: 'invalid_response', message: renewMsg };
+    }
+    if (typeof response.session !== 'string' || !response.session ||
+        typeof response.ref !== 'string' || !response.ref ||
+        typeof response.expires_at !== 'number' || !Number.isInteger(response.expires_at) || response.expires_at <= 0) {
+      return { ok: false, reason: 'invalid_response', message: renewMsg };
+    }
+    if (response.scopes !== undefined && (!Array.isArray(response.scopes) || response.scopes.indexOf('voice') < 0)) {
+      return { ok: false, reason: 'invalid_response', message: renewMsg };
+    }
+    if (currentRef !== null && currentRef !== undefined && response.ref !== currentRef) {
+      return { ok: false, reason: 'ref_mismatch', message: renewMsg };
+    }
+    return {
+      ok: true,
+      session: {
+        vu: typeof vu === 'string' ? vu : '',
+        ref: response.ref,
+        session: response.session,
+        expires_at: response.expires_at,
+      },
+    };
+  }
+
+  /** §7.3 item 2: first supported MIME in VOICE_MIMES order, or null. */
+  function pickVoiceMime(isTypeSupported) {
+    var fn = typeof isTypeSupported === 'function' ? isTypeSupported
+      : (isTypeSupported && typeof isTypeSupported.isTypeSupported === 'function'
+        ? function (m) { return isTypeSupported.isTypeSupported(m); }
+        : null);
+    if (!fn) return null;
+    for (var i = 0; i < VOICE_MIMES.length; i++) {
+      try {
+        if (fn(VOICE_MIMES[i])) return VOICE_MIMES[i];
+      } catch (e) {
+        /* ignore broken WebView */
+      }
+    }
+    return null;
+  }
+
+  /** §7.3 mic button visibility and Plan B fallback decision. */
+  function voiceAvailable(opts) {
+    var o = opts || {};
+    var hasVu = isValidVoiceOrigin(o.vu);
+    var preview = !!o.preview;
+    if (!hasVu && !preview) {
+      return { showButton: false, canRecord: false, disabled: false, planB: false, reason: 'no_voice', message: '', mime: null };
+    }
+    var mime = o.mime !== undefined ? o.mime : pickVoiceMime(o.isTypeSupported);
+    if (!o.hasGetUserMedia || !o.hasMediaRecorder || !mime) {
+      return {
+        showButton: true,
+        canRecord: false,
+        disabled: false,
+        planB: true,
+        reason: 'unsupported_device',
+        message: voiceError('no_supported_format').message,
+        mime: null,
+      };
+    }
+    if (!preview && !o.hasSession && !o.canExchange) {
+      return {
+        showButton: true,
+        canRecord: false,
+        disabled: true,
+        planB: true,
+        reason: o.reason || 'auth_expired',
+        message: o.message || voiceError('auth_expired').message,
+        mime: mime,
+      };
+    }
+    return { showButton: true, canRecord: true, disabled: false, planB: false, reason: '', message: '', mime: mime };
+  }
+
+  var VOICE_ACTION_LABELS = {
+    retry: 'Tentar de novo',
+    retry_permission: 'Tentar de novo',
+    plan_b: 'Gravar no chat',
+    rerecord: 'Regravar',
+  };
+
+  function makeVoiceError(code, message, actions, canRetry, clearSession) {
+    return {
+      code: code,
+      message: message,
+      actions: actions,
+      buttons: actions.map(function (id) { return { id: id, label: VOICE_ACTION_LABELS[id] || id }; }),
+      canRetry: !!canRetry,
+      clearSession: !!clearSession,
+    };
+  }
+
+  /** §7.5 (and §7.4 too_short) error mapping. */
+  function voiceError(err) {
+    var inner = err && typeof err === 'object' && err.error && typeof err.error === 'object' ? err.error : err;
+    var code = '';
+    var serverMsg = '';
+    if (typeof inner === 'string') {
+      code = inner;
+    } else if (inner && typeof inner === 'object') {
+      code = typeof inner.code === 'string' ? inner.code
+        : typeof inner.name === 'string' ? inner.name : '';
+      if (typeof inner.message === 'string') serverMsg = inner.message.trim();
+    }
+
+    if (code === 'NotAllowedError' || code === 'SecurityError' || code === 'permission_denied') {
+      return makeVoiceError(code, 'Sem permissão para o microfone.', ['retry_permission', 'plan_b'], false, false);
+    }
+    if (code === 'NotFoundError' || code === 'no_supported_format' || code === 'api_missing' || code === 'unsupported_device') {
+      return makeVoiceError(code, 'Este aparelho não grava aqui.', ['plan_b'], false, false);
+    }
+    if (code === 'network_error' || code === 'network' || code === 'TypeError' ||
+        code === 'timeout' || code === 'transcription_failed' || code === 'rate_limited') {
+      return makeVoiceError(code, 'Não consegui entender agora.', ['retry', 'plan_b'], true, false);
+    }
+    if (code === 'auth_expired' || code === 'unauthenticated' || code === 'credential_used') {
+      return makeVoiceError(code, 'Envie /app para renovar a voz.', ['plan_b'], false, code !== 'credential_used');
+    }
+    if (code === 'no_speech') {
+      return makeVoiceError(code, 'Não ouvi nada. Fale mais perto do microfone.', ['rerecord'], false, false);
+    }
+    if (code === 'too_long' || code === 'too_large') {
+      return makeVoiceError(code, 'Passou de 1min30. Grave um trecho mais curto.', ['rerecord'], false, false);
+    }
+    if (code === 'too_short') {
+      return makeVoiceError(code, 'Muito curto. Segure e fale.', ['rerecord'], false, false);
+    }
+    if (code === 'unsupported_format') {
+      return makeVoiceError(code, 'Este formato não funciona aqui.', ['plan_b'], false, false);
+    }
+    if (code === 'budget_exhausted' || code === 'forbidden' || code === 'disabled' || code === 'internal') {
+      var defaults = {
+        budget_exhausted: 'Limite diário de voz atingido.',
+        forbidden: 'Acesso à voz não permitido.',
+        disabled: 'Serviço de voz indisponível.',
+        internal: 'Erro interno no serviço de voz.',
+      };
+      return makeVoiceError(code, serverMsg || defaults[code], ['plan_b'], false, false);
+    }
+    if (code === 'NotReadableError' || code === 'AbortError' || code === 'recorder_error') {
+      return makeVoiceError(code, 'Não consegui usar o microfone agora.', ['rerecord', 'plan_b'], false, false);
+    }
+    return makeVoiceError(code || 'unknown', 'Não consegui entender agora.', ['rerecord', 'plan_b'], false, false);
+  }
+
+  function initialVoiceState() {
+    return {
+      status: 'idle',
+      generation: 0,
+      mascot: null,
+      text: '',
+      textError: '',
+      error: null,
+      idempotencyKey: null,
+      failedAt: null,
+      effects: [],
+      changed: false,
+    };
+  }
+
+  function nextVoiceState(state, patch, effects) {
+    return Object.assign({}, state, patch, { effects: effects || [], changed: true });
+  }
+
+  function keepVoiceState(state, effects) {
+    return Object.assign({}, state, { effects: effects || [], changed: false });
+  }
+
+  function isValidVoiceClock(now) {
+    return typeof now === 'number' && Number.isFinite(now);
+  }
+
+  function disableVoiceRetry(err) {
+    if (!err || !err.canRetry) return err;
+    return Object.assign({}, err, {
+      canRetry: false,
+      actions: err.actions.filter(function (a) { return a !== 'retry'; }),
+      buttons: err.buttons.filter(function (b) { return b.id !== 'retry'; }),
+    });
+  }
+
+  function expireVoiceRetry(state) {
+    return nextVoiceState(state, {
+      error: disableVoiceRetry(state.error),
+      idempotencyKey: null,
+      failedAt: null,
+    }, [{ type: 'drop_blob' }]);
+  }
+
+  /** §7.4 state machine with generation guard for async permission & upload results. */
+  function voiceReducer(state, event) {
+    var s = state || initialVoiceState();
+    var ev = event || {};
+    var type = typeof ev.type === 'string' ? ev.type : '';
+    var st = s.status;
+
+    if (type === 'PERMISSION_GRANTED' && !(st === 'asking_permission' && ev.generation === s.generation)) {
+      return keepVoiceState(s, [{ type: 'stop_tracks' }]);
+    }
+
+    if (st === 'idle') {
+      if (type === 'START') {
+        if (!ev.consented) {
+          return nextVoiceState(s, { status: 'consent', mascot: null, text: '', textError: '', error: null }, []);
+        }
+        var gen0 = s.generation + 1;
+        return nextVoiceState(s, {
+          status: 'asking_permission', generation: gen0, mascot: 'listening',
+          text: '', textError: '', error: null, idempotencyKey: null, failedAt: null,
+        }, [{ type: 'request_mic', generation: gen0 }]);
+      }
+      return keepVoiceState(s, []);
+    }
+
+    if (st === 'consent') {
+      if (type === 'CONSENT_ACCEPT') {
+        var gen1 = s.generation + 1;
+        return nextVoiceState(s, {
+          status: 'asking_permission', generation: gen1, mascot: 'listening',
+          text: '', textError: '', error: null, idempotencyKey: null, failedAt: null,
+        }, [{ type: 'save_consent' }, { type: 'request_mic', generation: gen1 }]);
+      }
+      if (type === 'CONSENT_DECLINE' || type === 'CANCEL' || type === 'HIDE' || type === 'COLLAPSE') {
+        return nextVoiceState(s, { status: 'idle', mascot: null }, []);
+      }
+      return keepVoiceState(s, []);
+    }
+
+    if (st === 'asking_permission') {
+      if (type === 'PERMISSION_GRANTED') {
+        return nextVoiceState(s, { status: 'listening', mascot: 'listening' }, [{ type: 'start_recorder', generation: s.generation }]);
+      }
+      if (type === 'PERMISSION_DENIED') {
+        if (ev.generation !== undefined && ev.generation !== s.generation) {
+          return keepVoiceState(s, []);
+        }
+        return nextVoiceState(s, {
+          status: 'error', mascot: 'alert', error: voiceError(ev.error), idempotencyKey: null, failedAt: null,
+        }, [{ type: 'stop_tracks' }]);
+      }
+      if (type === 'CANCEL' || type === 'HIDE' || type === 'COLLAPSE') {
+        return nextVoiceState(s, {
+          status: 'idle', generation: s.generation + 1, mascot: null, idempotencyKey: null, failedAt: null,
+        }, [{ type: 'stop_tracks' }, { type: 'drop_blob' }]);
+      }
+      return keepVoiceState(s, []);
+    }
+
+    if (st === 'listening') {
+      if (type === 'STOP' || type === 'AUTO_STOP') {
+        if (!(typeof ev.durationMs === 'number' && ev.durationMs >= VOICE_LIMITS.MIN_MS)) {
+          return nextVoiceState(s, {
+            status: 'error', mascot: 'alert', error: voiceError('too_short'), idempotencyKey: null, failedAt: null,
+          }, [{ type: 'stop_recorder' }, { type: 'stop_tracks' }, { type: 'drop_blob' }]);
+        }
+        var key = ev.idempotencyKey || s.idempotencyKey || newSubmissionId();
+        return nextVoiceState(s, {
+          status: 'sending', mascot: 'thinking', idempotencyKey: key, failedAt: null, error: null,
+        }, [{ type: 'stop_recorder' }, { type: 'stop_tracks' }, { type: 'upload', generation: s.generation, idempotencyKey: key }]);
+      }
+      if (type === 'RECORDER_ERROR') {
+        return nextVoiceState(s, {
+          status: 'error', mascot: 'alert', error: voiceError(ev.error || 'recorder_error'), idempotencyKey: null, failedAt: null,
+        }, [{ type: 'stop_recorder' }, { type: 'stop_tracks' }, { type: 'drop_blob' }]);
+      }
+      if (type === 'CANCEL' || type === 'HIDE' || type === 'COLLAPSE') {
+        return nextVoiceState(s, {
+          status: 'idle', generation: s.generation + 1, mascot: null, idempotencyKey: null, failedAt: null,
+        }, [{ type: 'stop_recorder' }, { type: 'stop_tracks' }, { type: 'drop_blob' }]);
+      }
+      return keepVoiceState(s, []);
+    }
+
+    if (st === 'sending') {
+      if (type === 'TRANSCRIBE_OK') {
+        if (ev.generation !== undefined && ev.generation !== s.generation) {
+          return keepVoiceState(s, []);
+        }
+        return nextVoiceState(s, {
+          status: 'transcribed', mascot: null, text: typeof ev.text === 'string' ? ev.text : '',
+          textError: '', error: null, idempotencyKey: null, failedAt: null,
+        }, [{ type: 'drop_blob' }]);
+      }
+      if (type === 'TRANSCRIBE_ERROR') {
+        if (ev.generation !== undefined && ev.generation !== s.generation) {
+          return keepVoiceState(s, []);
+        }
+        var mapped = voiceError(ev.error);
+        var hasNow = isValidVoiceClock(ev.now);
+        var windowExpired = !hasNow || (s.failedAt !== null && (ev.now < s.failedAt || (ev.now - s.failedAt) > VOICE_LIMITS.RETRY_WINDOW_MS));
+        var canRetryNow = mapped.canRetry && !windowExpired;
+        if (mapped.canRetry && windowExpired) {
+          mapped = disableVoiceRetry(mapped);
+        }
+        var failedAt = canRetryNow ? (s.failedAt !== null ? s.failedAt : ev.now) : null;
+        var effects = [];
+        if (mapped.clearSession) effects.push({ type: 'delete_session' });
+        if (!canRetryNow) effects.push({ type: 'drop_blob' });
+        return nextVoiceState(s, {
+          status: 'error',
+          mascot: 'alert',
+          error: mapped,
+          idempotencyKey: canRetryNow ? s.idempotencyKey : null,
+          failedAt: failedAt,
+        }, effects);
+      }
+      if (type === 'CANCEL' || type === 'HIDE' || type === 'COLLAPSE') {
+        return nextVoiceState(s, {
+          status: 'idle', generation: s.generation + 1, mascot: null, idempotencyKey: null, failedAt: null,
+        }, [{ type: 'abort_fetch' }, { type: 'drop_blob' }]);
+      }
+      return keepVoiceState(s, []);
+    }
+
+    if (st === 'transcribed') {
+      if (type === 'EDIT_TEXT') {
+        return nextVoiceState(s, { text: typeof ev.text === 'string' ? ev.text : '', textError: '' }, []);
+      }
+      if (type === 'SEND') {
+        var textToSend = ev.text !== undefined ? ev.text : s.text;
+        var built = textPayload(textToSend, ev.submissionId);
+        if (!built.ok) {
+          return nextVoiceState(s, { textError: built.error }, []);
+        }
+        return nextVoiceState(s, {
+          status: 'idle', mascot: null, text: '', textError: '',
+        }, [{ type: 'send_data', json: built.json, payload: built.payload }]);
+      }
+      if (type === 'RERECORD') {
+        var gen2 = s.generation + 1;
+        return nextVoiceState(s, {
+          status: 'asking_permission', generation: gen2, mascot: 'listening',
+          text: '', textError: '', error: null, idempotencyKey: null, failedAt: null,
+        }, [{ type: 'drop_blob' }, { type: 'request_mic', generation: gen2 }]);
+      }
+      if (type === 'CANCEL') {
+        return nextVoiceState(s, { status: 'idle', mascot: null, text: '', textError: '' }, []);
+      }
+      return keepVoiceState(s, []);
+    }
+
+    if (st === 'error') {
+      if (type === 'RETRY') {
+        if (!s.error || !s.error.canRetry || !isValidVoiceClock(s.failedAt)) {
+          return keepVoiceState(s, []);
+        }
+        if (!isValidVoiceClock(ev.now) || ev.now < s.failedAt || (ev.now - s.failedAt) > VOICE_LIMITS.RETRY_WINDOW_MS) {
+          return expireVoiceRetry(s);
+        }
+        return nextVoiceState(s, {
+          status: 'sending', mascot: 'thinking',
+        }, [{ type: 'upload', generation: s.generation, idempotencyKey: s.idempotencyKey }]);
+      }
+      if (type === 'RETRY_EXPIRED') {
+        if (s.error && s.error.canRetry) {
+          return expireVoiceRetry(s);
+        }
+        return keepVoiceState(s, []);
+      }
+      if (type === 'RERECORD' || type === 'RETRY_PERMISSION') {
+        var gen3 = s.generation + 1;
+        return nextVoiceState(s, {
+          status: 'asking_permission', generation: gen3, mascot: 'listening',
+          error: null, idempotencyKey: null, failedAt: null,
+        }, [{ type: 'drop_blob' }, { type: 'request_mic', generation: gen3 }]);
+      }
+      if (type === 'PLAN_B') {
+        return nextVoiceState(s, {
+          status: 'idle', mascot: null, error: null, idempotencyKey: null, failedAt: null,
+        }, [{ type: 'drop_blob' }, { type: 'open_plan_b' }]);
+      }
+      if (type === 'CANCEL' || type === 'CLOSE' || type === 'HIDE' || type === 'COLLAPSE') {
+        return nextVoiceState(s, {
+          status: 'idle', generation: s.generation + 1, mascot: null, error: null, idempotencyKey: null, failedAt: null,
+        }, [{ type: 'drop_blob' }]);
+      }
+      return keepVoiceState(s, []);
+    }
+
+    return keepVoiceState(s, []);
+  }
+
+  /**
+   * §7.4 Blob retention rule: returns true ONLY while the Blob can still be sent or retried.
+   * Drops on: 200, Cancelar, Regravar, leaving error by any path other than retry,
+   * past 120 s after failure, and page hide / collapse.
+   */
+  function keepBlob(event, state, now) {
+    var type = typeof event === 'string' ? event.toUpperCase()
+      : (event && typeof event.type === 'string' ? event.type.toUpperCase() : 'TICK');
+    var st = typeof state === 'string' ? state : (state && state.status ? state.status : 'idle');
+
+    if (type === 'TRANSCRIBE_OK' || type === '200' ||
+        type === 'CANCEL' || type === 'RERECORD' || type === 'RETRY_PERMISSION' ||
+        type === 'PLAN_B' || type === 'CLOSE' || type === 'SEND' ||
+        type === 'HIDE' || type === 'PAGE_HIDE' || type === 'PAGEHIDE' ||
+        type === 'COLLAPSE' || type === 'RESET' || type === 'LEAVE_ERROR' ||
+        type === 'RETRY_EXPIRED') {
+      return false;
+    }
+
+    if (type === 'STOP' || type === 'AUTO_STOP') {
+      return !!(event && typeof event.durationMs === 'number' && event.durationMs >= VOICE_LIMITS.MIN_MS);
+    }
+
+    if (type === 'TRANSCRIBE_ERROR') {
+      var mapped = voiceError(event && event.error);
+      if (!mapped.canRetry) return false;
+      if (!isValidVoiceClock(now)) return false;
+      if (state && state.failedAt !== null && state.failedAt !== undefined) {
+        return isValidVoiceClock(state.failedAt) &&
+          now >= state.failedAt && (now - state.failedAt) <= VOICE_LIMITS.RETRY_WINDOW_MS;
+      }
+      return true;
+    }
+
+    if (type === 'RETRY') {
+      return !!(st === 'error' && state && state.error && state.error.canRetry &&
+        state.failedAt !== null && state.failedAt !== undefined &&
+        typeof now === 'number' && Number.isFinite(now) &&
+        now >= state.failedAt && (now - state.failedAt) <= VOICE_LIMITS.RETRY_WINDOW_MS);
+    }
+
+    if (type === 'TICK' || type === 'CHECK') {
+      if (st === 'sending') return true;
+      if (st === 'error') {
+        return !!(state && state.error && state.error.canRetry &&
+          state.failedAt !== null && state.failedAt !== undefined &&
+          typeof now === 'number' && Number.isFinite(now) &&
+          now >= state.failedAt && (now - state.failedAt) <= VOICE_LIMITS.RETRY_WINDOW_MS);
+      }
+      return false;
+    }
+
+    return false;
+  }
+
+  /** §4.2 confirmed text payload (`t: "text"`, `src: "voice"`), with trim, char and 4096-byte checks. */
+  function textPayload(text, id, src) {
+    var source = src === undefined ? 'voice' : src;
+    if (source !== 'voice') {
+      return { ok: false, payload: null, json: '', bytes: 0, error: 'Origem de texto inválida.' };
+    }
+    var subId = id === undefined ? newSubmissionId() : id;
+    if (!isSubmissionId(subId)) {
+      return { ok: false, payload: null, json: '', bytes: 0, error: 'Identificador de envio inválido.' };
+    }
+    var raw = typeof text === 'string' ? text : '';
+    if (VOICE_CONTROL_RE.test(raw)) {
+      return { ok: false, payload: null, json: '', bytes: 0, error: 'O texto contém caracteres de controle inválidos.' };
+    }
+    var trimmed = raw.trim();
+    if (!trimmed) {
+      return { ok: false, payload: null, json: '', bytes: 0, error: 'Digite ou grave o texto antes de enviar.' };
+    }
+    if (Array.from(trimmed).length > VOICE_LIMITS.TEXT_MAX) {
+      return { ok: false, payload: null, json: '', bytes: 0, error: 'Texto longo demais; encurte para no máximo ' + VOICE_LIMITS.TEXT_MAX + ' caracteres.' };
+    }
+    var payload = { v: 1, t: 'text', id: subId, src: source, text: trimmed };
+    var json = JSON.stringify(payload);
+    var bytes = utf8Bytes(json);
+    if (bytes > LIMITS.PAYLOAD_BYTES) {
+      return { ok: false, payload: payload, json: json, bytes: bytes, error: 'Texto longo demais para o Telegram; encurte um pouco.' };
+    }
+    return { ok: true, payload: payload, json: json, bytes: bytes, error: null };
+  }
+
   var api = {
     LIMITS: LIMITS,
     MEASURES: MEASURES,
@@ -1194,6 +1762,20 @@
     pulsoSummary: pulsoSummary,
     pulsoError: pulsoError,
     pulsoDozing: pulsoDozing,
+    VOICE_SESSION_KEY: VOICE_SESSION_KEY,
+    VOICE_CONSENT_KEY: VOICE_CONSENT_KEY,
+    VOICE_MIMES: VOICE_MIMES,
+    VOICE_LIMITS: VOICE_LIMITS,
+    codeRef: codeRef,
+    pickSession: pickSession,
+    acceptExchange: acceptExchange,
+    pickVoiceMime: pickVoiceMime,
+    voiceAvailable: voiceAvailable,
+    voiceError: voiceError,
+    initialVoiceState: initialVoiceState,
+    voiceReducer: voiceReducer,
+    keepBlob: keepBlob,
+    textPayload: textPayload,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

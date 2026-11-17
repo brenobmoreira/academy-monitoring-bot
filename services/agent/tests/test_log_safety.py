@@ -21,12 +21,20 @@ import pytest
 from google.adk.models import LlmRequest, LlmResponse
 
 from agent import buttons, logs, miniapp
-from agent.bot import MEDIA_UNREADABLE, MODEL_FAILED_NOTHING_WRITTEN, SHEET_FAILED, Bot, Media
+from agent.bot import (
+    MEDIA_UNREADABLE,
+    MODEL_FAILED_NOTHING_WRITTEN,
+    SHEET_FAILED,
+    WRITE_UNCERTAIN,
+    Bot,
+    Media,
+)
 from agent.handler import DOWNLOAD_FAILED, FAILURE, Handler
+from agent.llm import RetryingClient
 from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient, TelegramError
 
-from .fakes import FakeSheet, ScriptedLlm, call, say
+from .fakes import FakeLiteLLMClient, FakeSheet, ScriptedLlm, call, say, text_response
 from .test_handler import FakeBot, FakeTelegram, tap, update, voice_update
 from .test_miniapp import FOOD, tap_retry, web_app_update
 from .test_miniapp import clock as miniapp_clock
@@ -352,6 +360,34 @@ async def test_a_failing_model_call_logs_no_text_and_no_exception_content(captur
     )
 
 
+async def test_a_transient_model_retry_logs_through_describe_without_sentinel_class_name(captured, capsys):
+    caplog, stream = captured
+    smuggled = type(f"Leak {TEXT_SENTINEL}", (litellm.ServiceUnavailableError,), {})
+    err = smuggled(
+        f"overloaded {TEXT_SENTINEL} {AUDIO_B64}",
+        llm_provider=TEXT_SENTINEL,
+        model="gemini/gemini-3.8-flash",
+    )
+    err.code = TEXT_SENTINEL
+    client = FakeLiteLLMClient([err, text_response("ok")])
+    retrying = RetryingClient(client, retries=1, wait_s=0)
+
+    response = await retrying.acompletion(
+        "gemini/gemini-3.8-flash",
+        [{"role": "user", "content": TEXT_SENTINEL}],
+        None,
+    )
+
+    assert response.choices[0].message.content == "ok"
+    assert len(client.requests) == 2
+    std = capsys.readouterr()
+    assert_clean(caplog.records, stream.getvalue() + std.out + std.err)
+    assert (
+        "model gemini/gemini-3.8-flash unavailable (Exception[status=503 code=other]), attempt 1 of 2"
+        in caplog.text
+    )
+
+
 async def test_a_rejected_audio_logs_no_audio_no_caption_and_no_provider_text(captured):
     caplog, stream = captured
     answer = await bot(FakeSheet(), [leaky_bad_request()]).reply(
@@ -394,15 +430,31 @@ async def test_a_sheet_outage_logs_only_listed_error_codes(captured):
         "ok": False,
         "errors": [{"code": "unavailable", "message": TEXT_SENTINEL}, {"code": TEXT_SENTINEL}],
     }
-    sheet = FakeSheet(diary_upsert=[down])
-    script = [
-        call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
-        say("A planilha não respondeu."),
-    ]
+    sheet = FakeSheet(catalog=[down])
+    script = [call("get_catalog"), say("A planilha não respondeu.")]
     answer = await bot(sheet, script).reply(TEXT_SENTINEL)
     assert answer.text == SHEET_FAILED
     assert_clean(caplog.records, stream.getvalue())
     assert "sheet unavailable: unavailable, other" in caplog.text
+
+
+async def test_an_uncertain_write_logs_only_listed_error_codes(captured):
+    caplog, stream = captured
+    # A code outside the closed pre-write list, mixed with a listed one: the write may have landed.
+    mixed = {
+        "ok": False,
+        "errors": [{"code": "unavailable", "message": TEXT_SENTINEL}, {"code": TEXT_SENTINEL}],
+        "writeState": TEXT_SENTINEL,
+    }
+    sheet = FakeSheet(diary_upsert=[mixed])
+    script = [
+        call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+        say("Pode ter gravado."),
+    ]
+    answer = await bot(sheet, script).reply(TEXT_SENTINEL)
+    assert WRITE_UNCERTAIN in answer.text and answer.outcome == "uncertain"
+    assert_clean(caplog.records, stream.getvalue())
+    assert "write outcome uncertain: write_uncertain" in caplog.text
 
 
 async def test_the_handler_logs_a_failing_bot_without_content(captured):

@@ -9,6 +9,9 @@ A Cloud Scheduler job per kind calls the agent's URL at /remind with the header
 
 Without REMINDER_TOKEN the endpoint does not exist (404). The sheet being down never turns into
 a message: the job runs unattended, so a failure is logged and nothing is sent.
+
+The messages hold what the person recorded, and the sheet's error messages can repeat it: a failure
+is logged through logs.describe() (class, HTTP status, a listed code) and a chat as logs.ref().
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import httpx
 from agent import webhook
 from agent.commands import CommandSheet, Reply, week_text
 from agent.format import escape, split
+from agent.logs import describe, ref
 from agent.settings import Settings
 from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient
@@ -35,6 +39,7 @@ TOKEN_HEADER = "X-Reminder-Token"
 PATH = "/remind"
 KINDS = ("daily", "weekly")
 BAD_BODY = 'body must be {"kind": "daily" | "weekly"}'
+FAILED = "reminder failed"
 
 # Diary field → (word in the reminder, example of how to send it), in the order they are listed.
 DAILY_FIELDS = {
@@ -56,8 +61,20 @@ class Sender(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class ReminderFailed(RuntimeError):
+    """The reminder could not be prepared or delivered for a reason other than the sheet being
+    down; already logged through logs.describe(). It carries nothing of what failed: the server
+    that would log an escaping exception prints its message and traceback."""
+
+
 class SheetDown(RuntimeError):
-    """The sheet did not answer (or refused); the reminder sends nothing."""
+    """The sheet did not answer (or refused); the reminder sends nothing. `code` is the sheet's
+    error code, which logs.describe() prints only when it is a listed one; the sheet's message is
+    not kept."""
+
+    def __init__(self, code: object) -> None:
+        super().__init__("the sheet failed")
+        self.code = code
 
 
 # ---- what to send --------------------------------------------------------------------------
@@ -78,7 +95,7 @@ def daily_text(missing: list[str]) -> str:
 async def daily(sheet: CommandSheet, today: date) -> Reply | None:
     response = await sheet.day(today.isoformat())
     if not response.get("ok"):
-        raise SheetDown(_error(response))
+        raise SheetDown(_code(response))
     missing = missing_fields(response["result"].get("diary") or {})
     return Reply(daily_text(missing)) if missing else None
 
@@ -86,7 +103,7 @@ async def daily(sheet: CommandSheet, today: date) -> Reply | None:
 async def weekly(sheet: CommandSheet, today: date) -> Reply:
     reply = await week_text(sheet, today)
     if reply.failed:
-        raise SheetDown(reply.text)
+        raise SheetDown("unavailable" if reply.transient else "rejected")
     return reply
 
 
@@ -96,12 +113,19 @@ async def weekly(sheet: CommandSheet, today: date) -> Reply:
 async def remind(
     kind: str, sheet: CommandSheet, telegram: Sender, chat_ids: Iterable[int], today: date
 ) -> tuple[int, int]:
-    """(chats reached, chats tried). A chat that fails is logged and the others still get it."""
+    """(chats reached, chats tried). A chat that fails is logged and the others still get it.
+    Raises ReminderFailed, sending nothing, when the reminder cannot be prepared for a reason
+    other than the sheet being down (an answer the summary cannot read, a bug)."""
     try:
         reply = await (daily(sheet, today) if kind == "daily" else weekly(sheet, today))
     except SheetDown as err:
-        log.warning("%s reminder skipped, sheet failed: %s", kind, err)
+        log.warning("%s reminder skipped, sheet failed: %s", kind, describe(err))
         return 0, 0
+    except Exception as error:
+        # The error can repeat what the sheet holds; left alone it becomes a 500 whose traceback
+        # the HTTP server logs.
+        log.error("%s reminder not prepared: %s", kind, describe(error))
+        raise ReminderFailed from None
     if reply is None:
         return 0, 0
     chunks = split(reply.text if reply.html else escape(reply.text))
@@ -112,8 +136,10 @@ async def remind(
             for chunk in chunks:
                 await telegram.send_message(chat_id, chunk, html=True)
             sent += 1
-        except Exception:
-            log.exception("could not send the %s reminder to chat %s", kind, chat_id)
+        except Exception as error:
+            log.error(
+                "could not send the %s reminder to chat ref %s: %s", kind, ref(chat_id), describe(error)
+            )
     return sent, len(chats)
 
 
@@ -144,7 +170,9 @@ def is_authorized(settings: Settings, given: str | None) -> bool:
 
 async def process(token: str | None, body: Any) -> tuple[str, int]:
     """Returns (text, status): 404 without REMINDER_TOKEN, 403 for a wrong token, 400 for a bad
-    body, 502 when there was something to send and no chat got it, otherwise 200."""
+    body, 502 when there was something to send and no chat got it, 500 ("reminder failed") when
+    it could not be prepared or delivered at all, otherwise 200. Never raises: the server would
+    log the exception with its message and traceback."""
     settings = webhook.get_settings()
     if settings.REMINDER_TOKEN is None:
         return "not found", 404
@@ -153,7 +181,13 @@ async def process(token: str | None, body: Any) -> tuple[str, int]:
     kind = body.get("kind") if isinstance(body, dict) else None
     if kind not in KINDS:
         return BAD_BODY, 400
-    sent, tried = await deliver(settings, kind)
+    try:
+        sent, tried = await deliver(settings, kind)
+    except ReminderFailed:
+        return FAILED, 500
+    except Exception as error:
+        log.error("%s reminder failed: %s", kind, describe(error))
+        return FAILED, 500
     if tried == 0:
         return "nothing to send", 200
     status = 502 if sent == 0 else 200
@@ -164,6 +198,7 @@ def _blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
-def _error(response: dict[str, Any]) -> str:
-    error = (response.get("errors") or [{}])[0]
-    return f"{error.get('code', '?')}: {error.get('message', '')}"
+def _code(response: dict[str, Any]) -> object:
+    errors = response.get("errors")
+    first = errors[0] if isinstance(errors, list) and errors else None
+    return first.get("code") if isinstance(first, dict) else None

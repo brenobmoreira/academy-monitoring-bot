@@ -19,6 +19,7 @@ from agent.bot import MEDIA_UNREADABLE, MESSAGE_DEADLINE_AT, Answer, Bot, Media
 from agent.commands import COMMANDS, CommandSheet, Context, Reply, parse_command
 from agent.format import escape, split
 from agent.llm import build_model
+from agent.logs import describe
 from agent.settings import Settings
 from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient
@@ -230,18 +231,19 @@ class Handler:
         query = update.get("callback_query")
         message = (query.get("message") if query else update.get("message")) or {}
         chat_id = (message.get("chat") or {}).get("id")
+        update_id = _update_id(update.get("update_id"))
 
         async def answer(query: dict[str, Any]) -> None:
             try:
                 await self._telegram.answer_callback_query(str(query.get("id", "")), CUT)
             except Exception as error:
-                log.warning("could not answer callback query %s: %s", query.get("id"), error)
+                log.warning("could not answer the tap of update %s: %s", update_id, describe(error))
 
         async def tell(chat_id: int) -> None:
             try:
                 await self._send(chat_id, Reply(CUT))
             except Exception as error:
-                log.warning("could not tell chat %s the update was cut: %s", chat_id, error)
+                log.warning("could not tell the chat update %s was cut: %s", update_id, describe(error))
 
         notices = [answer(query)] if query else []
         if chat_id in self._allowed:
@@ -250,7 +252,7 @@ class Handler:
 
     async def _process_update(self, update: dict[str, Any], update_id: int | None) -> bool:
         if "callback_query" in update:
-            return await self._callback(update["callback_query"])
+            return await self._callback(update["callback_query"], update_id)
         message = update.get("message") or {}
         text = message.get("text")
         chat_id = (message.get("chat") or {}).get("id")
@@ -265,13 +267,13 @@ class Handler:
         else:
             parsed = parse_command(text)
             if parsed is not None:
-                reply = await self._command(*parsed, chat_id=chat_id)
+                reply = await self._command(*parsed, chat_id=chat_id, update_id=update_id)
             else:
                 reply = await self._run_bot(text, message, update_id)
         try:
             await self._send(chat_id, reply)
-        except Exception:
-            log.exception("could not send the reply to chat %s", chat_id)
+        except Exception as error:
+            log.warning("could not send the reply of update %s: %s", update_id, describe(error))
             return False
         return not reply.transient
 
@@ -289,15 +291,15 @@ class Handler:
                 self._clock().date(),
                 self._pending,
             )
-        except Exception:
-            log.exception("mini app data failed on update %s", update_id)
+        except Exception as error:
+            log.warning("mini app data failed on update %s: %s", update_id, describe(error))
             return Reply(FAILURE, failed=True, transient=True)
 
     async def _run_bot(
         self, text: str, message: dict[str, Any], update_id: Any, media: list[Media] | None = None
     ) -> Reply:
         chat_id = message["chat"]["id"]
-        typing = asyncio.create_task(self._keep_typing(chat_id))
+        typing = asyncio.create_task(self._keep_typing(chat_id, _update_id(update_id)))
         await asyncio.sleep(0)  # let the first action go out before the bot starts
         try:
             context = replied_text(message)
@@ -312,8 +314,8 @@ class Handler:
             return Reply(
                 answer.text, html=True, reply_markup=markup, failed=answer.failed, transient=answer.failed
             )
-        except Exception:
-            log.exception("bot failed on update %s", update_id)
+        except Exception as error:
+            log.warning("bot failed on update %s: %s", update_id, describe(error))
             return Reply(FAILURE, failed=True, transient=True)
         finally:
             typing.cancel()
@@ -338,8 +340,8 @@ class Handler:
                 data = await self._download(ref)
         except TooLarge:
             return Reply(too_large(self._media_max_bytes))
-        except Exception:
-            log.exception("could not download the file of update %s", update_id)
+        except Exception as error:
+            log.warning("could not download the file of update %s: %s", update_id, describe(error))
             return Reply(DOWNLOAD_FAILED, failed=True, transient=True)
         return await self._run_bot(caption, message, update_id, media=[Media(ref.mime_type, data)])
 
@@ -356,8 +358,10 @@ class Handler:
             raise TooLarge
         return data
 
-    async def _command(self, name: str, args: str, chat_id: int) -> Reply:
-        """Registered commands answer from the sheet alone; they never reach the model."""
+    async def _command(self, name: str, args: str, chat_id: int, update_id: int | None = None) -> Reply:
+        """Registered commands answer from the sheet alone; they never reach the model. Their
+        arguments are typed text and the sheet can repeat them in an error, so a failure is logged
+        through describe() (`name` is a key of COMMANDS)."""
         ctx = Context(
             sheet=self._sheet,
             today=self._clock().date(),
@@ -366,32 +370,42 @@ class Handler:
         )
         try:
             return await COMMANDS[name].run(ctx, args)
-        except Exception:
-            log.exception("command /%s failed", name)
+        except Exception as error:
+            log.error("command /%s failed on update %s: %s", name, update_id, describe(error))
             return Reply(FAILURE, failed=True, transient=True)
 
-    async def _callback(self, query: dict[str, Any]) -> bool:
+    async def _callback(self, query: dict[str, Any], update_id: int | None = None) -> bool:
         """A tap on an inline button. Always answered (Telegram shows a spinner until then), even
-        when the chat is not allowed or the action fails; the failure shows as a toast."""
+        when the chat is not allowed or the action fails; the failure shows as a toast. A tap can
+        replay what the person sent (🔁 runs a stored form), so a failure is logged through
+        describe(), with the button's action and never its `callback_data`."""
         message = query.get("message") or {}
         chat_id = (message.get("chat") or {}).get("id")
         message_id = message.get("message_id")
+        data = str(query.get("data") or "")
         toast = None
         completed = True
         try:
             if chat_id in self._allowed and isinstance(message_id, int):
-                completed = await self._button(str(query.get("data") or ""), chat_id, message_id, message)
-        except Exception:
-            log.exception("button %r failed", query.get("data"))
+                completed = await self._button(data, chat_id, message_id, message, update_id)
+        except Exception as error:
+            log.error("button %s failed on update %s: %s", buttons.action(data), update_id, describe(error))
             toast = FAILURE
             completed = False
         try:
             await self._telegram.answer_callback_query(str(query.get("id", "")), toast)
-        except Exception:
-            log.exception("could not answer callback query %s", query.get("id"))
+        except Exception as error:
+            log.error("could not answer the tap of update %s: %s", update_id, describe(error))
         return completed
 
-    async def _button(self, data: str, chat_id: int, message_id: int, message: dict[str, Any]) -> bool:
+    async def _button(
+        self,
+        data: str,
+        chat_id: int,
+        message_id: int,
+        message: dict[str, Any],
+        update_id: int | None = None,
+    ) -> bool:
         verb, ids = buttons.parse(data)
         if verb == buttons.OK:
             await self._remove_keyboard(chat_id, message_id)
@@ -417,7 +431,7 @@ class Handler:
             text, markup = buttons.fix_prompt(message.get("text"))
             await self._send(chat_id, Reply(text, reply_markup=markup), reply_to=message_id)
             return True
-        log.warning("unknown button data %r", data)
+        log.warning("unknown button data of %d characters on update %s", len(data), update_id)
         return True
 
     async def _remove_keyboard(self, chat_id: int, message_id: int) -> None:
@@ -425,15 +439,15 @@ class Handler:
         try:
             await self._telegram.edit_message_reply_markup(chat_id, message_id)
         except Exception as error:
-            log.warning("could not remove the buttons of message %s: %s", message_id, error)
+            log.warning("could not remove the buttons of message %s: %s", message_id, describe(error))
 
-    async def _keep_typing(self, chat_id: int) -> None:
+    async def _keep_typing(self, chat_id: int, update_id: int | None = None) -> None:
         """Shows "typing…" until cancelled. Cosmetic: the first failure stops it, the reply is unaffected."""
         while True:
             try:
                 await self._telegram.send_chat_action(chat_id)
             except Exception as error:
-                log.warning("could not send the typing action to chat %s: %s", chat_id, error)
+                log.warning("could not send the typing action for update %s: %s", update_id, describe(error))
                 return
             await asyncio.sleep(self._typing_every)
 

@@ -15,6 +15,8 @@ from typing import Any
 
 import httpx
 
+from agent.logs import describe
+
 log = logging.getLogger(__name__)
 
 Response = dict[str, Any]
@@ -68,20 +70,27 @@ class SheetClient:
         return body
 
     async def _post(self, payload: dict[str, Any]) -> Response:
+        # Each failure is logged here with the operation (a name written in this file) and the HTTP
+        # status: the libraries' own records of the request are silenced or rewritten (logs.py).
+        op = payload["op"]
         try:
             response = await self._http.post(self._url, json=payload, follow_redirects=True, timeout=30.0)
         except httpx.HTTPError as err:
+            log.warning("sheet call %s got no answer: %s", op, describe(err))
             return _unavailable(f"falha de rede ao chamar a planilha: {err!r}")
         if response.status_code != 200:
+            log.warning("sheet call %s answered HTTP %d", op, response.status_code)
             return _unavailable(f"planilha respondeu HTTP {response.status_code}")
         try:
             body = response.json()
         except ValueError:
+            log.warning("sheet call %s answered HTTP 200 without JSON", op)
             return _unavailable(
                 "resposta da planilha não é JSON; confira se o Web App está publicado para "
                 "'Qualquer pessoa' e se a URL termina em /exec"
             )
         if not isinstance(body, dict) or "ok" not in body:
+            log.warning("sheet call %s answered HTTP 200 without the API envelope", op)
             return _unavailable("resposta da planilha fora do formato {ok, ...}")
         return body
 

@@ -6,12 +6,12 @@
   --bg: var(--tg-theme-secondary-bg-color, #f5f4f1);
   --surface: var(--tg-theme-bg-color, #ffffff);
   --text: var(--tg-theme-text-color, #1c1917);
-  --hint: var(--tg-theme-hint-color, #78716c);
+  --hint: var(--tg-theme-hint-color, #635d58);
   --fill: rgba(28, 25, 23, 0.045);
   --fill-strong: rgba(28, 25, 23, 0.1);
   --line: rgba(28, 25, 23, 0.1);
 
-  --accent: #e04e14;
+  --accent: #c9410c;
   --accent-text: #c2410c;
   --accent-ink: #ffffff;
   --accent-soft: rgba(224, 78, 20, 0.09);
@@ -22,6 +22,7 @@
   --amber-soft: rgba(245, 158, 11, 0.13);
   --cool: #2563c9;
   --alert: #dc2626;
+  --alert-ink: #ffffff;
   --alert-soft: rgba(220, 38, 38, 0.08);
 
 
@@ -58,6 +59,7 @@
   --amber-soft: rgba(251, 191, 36, 0.13);
   --cool: #5b9bf0;
   --alert: #f87171;
+  --alert-ink: #1a0a02;
   --alert-soft: rgba(248, 113, 113, 0.12);
 
   color-scheme: dark;
@@ -256,6 +258,7 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 }
 .chip[aria-pressed="true"], .chip[aria-checked="true"] { background: var(--accent); color: var(--accent-ink); box-shadow: none; }
 .chip .tag { margin-left: 6px; font-size: 12px; font-weight: 600; opacity: 0.75; }
+.chip[aria-pressed="true"] .tag, .chip[aria-checked="true"] .tag { opacity: 1; }
 
 /* Exercise cards ------------------------------------------------------------------------ */
 
@@ -286,7 +289,7 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
   border: solid var(--accent-ink); border-width: 0 2px 2px 0; transform: rotate(45deg);
 }
 .card[data-status="error"] .dot { background: var(--alert); box-shadow: none; }
-.card[data-status="error"] .dot::after { content: "!"; position: absolute; inset: 0; display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 13px; }
+.card[data-status="error"] .dot::after { content: "!"; position: absolute; inset: 0; display: grid; place-items: center; color: var(--alert-ink); font-weight: 800; font-size: 13px; }
 .card-name { display: block; font-size: 17px; font-weight: 700; line-height: 1.2; letter-spacing: -0.01em; }
 .card-group { display: block; font-size: 13px; color: var(--hint); margin-top: 2px; }
 .card-summary {
@@ -370,7 +373,7 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
   letter-spacing: -0.02em;
   padding: 4px 0;
 }
-.step-input::placeholder { color: var(--hint); opacity: 0.55; font-weight: 600; }
+.step-input::placeholder { color: var(--hint); opacity: 1; font-weight: 600; }
 .step-input:focus { outline: none; }
 .stepper:focus-within { box-shadow: inset 0 0 0 2px var(--accent); }
 .step-unit { font-size: 13px; font-weight: 600; color: var(--hint); }

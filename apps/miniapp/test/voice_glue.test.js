@@ -888,3 +888,361 @@ test('C6b-2: every exit path (cancel, hide, collapse, errors, send, auto-stop) s
   }
 });
 
+/* 7. C6b-3: transcription upload, AbortController, Blob retention & 120s ms retry window ----- */
+
+function makeTestSession(overrides = {}) {
+  return {
+    vu: VALID_VU,
+    ref: REF_A,
+    session: 's1.voice-token-c6b3',
+    expires_at: T_S + 3600,
+    ...overrides,
+  };
+}
+
+test('C6b-3: ms clock enforces 119 999 ms retry sends vs 120 001 ms does not send and drops Blob', async () => {
+  let nowMs = T_MS;
+  const storage = memoryStorage({
+    [C.VOICE_CONSENT_KEY]: '1',
+    [C.VOICE_SESSION_KEY]: JSON.stringify(makeTestSession()),
+  });
+  const stream = makeFakeStream(2);
+  const { FakeMediaRecorder, instances } = makeFakeRecorderClass();
+  const timers = makeFakeTimers();
+  const requests = [];
+  let fetchMode = 'fail_502';
+
+  const ctrl = V.createVoiceController({
+    storage,
+    session: makeTestSession(),
+    clock: () => nowMs,
+    getUserMedia: async () => stream,
+    MediaRecorder: FakeMediaRecorder,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    fetch: async (url, init) => {
+      requests.push({ url, init });
+      if (fetchMode === 'fail_502') {
+        return jsonResponse(502, {
+          v: 1,
+          error: { code: 'transcription_failed', message: 'Falhou.', retry: true },
+        });
+      }
+      if (fetchMode === 'fail_net') {
+        throw new TypeError('Failed to fetch');
+      }
+      return jsonResponse(200, { v: 1, id: '0123456789abcdef0123456789abcdef', text: 'agachamento 100 por 5' });
+    },
+  });
+
+  ctrl.start();
+  await flushMicrotasks();
+  const rec = instances[0];
+  rec.emitChunk(new Uint8Array([1, 2, 3, 4]));
+  nowMs += 1500;
+  ctrl.stop();
+  rec.finishStop();
+  await flushMicrotasks();
+
+  // First attempt failed at failedAt = T_MS + 1500
+  const tFail = T_MS + 1500;
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, `${VALID_VU}/v1/voice/transcriptions`);
+  assert.equal(requests[0].init.method, 'POST');
+  assert.equal(requests[0].init.credentials, 'omit');
+  assert.equal(requests[0].init.headers.Authorization, 'Bearer s1.voice-token-c6b3');
+  assert.equal(requests[0].init.headers['Content-Type'], 'audio/webm;codecs=opus');
+  assert.match(requests[0].init.headers['Idempotency-Key'], /^[0-9a-f]{32}$/);
+  assert.equal(requests[0].init.headers['X-Audio-Duration-Ms'], '1500');
+  assert.ok(ctrl.blob(), 'Blob must stay in memory while retryable');
+  assert.equal(requests[0].init.body, ctrl.blob());
+  assert.equal(ctrl.state().status, 'error');
+  assert.equal(ctrl.state().error.canRetry, true);
+  assert.equal(ctrl.state().failedAt, tFail);
+
+  // Retry at 119 999 ms -> MUST send with the exact same Blob & Idempotency-Key
+  nowMs = tFail + 119_999;
+  fetchMode = 'fail_net';
+  ctrl.retry();
+  assert.equal(ctrl.state().status, 'sending');
+  await flushMicrotasks();
+
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].init.headers['Idempotency-Key'], requests[0].init.headers['Idempotency-Key']);
+  assert.equal(requests[1].init.body, requests[0].init.body);
+  assert.equal(ctrl.state().status, 'error');
+  assert.equal(ctrl.state().error.canRetry, true);
+  assert.equal(ctrl.state().failedAt, tFail);
+  assert.ok(ctrl.blob(), 'Blob stays kept up to 120 000 ms');
+
+  // Remaining retry expiry timer must reflect only the 1 ms left (not another 120 000 ms)
+  const retryTimers = [...timers.timers.values()];
+  assert.equal(retryTimers.length, 1);
+  assert.equal(retryTimers[0].ms, 1);
+
+  // Retry at 120 001 ms (even before timer callback runs) -> MUST NOT call fetch and MUST drop Blob
+  nowMs = tFail + 120_001;
+  fetchMode = 'ok';
+  ctrl.retry();
+  await flushMicrotasks();
+
+  assert.equal(requests.length, 2, 'retry at 120 001 ms must not call fetch');
+  assert.equal(ctrl.state().status, 'error');
+  assert.equal(ctrl.state().error.canRetry, false);
+  assert.deepEqual(ctrl.state().error.actions, ['plan_b']);
+  assert.equal(ctrl.blob(), null, 'Blob must be dropped at 120 001 ms');
+  assert.equal(timers.timers.size, 0);
+});
+
+test('C6b-3: 120 s timer dispatches RETRY_EXPIRED and drops Blob; 45 s timeout aborts fetch', async () => {
+  let nowMs = T_MS;
+  const storage = memoryStorage({ [C.VOICE_CONSENT_KEY]: '1' });
+  const { FakeMediaRecorder, instances } = makeFakeRecorderClass({ syncOnStop: true });
+  const timers = makeFakeTimers();
+  const requests = [];
+  let pendingFetch = null;
+
+  const ctrl = V.createVoiceController({
+    storage,
+    vu: VALID_VU,
+    session: 's1.timeout-test',
+    clock: () => nowMs,
+    getUserMedia: async () => makeFakeStream(1),
+    MediaRecorder: FakeMediaRecorder,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    fetch: (url, init) => {
+      pendingFetch = makeDeferred();
+      requests.push({ url, init, deferred: pendingFetch });
+      return pendingFetch.promise;
+    },
+  });
+
+  ctrl.start();
+  await flushMicrotasks();
+  instances[0].emitChunk(new Uint8Array([9, 8, 7]));
+  nowMs += 2000;
+  ctrl.stop();
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].init.signal.aborted, false);
+  const timeoutTimer = [...timers.timers.values()].find((t) => t.ms === 45_000);
+  assert.ok(timeoutTimer, '45 s upload AbortController timer must be scheduled');
+
+  // Trigger 45 s upload timeout
+  nowMs += 45_000;
+  timeoutTimer.fn();
+  assert.equal(requests[0].init.signal.aborted, true);
+  assert.equal(ctrl.state().status, 'error');
+  assert.equal(ctrl.state().error.code, 'timeout');
+  assert.equal(ctrl.state().error.canRetry, true);
+  assert.ok(ctrl.blob());
+
+  // Delayed rejection from the aborted fetch must be ignored
+  requests[0].deferred.reject(new TypeError('aborted'));
+  await flushMicrotasks();
+  assert.equal(ctrl.state().status, 'error');
+  assert.ok(ctrl.blob());
+
+  // 120 s RETRY_EXPIRED timer must be scheduled
+  const retryTimer = [...timers.timers.values()].find((t) => t.ms === 120_000);
+  assert.ok(retryTimer, '120 s RETRY_EXPIRED timer must be scheduled');
+  nowMs += 120_000;
+  retryTimer.fn();
+
+  assert.equal(ctrl.state().status, 'error');
+  assert.equal(ctrl.state().error.canRetry, false);
+  assert.equal(ctrl.blob(), null, 'RETRY_EXPIRED timer must drop Blob');
+});
+
+test('C6b-3: delayed response from an old generation is ignored without altering new attempt or Blob', async () => {
+  let nowMs = T_MS;
+  const storage = memoryStorage({ [C.VOICE_CONSENT_KEY]: '1' });
+  const { FakeMediaRecorder, instances } = makeFakeRecorderClass({ syncOnStop: true });
+  const timers = makeFakeTimers();
+  const requests = [];
+
+  const ctrl = V.createVoiceController({
+    storage,
+    session: makeTestSession(),
+    clock: () => nowMs,
+    getUserMedia: async () => makeFakeStream(1),
+    MediaRecorder: FakeMediaRecorder,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    fetch: (url, init) => {
+      const d = makeDeferred();
+      requests.push({ url, init, deferred: d });
+      return d.promise;
+    },
+  });
+
+  // Attempt 1
+  ctrl.start();
+  await flushMicrotasks();
+  instances[0].emitChunk(new Uint8Array([1, 1]));
+  nowMs += 1000;
+  ctrl.stop();
+  const gen1 = ctrl.state().generation;
+  assert.equal(ctrl.state().status, 'sending');
+  assert.equal(requests.length, 1);
+
+  // Cancel during sending -> aborts fetch 1 and drops Blob 1
+  ctrl.cancel();
+  assert.equal(requests[0].init.signal.aborted, true);
+  assert.equal(ctrl.blob(), null);
+  assert.equal(ctrl.state().status, 'idle');
+
+  // Attempt 2 starts and enters sending
+  ctrl.start();
+  await flushMicrotasks();
+  instances[1].emitChunk(new Uint8Array([2, 2, 2]));
+  nowMs += 1200;
+  ctrl.stop();
+  const gen2 = ctrl.state().generation;
+  const blob2 = ctrl.blob();
+  assert.ok(gen2 > gen1);
+  assert.equal(ctrl.state().status, 'sending');
+  assert.ok(blob2);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].init.signal.aborted, false);
+
+  // Delayed 200 OK from attempt 1 AND stale manual dispatch with gen1 must both be ignored
+  requests[0].deferred.resolve(jsonResponse(200, { v: 1, id: '1'.repeat(32), text: 'transcricao velha' }));
+  await flushMicrotasks();
+  ctrl.dispatch({ type: 'TRANSCRIBE_OK', generation: gen1, text: 'fantasma' });
+  ctrl.dispatch({ type: 'TRANSCRIBE_ERROR', generation: gen1, error: 'too_large' });
+
+  assert.equal(ctrl.state().status, 'sending');
+  assert.equal(ctrl.state().generation, gen2);
+  assert.equal(ctrl.state().text, '');
+  assert.equal(ctrl.blob(), blob2, 'new Blob must remain intact when old generation settles');
+
+  // Attempt 2 succeeds -> transcribed, Blob dropped
+  requests[1].deferred.resolve(jsonResponse(200, { v: 1, id: '2'.repeat(32), text: 'supino 90 por 6' }));
+  await flushMicrotasks();
+  assert.equal(ctrl.state().status, 'transcribed');
+  assert.equal(ctrl.state().text, 'supino 90 por 6');
+  assert.equal(ctrl.blob(), null);
+});
+
+test('C6b-3: abort_fetch on cancel/hide/collapse, 401 clears session, and no audio or transcript enters storage', async () => {
+  const AUDIO_SENTINEL_BYTES = Buffer.from('SENTINEL-AUDIO-7f3a');
+  const TRANSCRIPT_SENTINEL = 'SENTINELA-TEXTO-91c2';
+
+  for (const exitFn of [(c) => c.cancel(), (c) => c.hide(), (c) => c.collapse()]) {
+    let nowMs = T_MS;
+    const storage = memoryStorage({ [C.VOICE_CONSENT_KEY]: '1' });
+    const { FakeMediaRecorder, instances } = makeFakeRecorderClass({ syncOnStop: true });
+    const timers = makeFakeTimers();
+    const signals = [];
+    const ctrl = V.createVoiceController({
+      storage,
+      session: makeTestSession(),
+      clock: () => nowMs,
+      getUserMedia: async () => makeFakeStream(1),
+      MediaRecorder: FakeMediaRecorder,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+      fetch: (_url, init) => {
+        signals.push(init.signal);
+        return makeDeferred().promise;
+      },
+    });
+    ctrl.start();
+    await flushMicrotasks();
+    instances[0].emitChunk(AUDIO_SENTINEL_BYTES);
+    nowMs += 1000;
+    ctrl.stop();
+    assert.equal(ctrl.state().status, 'sending');
+    assert.equal(signals[0].aborted, false);
+
+    exitFn(ctrl);
+    assert.equal(ctrl.state().status, 'idle');
+    assert.equal(signals[0].aborted, true);
+    assert.equal(ctrl.blob(), null);
+    assert.equal(timers.timers.size, 0);
+  }
+
+  // Storage spy checks that no audio, blob, or transcript text is ever written to storage
+  let nowMs = T_MS;
+  const writtenValues = [];
+  const rawStorage = memoryStorage();
+  const auditStorage = {
+    getItem(k) { return rawStorage.getItem(k); },
+    setItem(k, v) {
+      writtenValues.push({ k, v: String(v) });
+      rawStorage.setItem(k, v);
+    },
+    removeItem(k) { rawStorage.removeItem(k); },
+  };
+  await V.resolveSession(
+    { vu: VALID_VU, vc: CODE_A, vx: T_S + 600, initData: '' },
+    {
+      storage: auditStorage,
+      fetch: async () => jsonResponse(200, { v: 1, session: 's1.audit', expires_at: T_S + 3600, scopes: ['voice'], ref: REF_A }),
+      clock: () => nowMs,
+    }
+  );
+
+  const { FakeMediaRecorder, instances } = makeFakeRecorderClass({ syncOnStop: true });
+  const timers = makeFakeTimers();
+  const sends = [];
+  let respond401 = false;
+  const ctrl = V.createVoiceController({
+    storage: auditStorage,
+    getSession: () => V.readSession(auditStorage),
+    clock: () => nowMs,
+    getUserMedia: async () => makeFakeStream(1),
+    MediaRecorder: FakeMediaRecorder,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    onSendData: (s) => sends.push(s),
+    fetch: async () => (respond401
+      ? jsonResponse(401, { v: 1, error: { code: 'auth_expired', message: 'Expirou.', retry: false } })
+      : jsonResponse(200, { v: 1, id: '3'.repeat(32), text: TRANSCRIPT_SENTINEL })),
+  });
+
+  ctrl.start();
+  assert.equal(ctrl.state().status, 'consent');
+  ctrl.acceptConsent();
+  await flushMicrotasks();
+  instances[0].emitChunk(AUDIO_SENTINEL_BYTES);
+  nowMs += 1000;
+  ctrl.stop();
+  await flushMicrotasks();
+
+  assert.equal(ctrl.state().status, 'transcribed');
+  assert.equal(ctrl.state().text, TRANSCRIPT_SENTINEL);
+  assert.equal(ctrl.blob(), null);
+
+  ctrl.send('4'.repeat(32));
+  assert.equal(ctrl.state().status, 'idle');
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].payload.text, TRANSCRIPT_SENTINEL);
+
+  // Only VOICE_SESSION_KEY and VOICE_CONSENT_KEY are ever stored; never audio or transcript
+  const allowedKeys = new Set([C.VOICE_SESSION_KEY, C.VOICE_CONSENT_KEY]);
+  for (const w of writtenValues) {
+    assert.equal(allowedKeys.has(w.k), true, `unexpected storage key: ${w.k}`);
+    assert.equal(w.v.includes(TRANSCRIPT_SENTINEL), false);
+    assert.equal(w.v.includes('SENTINEL-AUDIO'), false);
+    assert.equal(w.v.includes(AUDIO_SENTINEL_BYTES.toString('base64')), false);
+  }
+
+  // 401 auth_expired clears stored session and drops Blob
+  respond401 = true;
+  ctrl.start();
+  await flushMicrotasks();
+  instances[1].emitChunk(AUDIO_SENTINEL_BYTES);
+  nowMs += 1000;
+  ctrl.stop();
+  await flushMicrotasks();
+
+  assert.equal(ctrl.state().status, 'error');
+  assert.equal(ctrl.state().error.code, 'auth_expired');
+  assert.equal(ctrl.blob(), null);
+  assert.equal(rawStorage.raw(C.VOICE_SESSION_KEY), null);
+});
+
+

@@ -95,8 +95,10 @@
     if (status === 400) return 'bad_request';
     if (status === 401) return 'unauthenticated';
     if (status === 403) return 'forbidden';
+    if (status === 409) return 'idempotency_conflict';
     if (status === 413) return 'too_large';
     if (status === 415) return 'unsupported_format';
+    if (status === 422) return 'no_speech';
     if (status === 429) return 'rate_limited';
     if (status === 502) return 'transcription_failed';
     if (status === 503) return 'disabled';
@@ -330,24 +332,78 @@
     return { chunks: chunks.slice(), type: mime || '' };
   }
 
+  function pickAbortController(opts) {
+    if (opts && Object.prototype.hasOwnProperty.call(opts, 'AbortController')) return opts.AbortController || null;
+    if (root && typeof root.AbortController === 'function') return root.AbortController;
+    if (typeof AbortController === 'function') return AbortController;
+    return null;
+  }
+
+  function createAbortController(AbortCtor) {
+    if (typeof AbortCtor === 'function') return new AbortCtor();
+    var listeners = [];
+    var signal = {
+      aborted: false,
+      onabort: null,
+      addEventListener: function (type, fn) {
+        if (type === 'abort' && typeof fn === 'function') listeners.push(fn);
+      },
+      removeEventListener: function (type, fn) {
+        if (type !== 'abort') return;
+        listeners = listeners.filter(function (l) { return l !== fn; });
+      },
+    };
+    return {
+      signal: signal,
+      abort: function () {
+        if (signal.aborted) return;
+        signal.aborted = true;
+        if (typeof signal.onabort === 'function') {
+          try { signal.onabort(); } catch (e) { /* ignore */ }
+        }
+        var list = listeners.slice();
+        for (var i = 0; i < list.length; i++) {
+          try { list[i](); } catch (e) { /* ignore */ }
+        }
+      },
+    };
+  }
+
+  function extractErrorInput(res, body) {
+    if (body && typeof body === 'object' && body.error && typeof body.error === 'object') return body;
+    if (body && typeof body === 'object' && typeof body.code === 'string') return body;
+    return httpStatusCode(res ? res.status : 0);
+  }
+
   /**
    * §7.4 / §9.2 stateful voice controller: executes ShapeCore.voiceReducer effects
    * (`save_consent`, `request_mic`, `start_recorder`, `stop_recorder`, `stop_tracks`, `drop_blob`,
-   * `delete_session`, `send_data`, `open_plan_b`, `upload`, `abort_fetch`) using injected media/clock/storage.
+   * `delete_session`, `send_data`, `open_plan_b`, `upload`, `abort_fetch`) using injected media/clock/fetch/storage.
    */
   function createVoiceController(opts) {
     var o = opts || {};
     var storage = pickStorage(o);
     var clockFn = pickClock(o);
+    var fetchFn = pickFetch(o);
+    var AbortCtor = pickAbortController(o);
     var getUserMedia = pickGetUserMedia(o);
     var MediaRecorderCtor = pickMediaRecorder(o);
     var setTimer = pickTimer(o, 'setTimeout', setTimeout);
     var clearTimer = pickTimer(o, 'clearTimeout', clearTimeout);
+    var hasUploadConfig = Boolean(
+      Object.prototype.hasOwnProperty.call(o, 'fetch') ||
+      o.vu ||
+      o.session !== undefined ||
+      typeof o.getSession === 'function'
+    );
 
     var state = C.initialVoiceState();
+    var activeSession = o.session !== undefined ? o.session : null;
     var activeStream = null;
     var activeRecorder = null;
     var autoStopTimer = null;
+    var retryExpiryTimer = null;
+    var activeUpload = null;
     var startedAtMs = 0;
     var activeMime = '';
     var chunks = [];
@@ -356,10 +412,66 @@
     var pendingUpload = null;
     var lastDurationMs = 0;
 
+    function reducerNow() {
+      return clockFn();
+    }
+
+    function currentSessionInfo() {
+      var s = typeof o.getSession === 'function' ? o.getSession() : activeSession;
+      var vu = '';
+      var token = '';
+      if (typeof s === 'string') {
+        token = s;
+        vu = typeof o.vu === 'string' ? o.vu : '';
+      } else if (s && typeof s === 'object') {
+        token = typeof s.session === 'string' ? s.session : '';
+        vu = typeof s.vu === 'string' ? s.vu : (typeof o.vu === 'string' ? o.vu : '');
+      } else if (typeof o.vu === 'string') {
+        vu = o.vu;
+      }
+      return { vu: vu, token: token };
+    }
+
     function clearAutoStop() {
       if (autoStopTimer !== null) {
         try { clearTimer(autoStopTimer); } catch (e) { /* ignore */ }
         autoStopTimer = null;
+      }
+    }
+
+    function clearRetryExpiry() {
+      if (retryExpiryTimer !== null) {
+        try { clearTimer(retryExpiryTimer); } catch (e) { /* ignore */ }
+        retryExpiryTimer = null;
+      }
+    }
+
+    function syncRetryExpiry() {
+      clearRetryExpiry();
+      if (state.status !== 'error' || !state.error || !state.error.canRetry ||
+          typeof state.failedAt !== 'number' || !Number.isFinite(state.failedAt)) {
+        return;
+      }
+      var remaining = (state.failedAt + C.VOICE_LIMITS.RETRY_WINDOW_MS) - reducerNow();
+      var delay = remaining > 0 ? remaining : 0;
+      retryExpiryTimer = setTimer(function () {
+        retryExpiryTimer = null;
+        if (state.status !== 'error' || !state.error || !state.error.canRetry) return;
+        dispatch({ type: 'RETRY_EXPIRED' });
+      }, delay);
+    }
+
+    function abortActiveUpload(reason) {
+      if (!activeUpload) return;
+      var up = activeUpload;
+      activeUpload = null;
+      up.abortedBy = reason || 'cancel';
+      if (up.timeoutId !== null) {
+        try { clearTimer(up.timeoutId); } catch (e) { /* ignore */ }
+        up.timeoutId = null;
+      }
+      if (up.controller && typeof up.controller.abort === 'function') {
+        try { up.controller.abort(); } catch (e) { /* ignore */ }
       }
     }
 
@@ -368,6 +480,134 @@
       pendingUpload = null;
       currentBlob = null;
       chunks = [];
+    }
+
+    function uploadTranscription(meta) {
+      abortActiveUpload('superseded');
+      var info = currentSessionInfo();
+      var blobToSend = currentBlob;
+      if (!info.vu || !info.token) {
+        Promise.resolve().then(function () {
+          dispatch({
+            type: 'TRANSCRIBE_ERROR',
+            generation: meta.generation,
+            error: 'unauthenticated',
+            now: reducerNow(),
+          });
+        });
+        return;
+      }
+      if (typeof fetchFn !== 'function' || !blobToSend) {
+        Promise.resolve().then(function () {
+          dispatch({
+            type: 'TRANSCRIBE_ERROR',
+            generation: meta.generation,
+            error: 'network_error',
+            now: reducerNow(),
+          });
+        });
+        return;
+      }
+
+      var controller = createAbortController(AbortCtor);
+      var uploadObj = {
+        generation: meta.generation,
+        controller: controller,
+        timeoutId: null,
+        abortedBy: '',
+      };
+      activeUpload = uploadObj;
+
+      var headers = {
+        Authorization: 'Bearer ' + info.token,
+        'Content-Type': activeMime || (blobToSend && blobToSend.type) || 'application/octet-stream',
+        'Idempotency-Key': meta.idempotencyKey,
+      };
+      if (typeof lastDurationMs === 'number' && Number.isFinite(lastDurationMs) && lastDurationMs > 0) {
+        headers['X-Audio-Duration-Ms'] = String(Math.round(lastDurationMs));
+      }
+
+      var reqInit = {
+        method: 'POST',
+        credentials: 'omit',
+        headers: headers,
+        body: blobToSend,
+        signal: controller.signal,
+      };
+
+      uploadObj.timeoutId = setTimer(function () {
+        uploadObj.timeoutId = null;
+        if (activeUpload !== uploadObj) return;
+        activeUpload = null;
+        uploadObj.abortedBy = 'timeout';
+        if (controller && typeof controller.abort === 'function') {
+          try { controller.abort(); } catch (e) { /* ignore */ }
+        }
+        dispatch({
+          type: 'TRANSCRIBE_ERROR',
+          generation: meta.generation,
+          error: 'timeout',
+          now: reducerNow(),
+        });
+      }, C.VOICE_LIMITS.UPLOAD_TIMEOUT_MS);
+
+      var fetchPromise;
+      try {
+        fetchPromise = Promise.resolve(fetchFn(info.vu + '/v1/voice/transcriptions', reqInit));
+      } catch (syncErr) {
+        fetchPromise = Promise.reject(syncErr);
+      }
+
+      fetchPromise.then(function (res) {
+        if (uploadObj.timeoutId !== null) {
+          try { clearTimer(uploadObj.timeoutId); } catch (e) { /* ignore */ }
+          uploadObj.timeoutId = null;
+        }
+        if (activeUpload === uploadObj) activeUpload = null;
+        if (uploadObj.abortedBy === 'cancel' || uploadObj.abortedBy === 'timeout') return;
+
+        return readResponseJson(res).then(function (body) {
+          if (uploadObj.abortedBy === 'cancel' || uploadObj.abortedBy === 'timeout') return;
+          if (!res || !res.ok) {
+            dispatch({
+              type: 'TRANSCRIBE_ERROR',
+              generation: meta.generation,
+              error: extractErrorInput(res, body),
+              now: reducerNow(),
+            });
+            return;
+          }
+          if (!body || typeof body !== 'object' || Array.isArray(body) ||
+              (body.v !== undefined && body.v !== 1) || typeof body.text !== 'string') {
+            dispatch({
+              type: 'TRANSCRIBE_ERROR',
+              generation: meta.generation,
+              error: 'transcription_failed',
+              now: reducerNow(),
+            });
+            return;
+          }
+          dispatch({
+            type: 'TRANSCRIBE_OK',
+            generation: meta.generation,
+            text: body.text,
+          });
+        });
+      }, function (err) {
+        if (uploadObj.timeoutId !== null) {
+          try { clearTimer(uploadObj.timeoutId); } catch (e) { /* ignore */ }
+          uploadObj.timeoutId = null;
+        }
+        if (activeUpload === uploadObj) activeUpload = null;
+        if (uploadObj.abortedBy === 'cancel' || uploadObj.abortedBy === 'timeout') return;
+        var code = err && err.name === 'AbortError' ? 'timeout' : 'network_error';
+        dispatch({
+          type: 'TRANSCRIBE_ERROR',
+          generation: meta.generation,
+          error: code,
+          now: reducerNow(),
+        });
+      });
     }
 
     function deliverUpload(meta) {
@@ -379,6 +619,9 @@
           mimeType: activeMime,
           durationMs: lastDurationMs,
         });
+      }
+      if (typeof o.onUpload !== 'function' || hasUploadConfig) {
+        uploadTranscription(meta);
       }
     }
 
@@ -525,6 +768,8 @@
         dropBlobState();
       } else if (ef.type === 'delete_session') {
         clearSession(storage);
+        activeSession = null;
+        if (typeof o.onDeleteSession === 'function') o.onDeleteSession();
       } else if (ef.type === 'upload') {
         if (currentBlob) {
           deliverUpload({ generation: ef.generation, idempotencyKey: ef.idempotencyKey });
@@ -532,6 +777,7 @@
           pendingUpload = { generation: ef.generation, idempotencyKey: ef.idempotencyKey };
         }
       } else if (ef.type === 'abort_fetch') {
+        abortActiveUpload('cancel');
         if (typeof o.onAbortFetch === 'function') o.onAbortFetch();
       } else if (ef.type === 'send_data') {
         if (typeof o.onSendData === 'function') o.onSendData({ json: ef.json, payload: ef.payload });
@@ -542,7 +788,16 @@
 
     function dispatch(event, ctx) {
       var prev = state;
-      state = C.voiceReducer(state, event);
+      var ev = event || {};
+      var nowMs = reducerNow();
+      if ((ev.type === 'RETRY' || ev.type === 'TRANSCRIBE_ERROR') && ev.now === undefined) {
+        ev = Object.assign({}, ev, { now: nowMs });
+      }
+      state = C.voiceReducer(state, ev);
+      if (state.changed && !C.keepBlob(ev, ev.type === 'RETRY' ? prev : state, nowMs)) {
+        dropBlobState();
+      }
+      syncRetryExpiry();
       if (state.changed && typeof o.onState === 'function') {
         try { o.onState(state, prev); } catch (e) { /* ignore UI error */ }
       }
@@ -557,6 +812,7 @@
       state: function () { return state; },
       hasConsent: function () { return hasConsent(storage); },
       blob: function () { return currentBlob; },
+      setSession: function (s) { activeSession = s || null; },
       dispatch: function (ev) { return dispatch(ev); },
       start: function () {
         return dispatch({ type: 'START', consented: hasConsent(storage) });
@@ -593,7 +849,7 @@
         return dispatch({ type: 'RETRY_PERMISSION' });
       },
       retry: function () {
-        return dispatch({ type: 'RETRY', now: clockFn() });
+        return dispatch({ type: 'RETRY', now: reducerNow() });
       },
       planB: function () {
         return dispatch({ type: 'PLAN_B' });

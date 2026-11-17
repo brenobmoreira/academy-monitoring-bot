@@ -18,6 +18,8 @@
   }
 
   var C = window.ShapeCore;
+  var V = window.ShapeVoice || null;
+  var VS = window.ShapeVoiceStub || null;
   var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
   var launch = C.parseHash(location.hash, location.search);
   // KeyboardButton launches (the ones sendData needs) get an EMPTY initData, so "inside Telegram"
@@ -31,8 +33,9 @@
   var $ = function (id) { return document.getElementById(id); };
   var els = {
     banner: $('preview-banner'), shape: $('shape'), say: $('say'), tabs: document.querySelectorAll('.tab'),
-    tabBar: document.querySelector('.tabs'), dates: $('dates'), view: $('view'), review: $('review'),
-    dock: $('dock'), dockPrimary: $('dock-primary'), dockSecondary: $('dock-secondary'),
+    tabBar: document.querySelector('.tabs'), dates: $('dates'), view: $('view'),
+    voicePanel: $('voice-panel'), review: $('review'),
+    dock: $('dock'), dockPrimary: $('dock-primary'), dockSecondary: $('dock-secondary'), dockMic: $('dock-mic'),
     sheet: $('sheet'), backdrop: $('sheet-backdrop'),
   };
 
@@ -79,6 +82,7 @@
     plus: '<path d="M12 5v14M5 12h14"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>',
+    mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4M8 21h8"/>',
   };
   function icon(name) {
     var span = document.createElement('span');
@@ -154,7 +158,7 @@
     if (wasDozing && gazeTarget && Avatar.glance) Avatar.glance(gazeTarget);
     clearTimeout(idleTimer);
     idleTimer = setTimeout(function rest() {
-      if (C.pulsoDozing(C.PULSO_IDLE_MS, !S.catalog || sending || reviewTimer !== null || S.sheetOpen)) {
+      if (C.pulsoDozing(C.PULSO_IDLE_MS, !S.catalog || sending || reviewTimer !== null || S.sheetOpen || isVoiceActive())) {
         if (Avatar && Avatar.setDozing) Avatar.setDozing(true);
       } else idleTimer = setTimeout(rest, C.PULSO_IDLE_MS);
     }, C.PULSO_IDLE_MS);
@@ -342,7 +346,20 @@
         });
       } catch (e) { tg.MainButton.setText(text); tg.MainButton.show(); }
     } else {
+      els.dockPrimary.hidden = false;
+      els.dockPrimary.disabled = false;
       els.dockPrimary.textContent = text;
+      syncVoiceDock();
+    }
+  }
+  function hideMain() {
+    mainHandler = null;
+    if (inTelegram && tg.MainButton) {
+      try { tg.MainButton.setParams({ is_visible: false }); }
+      catch (e) { try { tg.MainButton.hide(); } catch (ignore) { /* ignore */ } }
+    } else {
+      els.dockPrimary.hidden = true;
+      syncVoiceDock();
     }
   }
   function onMain() { if (mainHandler) mainHandler(); }
@@ -361,6 +378,7 @@
     els.dockSecondary.hidden = !text;
     els.dockSecondary.textContent = text || '';
     els.dockSecondary.onclick = handler || null;
+    syncVoiceDock();
   }
 
   function updateBack() {
@@ -373,6 +391,7 @@
   }
 
   function updateMainForForm() {
+    if (isVoiceActive()) return;
     var label;
     if (S.view === 'workout') {
       var n = filledCount();
@@ -383,6 +402,7 @@
     }
     setMain(label, goReview);
     setSecondary(null);
+    syncVoiceDock();
   }
 
   /* model shortcuts -------------------------------------------------------------------------- */
@@ -453,6 +473,7 @@
       return h('button', {
         type: 'button', role: 'radio', class: 'date-chip', 'aria-checked': String(d.key === current),
         onclick: function () {
+          if (isVoiceActive()) return;
           if (S.view === 'workout') S.workout.date = d.key; else S.food.date = d.key;
           haptic('select');
           render();
@@ -461,10 +482,12 @@
         },
       }, d.label, h('small', { text: C.weekday(d.key) + ' ' + C.shortDate(d.key) }));
     }));
+    if (isVoiceActive()) setFormLocked(true);
   }
 
   Array.prototype.forEach.call(els.tabs, function (t) {
     t.addEventListener('click', function () {
+      if (isVoiceActive()) return;
       var v = t.getAttribute('data-view');
       if (v === S.view || (S.catalog.view && S.catalog.view !== v)) return;
       S.view = v;
@@ -595,6 +618,7 @@
     els.view.replaceChildren.apply(els.view, [head, chips].concat(w.session ? [bodyPanel(), cardsBox, addBtn, complete, reset] : [cardsBox])
       .filter(function (el) { return !!el; }));
     if (!w.session) bodyEl = bodyNote = null;
+    if (isVoiceActive()) setFormLocked(true);
   }
 
   function cardErrors(i) {
@@ -751,6 +775,7 @@
     var after = motion('snapshot', old, leaving);
     old.parentNode.replaceChild(fresh, old);
     if (after) after(fresh, els.view);
+    if (isVoiceActive()) setFormLocked(true);
   }
 
   /** Typing inside a card: refresh its head (summary, status) without rebuilding the inputs. */
@@ -823,6 +848,7 @@
     els.backdrop.hidden = false;
     S.sheetOpen = true;
     updateBack();
+    syncVoiceDock();
     if (focusEl) setTimeout(function () { focusEl.focus(); }, 60);
   }
   /** The state closes at once; the sheet and backdrop only finish sliding out (taps pass through). */
@@ -833,6 +859,7 @@
     });
     S.sheetOpen = false;
     updateBack();
+    syncVoiceDock();
   }
   els.backdrop.addEventListener('click', closeSheet);
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && S.sheetOpen) closeSheet(); });
@@ -921,6 +948,7 @@
     var total = h('p', { id: 'meal-nutrition', class: 'meal-nutrition', 'aria-live': 'polite', 'aria-atomic': 'true' });
     els.view.replaceChildren(head, meals, h('h2', { class: 'section-title', text: 'Adicionar' }), notice, panel, plateTitle, plate, total, reset);
     syncNutrition();
+    if (isVoiceActive()) setFormLocked(true);
   }
 
   function syncNutrition() {
@@ -1263,6 +1291,7 @@
       setSecondary('Editar', showForm);
     }
     updateBack();
+    syncVoiceDock();
   }
 
   var sending = false; // between the tap on "Enviar" and Telegram closing the app
@@ -1289,6 +1318,7 @@
     render();
     if (back) motion('settle', els.view);
     updateBack();
+    syncVoiceDock();
   }
 
   function send(json) {
@@ -1386,6 +1416,557 @@
     } catch (e) { fallback(); }
   }
 
+  /* voice (C6b-4) --------------------------------------------------------------------------- */
+
+  var voiceCtrl = null;
+  var voiceSessionResult = null;
+  var voicePlanBOpen = false;
+  var voiceUiBlocked = null;
+  var voicePreviewResult = null;
+  var voiceTimerId = null;
+  var voiceStartedAt = 0;
+  var lockedControls = [];
+
+  function isVoiceActive() {
+    return voicePlanBOpen || !!voiceUiBlocked || !!voicePreviewResult || !!(voiceCtrl && voiceCtrl.state().status !== 'idle');
+  }
+
+  function ensureVoiceEls() {
+    if (!els.voicePanel && els.review && els.review.parentNode) {
+      var panel = h('section', { id: 'voice-panel', class: 'voice-panel', hidden: true });
+      panel.hidden = true;
+      if (typeof els.review.parentNode.insertBefore === 'function') {
+        els.review.parentNode.insertBefore(panel, els.review);
+      } else {
+        els.review.parentNode.appendChild(panel);
+      }
+      els.voicePanel = panel;
+    }
+    if (!els.dockMic && els.dock) {
+      var btn = h('button', { type: 'button', class: 'dock-mic', id: 'dock-mic', 'aria-label': 'Gravar por voz', hidden: true });
+      btn.hidden = true;
+      els.dock.appendChild(btn);
+      els.dockMic = btn;
+    }
+    if (els.dockMic && !els.dockMic._voiceBound) {
+      els.dockMic._voiceBound = true;
+      els.dockMic.replaceChildren(icon('mic'), h('span', { text: 'Voz' }));
+      els.dockMic.addEventListener('click', onMicClick);
+    }
+  }
+
+  function formatVoiceDuration(ms) {
+    var totalSec = Math.max(0, Math.min(C.VOICE_LIMITS.MAX_SECONDS, Math.floor((ms || 0) / 1000)));
+    var min = Math.floor(totalSec / 60);
+    var sec = totalSec % 60;
+    return min + ':' + (sec < 10 ? '0' : '') + sec;
+  }
+
+  function clearVoiceTimer() {
+    if (voiceTimerId !== null) {
+      clearTimeout(voiceTimerId);
+      voiceTimerId = null;
+    }
+  }
+
+  function startVoiceTimer() {
+    clearVoiceTimer();
+    voiceStartedAt = Date.now();
+    (function tick() {
+      if (!voiceCtrl || voiceCtrl.state().status !== 'listening') {
+        voiceTimerId = null;
+        return;
+      }
+      var timerEl = $('voice-timer');
+      if (timerEl) {
+        timerEl.textContent = formatVoiceDuration(Date.now() - voiceStartedAt) + ' / ' + formatVoiceDuration(C.VOICE_LIMITS.MAX_SECONDS * 1000);
+      }
+      voiceTimerId = setTimeout(tick, 250);
+    })();
+  }
+
+  function clearVoiceMascot(resetState) {
+    if (!els.shape) return;
+    els.shape.classList.remove('voice-listening', 'voice-thinking', 'voice-alert');
+    if (resetState) els.shape.setAttribute('data-state', 'idle');
+  }
+
+  function setVoiceMascot(mascotState, line) {
+    var avatarMood = mascotState === 'listening' ? 'focused' : mascotState;
+    say(avatarMood, line);
+    clearVoiceMascot();
+    if (!els.shape) return;
+    if (mascotState) {
+      els.shape.setAttribute('data-state', mascotState);
+      if (mascotState === 'listening') els.shape.classList.add('voice-listening');
+      else if (mascotState === 'thinking') els.shape.classList.add('voice-thinking');
+      else if (mascotState === 'alert') els.shape.classList.add('voice-alert');
+    }
+  }
+
+  function lockControl(ctrl) {
+    if (!ctrl || ctrl._voiceLocked || ctrl.disabled || ctrl.hasAttribute('disabled')) return;
+    ctrl.disabled = true;
+    ctrl.setAttribute('disabled', '');
+    ctrl._voiceLocked = true;
+    lockedControls.push(ctrl);
+  }
+
+  function setFormLocked(locked) {
+    [els.tabBar, els.dates, els.view].forEach(function (el) {
+      if (!el) return;
+      el.classList.toggle('is-voice-locked', !!locked);
+      el.setAttribute('aria-disabled', locked ? 'true' : 'false');
+    });
+    if (locked) {
+      [els.tabBar, els.dates, els.view].forEach(function (rootEl) {
+        if (!rootEl) return;
+        var controls = Array.prototype.slice.call(rootEl.querySelectorAll('input'))
+          .concat(Array.prototype.slice.call(rootEl.querySelectorAll('textarea')))
+          .concat(Array.prototype.slice.call(rootEl.querySelectorAll('button')))
+          .concat(Array.prototype.slice.call(rootEl.querySelectorAll('select')));
+        controls.forEach(lockControl);
+      });
+    } else if (lockedControls.length) {
+      lockedControls.forEach(function (ctrl) {
+        if (ctrl && ctrl._voiceLocked) {
+          ctrl.disabled = false;
+          ctrl.removeAttribute('disabled');
+          ctrl._voiceLocked = false;
+        }
+      });
+      lockedControls = [];
+    }
+  }
+
+  function voiceTypeChecker() {
+    if (typeof window.MediaRecorder !== 'function' || typeof window.MediaRecorder.isTypeSupported !== 'function') return null;
+    return function (m) { return window.MediaRecorder.isTypeSupported(m); };
+  }
+
+  function hasRealVoiceMedia() {
+    var hasGum = !!(navigator && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function');
+    var checker = voiceTypeChecker();
+    var mime = checker ? C.pickVoiceMime(checker) : null;
+    return !!(hasGum && checker && mime);
+  }
+
+  function voiceContextAvailable() {
+    if (!S.catalog || !V) {
+      return { showButton: false, canRecord: false, disabled: false, planB: false, reason: 'no_voice', message: '', mime: null };
+    }
+    if (!inTelegram) {
+      if (!VS) {
+        return { showButton: false, canRecord: false, disabled: false, planB: false, reason: 'no_voice', message: '', mime: null };
+      }
+      return { showButton: true, canRecord: true, disabled: false, planB: false, reason: '', message: '', mime: 'audio/webm;codecs=opus' };
+    }
+    var hasSession = !!(voiceSessionResult && voiceSessionResult.ok && voiceSessionResult.session);
+    var nowSec = Math.floor(Date.now() / 1000);
+    var canExchange = !voiceSessionResult && !!(
+      (tg && typeof tg.initData === 'string' && tg.initData.length > 0) ||
+      (S.catalog.vc && S.catalog.vx && S.catalog.vx > nowSec)
+    );
+    var hasGum = !!(navigator && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function');
+    var hasRec = typeof window.MediaRecorder === 'function';
+    return C.voiceAvailable({
+      vu: S.catalog.vu,
+      preview: false,
+      hasSession: hasSession,
+      canExchange: canExchange,
+      reason: voiceSessionResult ? voiceSessionResult.reason : '',
+      message: voiceSessionResult ? voiceSessionResult.message : '',
+      hasGetUserMedia: hasGum,
+      hasMediaRecorder: hasRec,
+      isTypeSupported: voiceTypeChecker(),
+    });
+  }
+
+  function syncVoiceDock() {
+    ensureVoiceEls();
+    var avail = voiceContextAvailable();
+    var voiceBusy = isVoiceActive();
+    var showMic = !!(avail.showButton && S.catalog && S.screen === 'form' && !voiceBusy && !S.sheetOpen);
+    if (els.dockMic) {
+      els.dockMic.hidden = !showMic;
+      els.dockMic.classList.toggle('is-disabled', !!avail.disabled);
+      els.dockMic.setAttribute('aria-disabled', avail.disabled ? 'true' : 'false');
+    }
+    if (!els.dock) return;
+    if (inTelegram) {
+      els.dock.hidden = !showMic;
+      els.dock.classList.toggle('dock-voice-only', showMic);
+      document.documentElement.style.setProperty('--dock-h', showMic ? '72px' : '0px');
+    } else {
+      var anyVisible = !els.dockPrimary.hidden || !els.dockSecondary.hidden || showMic;
+      els.dock.hidden = !anyVisible;
+      els.dock.classList.remove('dock-voice-only');
+      document.documentElement.style.setProperty('--dock-h', anyVisible ? '72px' : '0px');
+    }
+  }
+
+  function closeMiniApp() {
+    if (inTelegram && tg && typeof tg.close === 'function') {
+      try { tg.close(); } catch (e) { /* ignore */ }
+      return;
+    }
+    voicePlanBOpen = false;
+    voiceUiBlocked = null;
+    syncVoiceUi();
+    if (!inTelegram) say('idle', 'No Telegram, este botão fecha o app para você gravar no chat.');
+  }
+
+  function openPlanB() {
+    voiceUiBlocked = null;
+    voicePreviewResult = null;
+    voicePlanBOpen = true;
+    syncVoiceUi();
+  }
+
+  function closePlanB() {
+    voicePlanBOpen = false;
+    voiceUiBlocked = null;
+    voicePreviewResult = null;
+    syncVoiceUi();
+  }
+
+  function sendVoicePayload(data) {
+    if (!data || !data.json || !data.payload || data.payload.t !== 'text' || data.payload.src !== 'voice') return;
+    if (inTelegram) {
+      try {
+        tg.sendData(data.json);
+        say('happy', 'Envio solicitado');
+      } catch (e) {
+        haptic('error');
+        say('alert', 'O Telegram não aceitou o envio. Abra pelo botão do teclado do bot (mande /app).');
+      }
+    } else {
+      voicePreviewResult = { json: data.json, payload: data.payload };
+      syncVoiceUi();
+      say('happy', 'Texto confirmado na prévia.');
+    }
+  }
+
+  function onMicClick() {
+    wake();
+    var avail = voiceContextAvailable();
+    if (!avail.showButton) return;
+    if (avail.planB) {
+      voicePreviewResult = null;
+      voicePlanBOpen = false;
+      voiceUiBlocked = {
+        reason: avail.reason,
+        message: avail.message || C.voiceError('no_supported_format').message,
+      };
+      cancelReview();
+      if (S.sheetOpen) closeSheet();
+      syncVoiceUi();
+      return;
+    }
+    if (!voiceCtrl) return;
+    voicePlanBOpen = false;
+    voiceUiBlocked = null;
+    voicePreviewResult = null;
+    cancelReview();
+    if (S.sheetOpen) closeSheet();
+    voiceCtrl.start();
+  }
+
+  function renderVoicePanel() {
+    ensureVoiceEls();
+    var panel = els.voicePanel;
+    if (!panel) return;
+
+    if (voicePlanBOpen) {
+      panel.hidden = false;
+      panel.replaceChildren(
+        h('div', { class: 'voice-head' }, h('h2', { class: 'voice-title', text: 'Gravar no chat' })),
+        h('p', { class: 'voice-copy', text: 'Feche e segure o 🎤 na conversa: eu transcrevo e confirmo com você.' }),
+        h('div', { class: 'voice-actions' },
+          h('button', { type: 'button', class: 'btn-primary', text: 'Fechar app', onclick: closeMiniApp }),
+          h('button', { type: 'button', class: 'btn-text', text: 'Voltar', onclick: closePlanB }))
+      );
+      return;
+    }
+
+    if (voiceUiBlocked) {
+      panel.hidden = false;
+      panel.replaceChildren(
+        h('div', { class: 'voice-head' }, h('h2', { class: 'voice-title', text: 'Voz indisponível aqui' })),
+        h('p', { class: 'voice-copy', text: voiceUiBlocked.message }),
+        h('div', { class: 'voice-actions' },
+          h('button', { type: 'button', class: 'btn-soft', text: 'Gravar no chat', onclick: openPlanB }),
+          h('button', { type: 'button', class: 'btn-text', text: 'Fechar', onclick: closePlanB }))
+      );
+      return;
+    }
+
+    if (voicePreviewResult) {
+      var pretty = JSON.stringify(voicePreviewResult.payload, null, 2);
+      panel.hidden = false;
+      panel.replaceChildren(
+        h('div', { class: 'voice-head' }, h('h2', { class: 'voice-title', text: 'JSON que iria para o bot' })),
+        h('p', { class: 'voice-copy', text: 'Modo prévia: texto confirmado localmente (nada foi enviado ao bot).' }),
+        h('pre', { class: 'json', id: 'voice-json-out', text: pretty }),
+        h('div', { class: 'voice-actions' },
+          h('button', { type: 'button', class: 'btn-soft', text: 'Gravar outro', onclick: function () { voicePreviewResult = null; syncVoiceUi(); if (voiceCtrl) voiceCtrl.start(); } }),
+          h('button', { type: 'button', class: 'btn-text', text: 'Fechar', onclick: closePlanB }))
+      );
+      return;
+    }
+
+    var st = voiceCtrl ? voiceCtrl.state() : C.initialVoiceState();
+    if (st.status === 'idle') {
+      panel.hidden = true;
+      panel.replaceChildren();
+      return;
+    }
+
+    panel.hidden = false;
+    if (st.status === 'consent') {
+      panel.replaceChildren(
+        h('div', { class: 'voice-head' }, h('h2', { class: 'voice-title', text: 'Antes de gravar' })),
+        h('p', { class: 'voice-copy', text: 'Seu áudio vai para transcrição automática (Google Gemini) e é apagado em seguida. Você confere o texto antes de eu registrar.' }),
+        h('div', { class: 'voice-actions' },
+          h('button', { type: 'button', class: 'btn-primary', text: 'Entendi', onclick: function () { voiceCtrl.acceptConsent(); } }),
+          h('button', { type: 'button', class: 'btn-text', text: 'Agora não', onclick: function () { voiceCtrl.declineConsent(); } }))
+      );
+      return;
+    }
+
+    if (st.status === 'asking_permission') {
+      panel.replaceChildren(
+        h('div', { class: 'voice-head' }, h('h2', { class: 'voice-title', text: 'Permita o microfone…' })),
+        h('p', { class: 'voice-copy', text: 'Autorize o acesso ao microfone para começar a gravar.' }),
+        h('div', { class: 'voice-actions' },
+          h('button', { type: 'button', class: 'btn-text', text: 'Cancelar', onclick: function () { voiceCtrl.cancel(); } }))
+      );
+      return;
+    }
+
+    if (st.status === 'listening') {
+      var elapsed = voiceStartedAt ? (Date.now() - voiceStartedAt) : 0;
+      panel.replaceChildren(
+        h('div', { class: 'voice-head' },
+          h('h2', { class: 'voice-title', text: 'Ouvindo…' }),
+          h('span', { class: 'voice-timer', id: 'voice-timer', text: formatVoiceDuration(elapsed) + ' / ' + formatVoiceDuration(C.VOICE_LIMITS.MAX_SECONDS * 1000) })),
+        h('p', { class: 'voice-copy', text: 'Fale seu treino ou refeição. Limite de 1min30.' }),
+        h('div', { class: 'voice-actions' },
+          h('button', { type: 'button', class: 'btn-primary', text: 'Parar', onclick: function () { voiceCtrl.stop(); } }),
+          h('button', { type: 'button', class: 'btn-text', text: 'Cancelar', onclick: function () { voiceCtrl.cancel(); } }))
+      );
+      return;
+    }
+
+    if (st.status === 'sending') {
+      panel.replaceChildren(
+        h('div', { class: 'voice-head' }, h('h2', { class: 'voice-title', text: 'Entendendo…' })),
+        h('p', { class: 'voice-copy', text: 'Transcrevendo seu áudio.' }),
+        h('div', { class: 'voice-actions' },
+          h('button', { type: 'button', class: 'btn-text', text: 'Cancelar', onclick: function () { voiceCtrl.cancel(); } }))
+      );
+      return;
+    }
+
+    if (st.status === 'transcribed') {
+      var ta = h('textarea', {
+        id: 'voice-textarea',
+        class: 'textarea' + (st.textError ? ' is-bad' : ''),
+        rows: '3',
+        'aria-label': 'Texto transcrito',
+        value: st.text || '',
+        oninput: function () { voiceCtrl.editText(ta.value); },
+      });
+      var errEl = h('p', { id: 'voice-text-error', class: 'field-error', role: 'alert', text: st.textError || '' });
+      errEl.hidden = !st.textError;
+      panel.replaceChildren(
+        h('div', { class: 'voice-head' }, h('h2', { class: 'voice-title', text: 'Entendi:' })),
+        ta,
+        errEl,
+        h('div', { class: 'voice-actions' },
+          h('button', { type: 'button', class: 'btn-soft', text: 'Regravar', onclick: function () { voiceCtrl.rerecord(); } }),
+          h('button', { type: 'button', class: 'btn-text', text: 'Cancelar', onclick: function () { voiceCtrl.cancel(); } }))
+      );
+      return;
+    }
+
+    if (st.status === 'error') {
+      var err = st.error || C.voiceError('unknown');
+      var buttons = (err.buttons || []).map(function (btn) {
+        return h('button', {
+          type: 'button',
+          class: btn.id === 'plan_b' ? 'btn-soft' : 'btn-primary',
+          text: btn.label,
+          onclick: function () {
+            if (btn.id === 'retry') voiceCtrl.retry();
+            else if (btn.id === 'retry_permission') voiceCtrl.retryPermission();
+            else if (btn.id === 'rerecord') voiceCtrl.rerecord();
+            else if (btn.id === 'plan_b') voiceCtrl.planB();
+          },
+        });
+      });
+      buttons.push(h('button', { type: 'button', class: 'btn-text', text: 'Cancelar', onclick: function () { voiceCtrl.cancel(); } }));
+      panel.replaceChildren(
+        h('div', { class: 'voice-head' }, h('h2', { class: 'voice-title', text: 'Não deu para gravar' })),
+        h('p', { class: 'voice-error', role: 'alert', text: err.message }),
+        h('div', { class: 'voice-actions' }, buttons)
+      );
+    }
+  }
+
+  function syncVoiceUi(prevState) {
+    var st = voiceCtrl ? voiceCtrl.state() : C.initialVoiceState();
+    if (st.status === 'listening') {
+      if (!prevState || prevState.status !== 'listening') startVoiceTimer();
+    } else {
+      clearVoiceTimer();
+    }
+
+    var active = isVoiceActive();
+    setFormLocked(active);
+
+    if (voicePlanBOpen) {
+      clearVoiceMascot();
+      say('idle', 'Você pode mandar áudio direto no chat.');
+      setMain('Fechar app', closeMiniApp);
+      setSecondary('Voltar', closePlanB);
+    } else if (voiceUiBlocked) {
+      setVoiceMascot('alert', voiceUiBlocked.message);
+      hideMain();
+      setSecondary(null);
+    } else if (voicePreviewResult) {
+      clearVoiceMascot();
+      hideMain();
+      setSecondary(null);
+    } else if (st.status === 'idle') {
+      clearVoiceMascot(true);
+      if (S.catalog && S.screen === 'form') {
+        updateMainForForm();
+        updateMood();
+      }
+    } else {
+      if (st.mascot === 'listening') {
+        setVoiceMascot('listening', st.status === 'asking_permission' ? 'Permita o microfone.' : 'Estou ouvindo. Fale perto do microfone.');
+      } else if (st.mascot === 'thinking') {
+        setVoiceMascot('thinking', 'Entendendo o áudio');
+      } else if (st.mascot === 'alert') {
+        setVoiceMascot('alert', st.error ? st.error.message : 'Não consegui gravar.');
+      } else if (st.status === 'consent') {
+        clearVoiceMascot();
+        say('idle', 'Antes de gravar, confira o aviso de privacidade.');
+      } else if (st.status === 'transcribed') {
+        clearVoiceMascot();
+        say('happy', 'Confira o texto antes de enviar.');
+      }
+
+      if (st.status === 'transcribed') {
+        setMain('Enviar', function () { voiceCtrl.send(); });
+        setSecondary('Cancelar', function () { voiceCtrl.cancel(); });
+      } else {
+        hideMain();
+        setSecondary(null);
+      }
+    }
+
+    if (prevState && prevState.status === 'transcribed' && st.status === 'transcribed' && !voicePlanBOpen && !voiceUiBlocked && !voicePreviewResult) {
+      var ta = $('voice-textarea');
+      var errEl = $('voice-text-error');
+      if (ta && errEl) {
+        ta.classList.toggle('is-bad', !!st.textError);
+        errEl.textContent = st.textError || '';
+        errEl.hidden = !st.textError;
+        syncVoiceDock();
+        return;
+      }
+    }
+
+    renderVoicePanel();
+    syncVoiceDock();
+  }
+
+  function initVoice() {
+    ensureVoiceEls();
+    if (!V || !S.catalog) return;
+
+    if (!inTelegram) {
+      if (!VS) {
+        voiceCtrl = null;
+        voiceSessionResult = null;
+        syncVoiceDock();
+        return;
+      }
+      var previewFetch = VS.createFetch(function () { return S.view; });
+      var useReal = hasRealVoiceMedia();
+      var fallbackMedia = useReal ? null : VS.createMedia();
+      var previewSession = {
+        vu: VS.vu,
+        ref: 'preview',
+        session: 's1.preview-stub',
+        expires_at: Math.floor(Date.now() / 1000) + 43200,
+      };
+      voiceSessionResult = { ok: true, status: 'ready', session: previewSession, showButton: true, canRecord: true };
+      var ctrlOpts = {
+        storage: storage,
+        fetch: previewFetch,
+        session: previewSession,
+        onState: function (next, prev) { syncVoiceUi(prev); },
+        onSendData: sendVoicePayload,
+        onPlanB: openPlanB,
+      };
+      if (!useReal) {
+        ctrlOpts.getUserMedia = fallbackMedia.getUserMedia;
+        ctrlOpts.MediaRecorder = fallbackMedia.MediaRecorder;
+      }
+      voiceCtrl = V.createVoiceController(ctrlOpts);
+      syncVoiceDock();
+      return;
+    }
+
+    if (!S.catalog.vu) {
+      voiceCtrl = null;
+      voiceSessionResult = null;
+      syncVoiceDock();
+      return;
+    }
+
+    var tgFetch = typeof window.fetch === 'function' ? window.fetch.bind(window) : null;
+    voiceCtrl = V.createVoiceController({
+      storage: storage,
+      fetch: tgFetch,
+      getSession: function () { return voiceSessionResult && voiceSessionResult.ok ? voiceSessionResult.session : null; },
+      onState: function (next, prev) { syncVoiceUi(prev); },
+      onSendData: sendVoicePayload,
+      onPlanB: openPlanB,
+      onDeleteSession: function () {
+        voiceSessionResult = {
+          ok: false,
+          status: 'disabled',
+          session: null,
+          reason: 'auth_expired',
+          message: C.voiceError('auth_expired').message,
+          showButton: true,
+          canRecord: false,
+        };
+        syncVoiceDock();
+      },
+    });
+    syncVoiceDock();
+
+    V.resolveSession({
+      vu: S.catalog.vu,
+      vc: S.catalog.vc,
+      vx: S.catalog.vx,
+      initData: tg && typeof tg.initData === 'string' ? tg.initData : '',
+    }, {
+      storage: storage,
+      fetch: tgFetch,
+    }).then(function (res) {
+      voiceSessionResult = res;
+      if (voiceCtrl && res && res.ok && res.session) voiceCtrl.setSession(res.session);
+      syncVoiceDock();
+    });
+  }
+
   /* render / init ---------------------------------------------------------------------------- */
 
   function render() {
@@ -1413,6 +1994,8 @@
     els.tabBar.hidden = true;
     els.dates.hidden = true;
     els.dock.hidden = true;
+    if (els.voicePanel) els.voicePanel.hidden = true;
+    if (els.dockMic) els.dockMic.hidden = true;
     els.view.replaceChildren(h('div', { class: 'empty-plan', style: 'margin-top:16px' }, mascot('alert', line, text)));
     say('alert', line);
     if (tg && tg.MainButton) { try { tg.MainButton.hide(); } catch (e) { /* ignore */ } }
@@ -1449,10 +2032,20 @@
 
   function init() {
     applyScheme();
+    ensureVoiceEls();
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden && voiceCtrl) voiceCtrl.hide();
+    });
+    if (window.addEventListener) {
+      window.addEventListener('pagehide', function () { if (voiceCtrl) voiceCtrl.hide(); });
+    }
     if (tg) {
       try { tg.ready(); tg.expand(); } catch (e) { /* ignore */ }
       if (inTelegram) {
         tg.onEvent('themeChanged', applyScheme);
+        tg.onEvent('viewportChanged', function (ev) {
+          if (((ev && ev.isExpanded === false) || (tg && tg.isExpanded === false)) && voiceCtrl) voiceCtrl.collapse();
+        });
         if (tg.MainButton) tg.MainButton.onClick(onMain);
         if (tg.BackButton) tg.BackButton.onClick(onBack);
       }
@@ -1503,13 +2096,14 @@
       if (first && !cards().some(function (c) { return c.open; })) first.open = true;
       render();
       if (draft) say('idle', 'Rascunho recuperado. Continue de onde parou.');
+      initVoice();
       if (catalog.ft) {
         var timeout = new Promise(function (resolve) {
           setTimeout(function () { resolve(Object.assign({}, catalog, { tableStatus: 'unavailable', freeFoods: true })); }, 8000);
         });
         Promise.race([C.loadFoodTable(catalog), timeout]).then(function (loaded) {
           S.catalog = loaded;
-          if (S.view !== 'food' || S.screen !== 'form') return;
+          if (S.view !== 'food' || S.screen !== 'form' || isVoiceActive()) return;
           var active = document.activeElement;
           var label = active && active.getAttribute('aria-label');
           var start = active && active.selectionStart, end = active && active.selectionEnd;

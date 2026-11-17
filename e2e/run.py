@@ -250,6 +250,9 @@ def main_run() -> None:
             TELEGRAM_WEBHOOK_SECRET=WEBHOOK_SECRET,
             REMINDER_TOKEN=REMINDER_TOKEN,
         )
+        if not args.real:
+            # The scripted flow does not test audio or need transcription credentials.
+            os.environ.setdefault("MEDIA_ENABLED", "false")
         webhook.get_settings.cache_clear()
         settings = webhook.get_settings()
         if args.real:

@@ -255,12 +255,365 @@
     }, Object.assign({}, opts, { storage: storage }));
   }
 
+  /* consent (§9.2) & media stream helpers (§7.4) ------------------------------------------- */
+
+  function hasConsent(storage) {
+    if (!storage || typeof storage.getItem !== 'function') return false;
+    try {
+      var val = storage.getItem(C.VOICE_CONSENT_KEY);
+      return val === '1' || val === 'true';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function saveConsent(storage) {
+    if (!storage || typeof storage.setItem !== 'function') return false;
+    try {
+      storage.setItem(C.VOICE_CONSENT_KEY, '1');
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function stopStreamTracks(stream) {
+    if (!stream) return false;
+    var tracks = [];
+    try {
+      if (typeof stream.getTracks === 'function') tracks = stream.getTracks() || [];
+      else if (typeof stream.getAudioTracks === 'function') tracks = stream.getAudioTracks() || [];
+    } catch (e) {
+      return false;
+    }
+    for (var i = 0; i < tracks.length; i++) {
+      try {
+        if (tracks[i] && typeof tracks[i].stop === 'function') tracks[i].stop();
+      } catch (e) {
+        /* ignore broken track */
+      }
+    }
+    return tracks.length > 0;
+  }
+
+  function pickGetUserMedia(opts) {
+    if (opts && Object.prototype.hasOwnProperty.call(opts, 'getUserMedia')) return opts.getUserMedia || null;
+    try {
+      var md = root && root.navigator && root.navigator.mediaDevices;
+      if (md && typeof md.getUserMedia === 'function') return md.getUserMedia.bind(md);
+    } catch (e) {
+      /* ignore */
+    }
+    return null;
+  }
+
+  function pickMediaRecorder(opts) {
+    if (opts && Object.prototype.hasOwnProperty.call(opts, 'MediaRecorder')) return opts.MediaRecorder || null;
+    try {
+      if (root && typeof root.MediaRecorder === 'function') return root.MediaRecorder;
+    } catch (e) {
+      /* ignore */
+    }
+    return null;
+  }
+
+  function pickTimer(opts, name, fallback) {
+    if (opts && typeof opts[name] === 'function') return opts[name];
+    return fallback;
+  }
+
+  function buildAudioBlob(opts, chunks, mime) {
+    var BlobCtor = opts && Object.prototype.hasOwnProperty.call(opts, 'Blob')
+      ? opts.Blob
+      : (root && typeof root.Blob === 'function' ? root.Blob : (typeof Blob === 'function' ? Blob : null));
+    if (typeof BlobCtor === 'function') return new BlobCtor(chunks, { type: mime || '' });
+    return { chunks: chunks.slice(), type: mime || '' };
+  }
+
+  /**
+   * §7.4 / §9.2 stateful voice controller: executes ShapeCore.voiceReducer effects
+   * (`save_consent`, `request_mic`, `start_recorder`, `stop_recorder`, `stop_tracks`, `drop_blob`,
+   * `delete_session`, `send_data`, `open_plan_b`, `upload`, `abort_fetch`) using injected media/clock/storage.
+   */
+  function createVoiceController(opts) {
+    var o = opts || {};
+    var storage = pickStorage(o);
+    var clockFn = pickClock(o);
+    var getUserMedia = pickGetUserMedia(o);
+    var MediaRecorderCtor = pickMediaRecorder(o);
+    var setTimer = pickTimer(o, 'setTimeout', setTimeout);
+    var clearTimer = pickTimer(o, 'clearTimeout', clearTimeout);
+
+    var state = C.initialVoiceState();
+    var activeStream = null;
+    var activeRecorder = null;
+    var autoStopTimer = null;
+    var startedAtMs = 0;
+    var activeMime = '';
+    var chunks = [];
+    var discardRecording = false;
+    var currentBlob = null;
+    var pendingUpload = null;
+    var lastDurationMs = 0;
+
+    function clearAutoStop() {
+      if (autoStopTimer !== null) {
+        try { clearTimer(autoStopTimer); } catch (e) { /* ignore */ }
+        autoStopTimer = null;
+      }
+    }
+
+    function dropBlobState() {
+      discardRecording = true;
+      pendingUpload = null;
+      currentBlob = null;
+      chunks = [];
+    }
+
+    function deliverUpload(meta) {
+      if (typeof o.onUpload === 'function') {
+        o.onUpload({
+          generation: meta.generation,
+          idempotencyKey: meta.idempotencyKey,
+          blob: currentBlob,
+          mimeType: activeMime,
+          durationMs: lastDurationMs,
+        });
+      }
+    }
+
+    function stopRecorderOnly() {
+      clearAutoStop();
+      var rec = activeRecorder;
+      activeRecorder = null;
+      if (!rec) return;
+      try {
+        if (rec.state !== 'inactive' && typeof rec.stop === 'function') rec.stop();
+      } catch (e) {
+        /* ignore broken WebView recorder */
+      }
+    }
+
+    function startRecorder(generation) {
+      var stream = activeStream;
+      if (!stream || typeof MediaRecorderCtor !== 'function') {
+        dispatch({ type: 'RECORDER_ERROR', error: 'no_supported_format' });
+        return;
+      }
+      var mime = o.mime || C.pickVoiceMime(
+        typeof MediaRecorderCtor.isTypeSupported === 'function'
+          ? function (m) { return MediaRecorderCtor.isTypeSupported(m); }
+          : null
+      );
+      if (!mime) {
+        dispatch({ type: 'RECORDER_ERROR', error: 'no_supported_format' });
+        return;
+      }
+
+      var rec;
+      try {
+        rec = new MediaRecorderCtor(stream, {
+          mimeType: mime,
+          audioBitsPerSecond: C.VOICE_LIMITS.AUDIO_BPS,
+        });
+      } catch (err) {
+        dispatch({ type: 'RECORDER_ERROR', error: err || 'recorder_error' });
+        return;
+      }
+
+      activeRecorder = rec;
+      activeMime = mime;
+      chunks = [];
+      currentBlob = null;
+      pendingUpload = null;
+      discardRecording = false;
+      startedAtMs = clockFn();
+      lastDurationMs = 0;
+
+      rec.ondataavailable = function (e) {
+        if (!discardRecording && e && e.data && (e.data.size === undefined || e.data.size > 0)) {
+          chunks.push(e.data);
+        }
+      };
+
+      rec.onerror = function (e) {
+        if (activeRecorder !== rec) return;
+        discardRecording = true;
+        chunks = [];
+        dispatch({ type: 'RECORDER_ERROR', error: (e && e.error) || e || 'recorder_error' });
+      };
+
+      rec.onstop = function () {
+        var shouldKeep = !discardRecording && state.status === 'sending';
+        if (shouldKeep) {
+          currentBlob = buildAudioBlob(o, chunks, activeMime);
+        } else {
+          currentBlob = null;
+        }
+        chunks = [];
+        if (shouldKeep && pendingUpload && state.generation === pendingUpload.generation) {
+          var meta = pendingUpload;
+          pendingUpload = null;
+          deliverUpload(meta);
+        }
+      };
+
+      clearAutoStop();
+      autoStopTimer = setTimer(function () {
+        autoStopTimer = null;
+        if (state.status !== 'listening' || activeRecorder !== rec) return;
+        lastDurationMs = Math.max(0, clockFn() - startedAtMs);
+        dispatch({ type: 'AUTO_STOP', durationMs: lastDurationMs });
+      }, C.VOICE_LIMITS.MAX_SECONDS * 1000);
+
+      try {
+        rec.start();
+      } catch (startErr) {
+        clearAutoStop();
+        activeRecorder = null;
+        dispatch({ type: 'RECORDER_ERROR', error: startErr || 'recorder_error' });
+      }
+    }
+
+    function requestMic(generation) {
+      if (typeof getUserMedia !== 'function') {
+        Promise.resolve().then(function () {
+          dispatch({ type: 'PERMISSION_DENIED', generation: generation, error: 'api_missing' });
+        });
+        return;
+      }
+
+      var gumPromise;
+      try {
+        gumPromise = Promise.resolve(getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+          },
+        }));
+      } catch (syncErr) {
+        gumPromise = Promise.reject(syncErr);
+      }
+
+      gumPromise.then(function (stream) {
+        dispatch({ type: 'PERMISSION_GRANTED', generation: generation }, { grantedStream: stream });
+      }, function (err) {
+        dispatch({ type: 'PERMISSION_DENIED', generation: generation, error: err || 'NotAllowedError' });
+      });
+    }
+
+    function runEffect(ef, ctx) {
+      if (!ef || typeof ef.type !== 'string') return;
+      if (ef.type === 'save_consent') {
+        saveConsent(storage);
+      } else if (ef.type === 'request_mic') {
+        requestMic(ef.generation);
+      } else if (ef.type === 'start_recorder') {
+        if (ctx && ctx.grantedStream) activeStream = ctx.grantedStream;
+        startRecorder(ef.generation);
+      } else if (ef.type === 'stop_recorder') {
+        stopRecorderOnly();
+      } else if (ef.type === 'stop_tracks') {
+        if (ctx && ctx.grantedStream) {
+          stopStreamTracks(ctx.grantedStream);
+        } else {
+          stopStreamTracks(activeStream);
+          activeStream = null;
+        }
+      } else if (ef.type === 'drop_blob') {
+        dropBlobState();
+      } else if (ef.type === 'delete_session') {
+        clearSession(storage);
+      } else if (ef.type === 'upload') {
+        if (currentBlob) {
+          deliverUpload({ generation: ef.generation, idempotencyKey: ef.idempotencyKey });
+        } else {
+          pendingUpload = { generation: ef.generation, idempotencyKey: ef.idempotencyKey };
+        }
+      } else if (ef.type === 'abort_fetch') {
+        if (typeof o.onAbortFetch === 'function') o.onAbortFetch();
+      } else if (ef.type === 'send_data') {
+        if (typeof o.onSendData === 'function') o.onSendData({ json: ef.json, payload: ef.payload });
+      } else if (ef.type === 'open_plan_b') {
+        if (typeof o.onPlanB === 'function') o.onPlanB();
+      }
+    }
+
+    function dispatch(event, ctx) {
+      var prev = state;
+      state = C.voiceReducer(state, event);
+      if (state.changed && typeof o.onState === 'function') {
+        try { o.onState(state, prev); } catch (e) { /* ignore UI error */ }
+      }
+      var effects = state.effects || [];
+      for (var i = 0; i < effects.length; i++) {
+        runEffect(effects[i], ctx);
+      }
+      return state;
+    }
+
+    return {
+      state: function () { return state; },
+      hasConsent: function () { return hasConsent(storage); },
+      blob: function () { return currentBlob; },
+      dispatch: function (ev) { return dispatch(ev); },
+      start: function () {
+        return dispatch({ type: 'START', consented: hasConsent(storage) });
+      },
+      acceptConsent: function () {
+        return dispatch({ type: 'CONSENT_ACCEPT' });
+      },
+      declineConsent: function () {
+        return dispatch({ type: 'CONSENT_DECLINE' });
+      },
+      stop: function () {
+        lastDurationMs = state.status === 'listening' ? Math.max(0, clockFn() - startedAtMs) : 0;
+        return dispatch({ type: 'STOP', durationMs: lastDurationMs });
+      },
+      cancel: function () {
+        return dispatch({ type: 'CANCEL' });
+      },
+      hide: function () {
+        return dispatch({ type: 'HIDE' });
+      },
+      collapse: function () {
+        return dispatch({ type: 'COLLAPSE' });
+      },
+      editText: function (text) {
+        return dispatch({ type: 'EDIT_TEXT', text: text });
+      },
+      send: function (submissionId) {
+        return dispatch({ type: 'SEND', submissionId: submissionId });
+      },
+      rerecord: function () {
+        return dispatch({ type: 'RERECORD' });
+      },
+      retryPermission: function () {
+        return dispatch({ type: 'RETRY_PERMISSION' });
+      },
+      retry: function () {
+        return dispatch({ type: 'RETRY', now: clockFn() });
+      },
+      planB: function () {
+        return dispatch({ type: 'PLAN_B' });
+      },
+      close: function () {
+        return dispatch({ type: 'CLOSE' });
+      },
+    };
+  }
+
   var api = {
     readSession: readSession,
     writeSession: writeSession,
     clearSession: clearSession,
     exchangeSession: exchangeSession,
     resolveSession: resolveSession,
+    hasConsent: hasConsent,
+    saveConsent: saveConsent,
+    stopStreamTracks: stopStreamTracks,
+    createVoiceController: createVoiceController,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

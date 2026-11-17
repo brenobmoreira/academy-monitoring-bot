@@ -466,3 +466,425 @@ test('voice.js loads as a classic browser script exposing global ShapeVoice', as
   assert.equal(res.session.session, 's1.vm');
   assert.equal(JSON.parse(storage.raw(C.VOICE_SESSION_KEY)).session, 's1.vm');
 });
+
+/* 6. C6b-2: microphone, MediaRecorder, generation guard, stop_tracks & consent ----------------- */
+
+function makeDeferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function makeFakeStream(trackCount = 2) {
+  const tracks = Array.from({ length: trackCount }, (_, i) => ({
+    id: `t-${i}`,
+    stopCalls: 0,
+    stop() { this.stopCalls++; },
+  }));
+  return {
+    tracks,
+    getTracks() { return tracks; },
+    allStopped() { return tracks.every((t) => t.stopCalls > 0); },
+    totalStopCalls() { return tracks.reduce((n, t) => n + t.stopCalls, 0); },
+  };
+}
+
+function makeFakeRecorderClass({ syncOnStop = false } = {}) {
+  const instances = [];
+  class FakeMediaRecorder {
+    static isTypeSupported(mime) {
+      return mime === 'audio/webm;codecs=opus';
+    }
+    constructor(stream, opts) {
+      this.stream = stream;
+      this.opts = opts;
+      this.state = 'inactive';
+      this.startCalls = 0;
+      this.stopCalls = 0;
+      this.ondataavailable = null;
+      this.onstop = null;
+      this.onerror = null;
+      instances.push(this);
+    }
+    start() {
+      this.startCalls++;
+      this.state = 'recording';
+    }
+    stop() {
+      this.stopCalls++;
+      this.state = 'inactive';
+      if (syncOnStop) this.finishStop();
+    }
+    emitChunk(data = new Uint8Array([1, 2, 3, 4])) {
+      if (this.ondataavailable) this.ondataavailable({ data });
+    }
+    finishStop() {
+      if (this.ondataavailable) this.ondataavailable({ data: new Uint8Array([5, 6, 7, 8]) });
+      if (this.onstop) this.onstop();
+    }
+    triggerError(err) {
+      if (this.onerror) this.onerror({ error: err });
+    }
+  }
+  return { FakeMediaRecorder, instances };
+}
+
+function makeFakeTimers() {
+  let nextId = 1;
+  const timers = new Map();
+  return {
+    timers,
+    setTimeout(fn, ms) {
+      const id = nextId++;
+      timers.set(id, { fn, ms });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    fireAll() {
+      for (const [id, t] of [...timers.entries()]) {
+        timers.delete(id);
+        t.fn();
+      }
+    },
+  };
+}
+
+const flushMicrotasks = () => new Promise((r) => setTimeout(r, 0));
+
+test('C6b-2: consent is shown only once via save_consent, and re-shown when storage is missing or throws', async () => {
+  const storage = memoryStorage();
+  const gumCalls = [];
+  const { FakeMediaRecorder, instances } = makeFakeRecorderClass();
+  const stream = makeFakeStream();
+  const timers = makeFakeTimers();
+
+  const ctrl1 = V.createVoiceController({
+    storage,
+    clock: () => 1000,
+    getUserMedia: async (c) => { gumCalls.push(c); return stream; },
+    MediaRecorder: FakeMediaRecorder,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+
+  // First time: START -> consent (does not request mic)
+  assert.equal(ctrl1.hasConsent(), false);
+  ctrl1.start();
+  assert.equal(ctrl1.state().status, 'consent');
+  assert.equal(gumCalls.length, 0);
+
+  // Declining returns to idle without saving consent
+  ctrl1.declineConsent();
+  assert.equal(ctrl1.state().status, 'idle');
+  assert.equal(ctrl1.hasConsent(), false);
+  assert.equal(storage.raw(C.VOICE_CONSENT_KEY), null);
+
+  // Start again -> consent, accept -> saves consent & asks mic
+  ctrl1.start();
+  assert.equal(ctrl1.state().status, 'consent');
+  ctrl1.acceptConsent();
+  assert.equal(ctrl1.state().status, 'asking_permission');
+  assert.equal(ctrl1.hasConsent(), true);
+  assert.equal(storage.raw(C.VOICE_CONSENT_KEY), '1');
+  await flushMicrotasks();
+  assert.equal(ctrl1.state().status, 'listening');
+  assert.equal(instances.length, 1);
+  ctrl1.cancel();
+  assert.equal(ctrl1.state().status, 'idle');
+  assert.equal(stream.allStopped(), true);
+
+  // New controller sharing same storage skips consent completely
+  const stream2 = makeFakeStream();
+  const ctrl2 = V.createVoiceController({
+    storage,
+    clock: () => 5000,
+    getUserMedia: async (c) => { gumCalls.push(c); return stream2; },
+    MediaRecorder: FakeMediaRecorder,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  assert.equal(ctrl2.hasConsent(), true);
+  ctrl2.start();
+  assert.equal(ctrl2.state().status, 'asking_permission');
+  await flushMicrotasks();
+  assert.equal(ctrl2.state().status, 'listening');
+  ctrl2.cancel();
+  assert.equal(stream2.allStopped(), true);
+
+  // Unavailable/throwing storage never breaks and keeps asking consent
+  const throwingStorage = {
+    getItem() { throw new Error('blocked'); },
+    setItem() { throw new Error('blocked'); },
+    removeItem() { throw new Error('blocked'); },
+  };
+  const ctrl3 = V.createVoiceController({
+    storage: throwingStorage,
+    getUserMedia: async () => makeFakeStream(),
+    MediaRecorder: FakeMediaRecorder,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  ctrl3.start();
+  assert.equal(ctrl3.state().status, 'consent');
+  ctrl3.acceptConsent();
+  assert.equal(ctrl3.state().status, 'asking_permission');
+  await flushMicrotasks();
+  ctrl3.cancel();
+  assert.equal(ctrl3.hasConsent(), false);
+});
+
+test('C6b-2: permission resolved AFTER Cancelar stops all tracks and never starts MediaRecorder', async () => {
+  const storage = memoryStorage({ [C.VOICE_CONSENT_KEY]: '1' });
+  const deferred = makeDeferred();
+  const stream = makeFakeStream(3);
+  const { FakeMediaRecorder, instances } = makeFakeRecorderClass();
+  const gumConstraints = [];
+  const timers = makeFakeTimers();
+
+  const ctrl = V.createVoiceController({
+    storage,
+    clock: () => 1000,
+    getUserMedia: (constraints) => {
+      gumConstraints.push(constraints);
+      return deferred.promise;
+    },
+    MediaRecorder: FakeMediaRecorder,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+
+  ctrl.start();
+  assert.equal(ctrl.state().status, 'asking_permission');
+  assert.equal(ctrl.state().generation, 1);
+  assert.deepEqual(gumConstraints, [{
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+  }]);
+
+  // User clicks Cancelar while OS permission prompt is still pending
+  ctrl.cancel();
+  assert.equal(ctrl.state().status, 'idle');
+  assert.equal(ctrl.state().generation, 2);
+  assert.equal(stream.totalStopCalls(), 0);
+
+  // Now the user clicks "Allow" on the OS prompt -> promise resolves late
+  deferred.resolve(stream);
+  await flushMicrotasks();
+
+  assert.equal(ctrl.state().status, 'idle');
+  assert.equal(instances.length, 0);
+  assert.equal(stream.allStopped(), true);
+  assert.deepEqual(stream.tracks.map((t) => t.stopCalls), [1, 1, 1]);
+});
+
+test('C6b-2: stale permission from cancelled attempt 1 stops its tracks without disturbing active attempt 2', async () => {
+  const storage = memoryStorage({ [C.VOICE_CONSENT_KEY]: '1' });
+  const d1 = makeDeferred();
+  const d2 = makeDeferred();
+  const stream1 = makeFakeStream(2);
+  const stream2 = makeFakeStream(2);
+  const { FakeMediaRecorder, instances } = makeFakeRecorderClass();
+  const timers = makeFakeTimers();
+  let call = 0;
+
+  const ctrl = V.createVoiceController({
+    storage,
+    clock: () => 1000,
+    getUserMedia: () => (++call === 1 ? d1.promise : d2.promise),
+    MediaRecorder: FakeMediaRecorder,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+
+  ctrl.start(); // gen 1
+  ctrl.cancel(); // gen 2
+  ctrl.start(); // gen 3
+  assert.equal(ctrl.state().status, 'asking_permission');
+  assert.equal(ctrl.state().generation, 3);
+
+  d2.resolve(stream2);
+  await flushMicrotasks();
+  assert.equal(ctrl.state().status, 'listening');
+  assert.equal(instances.length, 1);
+  assert.equal(stream2.totalStopCalls(), 0);
+
+  // Attempt 1 finally resolves: must stop stream1 tracks, leave stream2 untouched
+  d1.resolve(stream1);
+  await flushMicrotasks();
+  assert.equal(ctrl.state().status, 'listening');
+  assert.equal(ctrl.state().generation, 3);
+  assert.equal(instances.length, 1);
+  assert.equal(stream1.allStopped(), true);
+  assert.equal(stream2.totalStopCalls(), 0);
+
+  ctrl.cancel();
+  assert.equal(stream2.allStopped(), true);
+});
+
+test('C6b-2: every exit path (cancel, hide, collapse, errors, send, auto-stop) stops recorder and all tracks', async () => {
+  const storage = memoryStorage({ [C.VOICE_CONSENT_KEY]: '1' });
+
+  // Helper to boot controller straight into listening
+  async function startListening(extraOpts = {}) {
+    let now = 1000;
+    const stream = makeFakeStream(2);
+    const { FakeMediaRecorder, instances } = makeFakeRecorderClass(extraOpts);
+    const timers = makeFakeTimers();
+    const uploads = [];
+    const sends = [];
+    const ctrl = V.createVoiceController({
+      storage,
+      clock: () => now,
+      getUserMedia: async () => stream,
+      MediaRecorder: FakeMediaRecorder,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+      onUpload: (u) => uploads.push(u),
+      onSendData: (s) => sends.push(s),
+      ...extraOpts,
+    });
+    ctrl.start();
+    await flushMicrotasks();
+    assert.equal(ctrl.state().status, 'listening');
+    assert.equal(instances.length, 1);
+    assert.equal(instances[0].startCalls, 1);
+    assert.deepEqual(instances[0].opts, { mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: 32000 });
+    return { ctrl, stream, rec: instances[0], timers, uploads, sends, advance: (ms) => { now += ms; } };
+  }
+
+  // 1. Cancelar
+  {
+    const { ctrl, stream, rec, timers } = await startListening();
+    ctrl.cancel();
+    assert.equal(ctrl.state().status, 'idle');
+    assert.equal(rec.stopCalls, 1);
+    assert.equal(stream.allStopped(), true);
+    assert.equal(timers.timers.size, 0);
+  }
+
+  // 2. Esconder (HIDE)
+  {
+    const { ctrl, stream, rec } = await startListening();
+    ctrl.hide();
+    assert.equal(ctrl.state().status, 'idle');
+    assert.equal(rec.stopCalls, 1);
+    assert.equal(stream.allStopped(), true);
+  }
+
+  // 3. Colapsar (COLLAPSE)
+  {
+    const { ctrl, stream, rec } = await startListening();
+    ctrl.collapse();
+    assert.equal(ctrl.state().status, 'idle');
+    assert.equal(rec.stopCalls, 1);
+    assert.equal(stream.allStopped(), true);
+  }
+
+  // 4. Erro: gravação curta (< 700 ms)
+  {
+    const { ctrl, stream, rec, advance, uploads } = await startListening();
+    advance(500);
+    ctrl.stop();
+    assert.equal(ctrl.state().status, 'error');
+    assert.equal(ctrl.state().error.code, 'too_short');
+    assert.equal(rec.stopCalls, 1);
+    assert.equal(stream.allStopped(), true);
+    assert.equal(uploads.length, 0);
+    assert.equal(ctrl.blob(), null);
+  }
+
+  // 5. Erro do MediaRecorder (RECORDER_ERROR via onerror)
+  {
+    const { ctrl, stream, rec } = await startListening();
+    rec.triggerError({ name: 'NotReadableError' });
+    assert.equal(ctrl.state().status, 'error');
+    assert.equal(ctrl.state().error.code, 'NotReadableError');
+    assert.equal(rec.stopCalls, 1);
+    assert.equal(stream.allStopped(), true);
+  }
+
+  // 6. Erro de permissão (getUserMedia rejeita) + retryPermission / missing getUserMedia
+  {
+    const ctrl = V.createVoiceController({
+      storage,
+      getUserMedia: async () => { throw { name: 'NotAllowedError' }; },
+      MediaRecorder: makeFakeRecorderClass().FakeMediaRecorder,
+    });
+    ctrl.start();
+    await flushMicrotasks();
+    assert.equal(ctrl.state().status, 'error');
+    assert.equal(ctrl.state().error.code, 'NotAllowedError');
+
+    const ctrlNoApi = V.createVoiceController({ storage, getUserMedia: null, MediaRecorder: null });
+    ctrlNoApi.start();
+    await flushMicrotasks();
+    assert.equal(ctrlNoApi.state().status, 'error');
+    assert.equal(ctrlNoApi.state().error.code, 'api_missing');
+  }
+
+  // 7. Erro no start() do MediaRecorder para as tracks
+  {
+    class BrokenRecorder {
+      static isTypeSupported() { return true; }
+      start() { throw new Error('device busy'); }
+      stop() {}
+    }
+    const stream = makeFakeStream(2);
+    const ctrl = V.createVoiceController({
+      storage,
+      getUserMedia: async () => stream,
+      MediaRecorder: BrokenRecorder,
+    });
+    ctrl.start();
+    await flushMicrotasks();
+    assert.equal(ctrl.state().status, 'error');
+    assert.equal(stream.allStopped(), true);
+  }
+
+  // 8. Envio (STOP >= 700 ms -> sending -> TRANSCRIBE_OK -> SEND)
+  {
+    const { ctrl, stream, rec, advance, uploads, sends } = await startListening();
+    rec.emitChunk(new Uint8Array([10, 20, 30]));
+    advance(1500);
+    ctrl.stop();
+    assert.equal(ctrl.state().status, 'sending');
+    assert.equal(rec.stopCalls, 1);
+    assert.equal(stream.allStopped(), true);
+
+    rec.finishStop();
+    assert.equal(uploads.length, 1);
+    assert.ok(uploads[0].blob);
+    assert.equal(uploads[0].mimeType, 'audio/webm;codecs=opus');
+    assert.equal(uploads[0].durationMs, 1500);
+
+    ctrl.dispatch({ type: 'TRANSCRIBE_OK', generation: ctrl.state().generation, text: 'supino 80 por 8' });
+    assert.equal(ctrl.state().status, 'transcribed');
+    assert.equal(ctrl.blob(), null);
+
+    ctrl.send('0123456789abcdef0123456789abcdef');
+    assert.equal(ctrl.state().status, 'idle');
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0].payload.text, 'supino 80 por 8');
+    assert.equal(stream.allStopped(), true);
+  }
+
+  // 9. Auto-stop aos 90 s para gravador e todas as tracks
+  {
+    const { ctrl, stream, rec, timers, advance, uploads } = await startListening({ syncOnStop: true });
+    assert.equal(timers.timers.size, 1);
+    const scheduled = [...timers.timers.values()][0];
+    assert.equal(scheduled.ms, 90_000);
+    rec.emitChunk(new Uint8Array([1, 2]));
+    advance(90_000);
+    timers.fireAll();
+    assert.equal(ctrl.state().status, 'sending');
+    assert.equal(rec.stopCalls, 1);
+    assert.equal(stream.allStopped(), true);
+    assert.equal(uploads.length, 1);
+  }
+});
+

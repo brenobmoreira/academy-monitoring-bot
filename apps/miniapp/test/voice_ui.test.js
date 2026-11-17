@@ -142,9 +142,9 @@ function makeFakeDOM() {
     get className() { return this.attrs.class || ''; }
     set className(v) { this.attrs.class = String(v); }
     get id() { return this.attrs.id || ''; }
-    setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'hidden') this.hidden = true; }
+    setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'hidden') this.hidden = true; if (k === 'disabled') this.disabled = true; }
     getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; }
-    removeAttribute(k) { delete this.attrs[k]; }
+    removeAttribute(k) { delete this.attrs[k]; if (k === 'disabled') this.disabled = false; }
     hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); }
     set innerHTML(v) { this.textContent = ''; this.appendChild(new El(this.ownerDocument, 'svg')); }
     addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
@@ -156,7 +156,7 @@ function makeFakeDOM() {
       return true;
     }
     click() {
-      if (this.disabled) return;
+      if (this.disabled || this.hasAttribute('disabled')) return;
       this.dispatchEvent({ type: 'click', bubbles: true, target: this, preventDefault() {}, stopPropagation() { this.bubbles = false; } });
     }
     focus() { this.ownerDocument.activeElement = this; }
@@ -738,4 +738,125 @@ test('C6b-fix3: preview (!inTelegram) with real global getUserMedia and MediaRec
   assert.ok(ta);
   assert.equal(ta.value, p.ctx.ShapeVoiceStub.SAMPLES.workout);
 });
+
+test('C6b-fix4: voice lock disables date navigation and tabs (click and keyboard) and keeps recreated controls disabled', async () => {
+  const media = makeFakeMediaHarness();
+  const tg = makeFakeTelegram();
+  let pendingConfirm = null;
+  tg.showConfirm = (_text, cb) => { pendingConfirm = cb; };
+
+  const p = await bootApp({
+    catalog: makeVoiceCatalog(),
+    telegram: tg,
+    storage: storageWith({ [C.VOICE_CONSENT_KEY]: '1' }),
+    navigator: { mediaDevices: { getUserMedia: () => media.getUserMedia() } },
+    globals: { MediaRecorder: media.MediaRecorder },
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ v: 1, session: 's1.lock-tok', expires_at: 1700043200, scopes: ['voice'], ref: 'acct-a' }),
+    }),
+  });
+
+  function collectFormControls() {
+    const roots = [p.doc.querySelector('.tabs'), p.doc.getElementById('dates'), p.doc.getElementById('view')];
+    const out = [];
+    for (const r of roots) {
+      for (const sel of ['input', 'textarea', 'button', 'select']) {
+        out.push(...r.querySelectorAll(sel));
+      }
+    }
+    return out;
+  }
+
+  function pressButtonKey(btn, key) {
+    let prevented = false;
+    btn.dispatchEvent({
+      type: 'keydown',
+      key,
+      bubbles: true,
+      target: btn,
+      preventDefault() { prevented = true; },
+      stopPropagation() { this.bubbles = false; },
+    });
+    // Browser native button activation fires click on Enter/Space ONLY if not disabled
+    if (!prevented && (key === 'Enter' || key === ' ') && !btn.disabled && !btn.hasAttribute('disabled')) {
+      btn.click();
+    }
+  }
+
+  // Enter a value and queue an async confirmDialog ("Limpar este treino") before starting voice
+  const origHead = p.doc.querySelector('.card .card-head');
+  const kgInput = p.doc.querySelector('.card .step-input');
+  kgInput.value = '80';
+  kgInput.dispatchEvent({ type: 'input', target: kgInput, bubbles: true });
+  p.button('Limpar este treino').click();
+  assert.equal(typeof pendingConfirm, 'function');
+
+  // Start voice recording -> listening
+  p.doc.getElementById('dock-mic').click();
+  await flushMicrotasks();
+  assert.equal(media.recorders.length, 1);
+  assert.equal(media.recorders[0].state, 'recording');
+
+  // Every control in #tabs, #dates, and #view must be disabled via property AND attribute
+  const dateBtns = p.doc.getElementById('dates').querySelectorAll('button');
+  assert.ok(dateBtns.length >= 2);
+  const hojeBtn = dateBtns[0];
+  const ontemBtn = dateBtns[1];
+  assert.equal(hojeBtn.getAttribute('aria-checked'), 'true');
+  assert.equal(ontemBtn.getAttribute('aria-checked'), 'false');
+
+  for (const btn of dateBtns) {
+    assert.equal(btn.disabled, true, 'date button must have .disabled = true');
+    assert.equal(btn.hasAttribute('disabled'), true, 'date button must have disabled attribute');
+  }
+  const controlsBefore = collectFormControls();
+  assert.ok(controlsBefore.length >= 11);
+  for (const ctrl of controlsBefore) {
+    assert.equal(ctrl.disabled, true);
+    assert.equal(ctrl.hasAttribute('disabled'), true);
+  }
+
+  // Attempt date & tab switch via click, keyboard (Enter / Space), and raw click dispatch -> all refused
+  ontemBtn.click();
+  pressButtonKey(ontemBtn, 'Enter');
+  pressButtonKey(ontemBtn, ' ');
+  ontemBtn.dispatchEvent({ type: 'click', target: ontemBtn, bubbles: true, preventDefault() {}, stopPropagation() { this.bubbles = false; } });
+  const foodTab = p.doc.getElementById('tab-food');
+  foodTab.click();
+  pressButtonKey(foodTab, 'Enter');
+
+  assert.equal(p.doc.getElementById('dates').querySelectorAll('button')[0].getAttribute('aria-checked'), 'true');
+  assert.equal(p.doc.getElementById('dates').querySelectorAll('button')[1].getAttribute('aria-checked'), 'false');
+  assert.equal(p.doc.getElementById('tab-workout').getAttribute('aria-selected'), 'true');
+  assert.equal(p.doc.querySelector('.card .step-input'), kgInput);
+  assert.equal(kgInput.value, '80');
+  assert.equal(media.recorders[0].state, 'recording');
+
+  // Trigger a view re-render while voice is active (pending showConfirm resolves -> renderWorkout recreates DOM)
+  pendingConfirm(true);
+  const recreatedHead = p.doc.querySelector('.card .card-head');
+  assert.ok(recreatedHead);
+  assert.notEqual(recreatedHead, origHead, 'renderWorkout recreated the form DOM');
+
+  const recreatedControls = collectFormControls();
+  assert.ok(recreatedControls.length >= 11);
+  for (const ctrl of recreatedControls) {
+    assert.equal(ctrl.disabled, true, 'recreated control must be born disabled');
+    assert.equal(ctrl.hasAttribute('disabled'), true, 'recreated control must carry disabled attribute');
+  }
+  assert.equal(media.recorders[0].state, 'recording');
+
+  // Cancel voice -> form unlocks all controls (including recreated ones) and date switching works again
+  p.button('Cancelar').click();
+  assert.equal(media.recorders[0].state, 'inactive');
+  for (const ctrl of collectFormControls()) {
+    assert.equal(ctrl.disabled, false);
+    assert.equal(ctrl.hasAttribute('disabled'), false);
+  }
+  p.doc.getElementById('dates').querySelectorAll('button')[1].click();
+  assert.equal(p.doc.getElementById('dates').querySelectorAll('button')[1].getAttribute('aria-checked'), 'true');
+});
+
 

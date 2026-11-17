@@ -473,6 +473,7 @@
       return h('button', {
         type: 'button', role: 'radio', class: 'date-chip', 'aria-checked': String(d.key === current),
         onclick: function () {
+          if (isVoiceActive()) return;
           if (S.view === 'workout') S.workout.date = d.key; else S.food.date = d.key;
           haptic('select');
           render();
@@ -481,6 +482,7 @@
         },
       }, d.label, h('small', { text: C.weekday(d.key) + ' ' + C.shortDate(d.key) }));
     }));
+    if (isVoiceActive()) setFormLocked(true);
   }
 
   Array.prototype.forEach.call(els.tabs, function (t) {
@@ -616,6 +618,7 @@
     els.view.replaceChildren.apply(els.view, [head, chips].concat(w.session ? [bodyPanel(), cardsBox, addBtn, complete, reset] : [cardsBox])
       .filter(function (el) { return !!el; }));
     if (!w.session) bodyEl = bodyNote = null;
+    if (isVoiceActive()) setFormLocked(true);
   }
 
   function cardErrors(i) {
@@ -772,6 +775,7 @@
     var after = motion('snapshot', old, leaving);
     old.parentNode.replaceChild(fresh, old);
     if (after) after(fresh, els.view);
+    if (isVoiceActive()) setFormLocked(true);
   }
 
   /** Typing inside a card: refresh its head (summary, status) without rebuilding the inputs. */
@@ -944,6 +948,7 @@
     var total = h('p', { id: 'meal-nutrition', class: 'meal-nutrition', 'aria-live': 'polite', 'aria-atomic': 'true' });
     els.view.replaceChildren(head, meals, h('h2', { class: 'section-title', text: 'Adicionar' }), notice, panel, plateTitle, plate, total, reset);
     syncNutrition();
+    if (isVoiceActive()) setFormLocked(true);
   }
 
   function syncNutrition() {
@@ -1499,6 +1504,14 @@
     }
   }
 
+  function lockControl(ctrl) {
+    if (!ctrl || ctrl._voiceLocked || ctrl.disabled || ctrl.hasAttribute('disabled')) return;
+    ctrl.disabled = true;
+    ctrl.setAttribute('disabled', '');
+    ctrl._voiceLocked = true;
+    lockedControls.push(ctrl);
+  }
+
   function setFormLocked(locked) {
     [els.tabBar, els.dates, els.view].forEach(function (el) {
       if (!el) return;
@@ -1506,20 +1519,22 @@
       el.setAttribute('aria-disabled', locked ? 'true' : 'false');
     });
     if (locked) {
-      if (!lockedControls.length && els.view) {
-        var controls = Array.prototype.slice.call(els.view.querySelectorAll('input'))
-          .concat(Array.prototype.slice.call(els.view.querySelectorAll('textarea')))
-          .concat(Array.prototype.slice.call(els.view.querySelectorAll('button')))
-          .concat(Array.prototype.slice.call(els.view.querySelectorAll('select')));
-        controls.forEach(function (ctrl) {
-          if (!ctrl.disabled) {
-            ctrl.disabled = true;
-            lockedControls.push(ctrl);
-          }
-        });
-      }
+      [els.tabBar, els.dates, els.view].forEach(function (rootEl) {
+        if (!rootEl) return;
+        var controls = Array.prototype.slice.call(rootEl.querySelectorAll('input'))
+          .concat(Array.prototype.slice.call(rootEl.querySelectorAll('textarea')))
+          .concat(Array.prototype.slice.call(rootEl.querySelectorAll('button')))
+          .concat(Array.prototype.slice.call(rootEl.querySelectorAll('select')));
+        controls.forEach(lockControl);
+      });
     } else if (lockedControls.length) {
-      lockedControls.forEach(function (ctrl) { ctrl.disabled = false; });
+      lockedControls.forEach(function (ctrl) {
+        if (ctrl && ctrl._voiceLocked) {
+          ctrl.disabled = false;
+          ctrl.removeAttribute('disabled');
+          ctrl._voiceLocked = false;
+        }
+      });
       lockedControls = [];
     }
   }

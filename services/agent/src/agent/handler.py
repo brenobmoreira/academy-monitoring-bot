@@ -139,10 +139,14 @@ def media_ref(message: dict[str, Any], max_bytes: int) -> MediaRef | None:
     for key, default_mime in (("voice", "audio/ogg"), ("audio", "audio/mpeg")):
         item = message.get(key)
         if isinstance(item, dict) and isinstance(item.get("file_id"), str):
-            return MediaRef(item["file_id"], _size(item), item.get("mime_type") or default_mime)
+            mime = item.get("mime_type")
+            return MediaRef(
+                item["file_id"], _size(item), mime if isinstance(mime, str) and mime else default_mime
+            )
+    sizes = message.get("photo")
     photos = [
         MediaRef(p["file_id"], _size(p), "image/jpeg")
-        for p in message.get("photo") or []
+        for p in (sizes if isinstance(sizes, list) else [])
         if isinstance(p, dict) and isinstance(p.get("file_id"), str)
     ]
     if not photos:
@@ -153,13 +157,47 @@ def media_ref(message: dict[str, Any], max_bytes: int) -> MediaRef | None:
     return min(photos, key=lambda p: p.size or 0)
 
 
-def _size(item: dict[str, Any]) -> int | None:
-    size = item.get("file_size")
-    return size if isinstance(size, int) else None
-
-
-def _update_id(raw: Any) -> int | None:
+def strict_int(raw: Any) -> int | None:
+    """`raw` when it is an integer of an update (an id, a size), else None. JSON `true` is not one:
+    Python counts a bool as an int, and `True` would pass for the id 1."""
     return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+
+
+def _size(item: dict[str, Any]) -> int | None:
+    return strict_int(item.get("file_size"))
+
+
+def _message_fault(message: Any, where: str) -> str | None:
+    if message is None:
+        return None
+    if not isinstance(message, dict):
+        return where
+    message_id = message.get("message_id")
+    if message_id is not None and strict_int(message_id) is None:
+        return f"{where}.message_id"
+    chat = message.get("chat")
+    if chat is None:
+        return None
+    if not isinstance(chat, dict):
+        return f"{where}.chat"
+    chat_id = chat.get("id")
+    if chat_id is not None and strict_int(chat_id) is None:
+        return f"{where}.chat.id"
+    return None
+
+
+def malformed_field(update: Any) -> str | None:
+    """The first field of `update` whose type the handler cannot use, as a fixed name written here
+    (never a value); None for an update it can process. Checked before any field is read: Telegram
+    does not send these shapes, and resending one would not fix it. Absent fields are fine."""
+    if not isinstance(update, dict):
+        return "update"
+    if "callback_query" in update:
+        query = update["callback_query"]
+        if not isinstance(query, dict):
+            return "callback_query"
+        return _message_fault(query.get("message"), "callback_query.message")
+    return _message_fault(update.get("message"), "message")
 
 
 class Handler:
@@ -196,8 +234,14 @@ class Handler:
         self._pending = pending if pending is not None else miniapp.PendingStore()
 
     async def handle_update(self, update: dict[str, Any]) -> None:
-        """Never raises: a webhook that errors makes Telegram resend the same update."""
-        update_id = _update_id(update.get("update_id"))
+        """Never raises: a webhook that errors makes Telegram resend the same update. A malformed
+        update is ignored: nothing is written or sent, and the log names the field, not its value."""
+        fault = malformed_field(update)
+        if fault is not None:
+            raw_id = update.get("update_id") if isinstance(update, dict) else None
+            log.warning("ignoring malformed Telegram update %s: bad %s", strict_int(raw_id), fault)
+            return
+        update_id = strict_int(update.get("update_id"))
         if update_id is not None and not self._deduplicator.try_begin(update_id):
             log.info("ignoring duplicate Telegram update %s", update_id)
             return
@@ -231,7 +275,7 @@ class Handler:
         query = update.get("callback_query")
         message = (query.get("message") if query else update.get("message")) or {}
         chat_id = (message.get("chat") or {}).get("id")
-        update_id = _update_id(update.get("update_id"))
+        update_id = strict_int(update.get("update_id"))
 
         async def answer(query: dict[str, Any]) -> None:
             try:
@@ -258,8 +302,10 @@ class Handler:
         chat_id = (message.get("chat") or {}).get("id")
         if chat_id not in self._allowed:
             return True
-        if "web_app_data" in message:
-            reply = await self._miniapp(message["web_app_data"], chat_id, update_id)
+        form = message.get("web_app_data")
+        # A `web_app_data` of another type counts as absent: the text of the message is not dropped.
+        if isinstance(form, dict) and isinstance(form.get("data"), str):
+            reply = await self._miniapp(form, chat_id, update_id)
         elif not isinstance(text, str) or not text.strip():
             reply = await self._media(message, chat_id, update_id)
             if reply is None:
@@ -299,11 +345,11 @@ class Handler:
         self, text: str, message: dict[str, Any], update_id: Any, media: list[Media] | None = None
     ) -> Reply:
         chat_id = message["chat"]["id"]
-        typing = asyncio.create_task(self._keep_typing(chat_id, _update_id(update_id)))
+        typing = asyncio.create_task(self._keep_typing(chat_id, strict_int(update_id)))
         await asyncio.sleep(0)  # let the first action go out before the bot starts
         try:
             context = replied_text(message)
-            uid = _update_id(update_id)
+            uid = strict_int(update_id)
             scope_key = f"tg:{uid}" if uid is not None else None
             with update_key_scope(scope_key):
                 if media:
@@ -347,8 +393,8 @@ class Handler:
 
     async def _download(self, ref: MediaRef) -> bytes:
         file = await self._telegram.get_file(ref.file_id)
-        size = file.get("file_size")
-        if isinstance(size, int) and size > self._media_max_bytes:
+        size = strict_int(file.get("file_size"))
+        if size is not None and size > self._media_max_bytes:
             raise TooLarge
         path = file.get("file_path")
         if not isinstance(path, str) or not path:
@@ -381,12 +427,12 @@ class Handler:
         describe(), with the button's action and never its `callback_data`."""
         message = query.get("message") or {}
         chat_id = (message.get("chat") or {}).get("id")
-        message_id = message.get("message_id")
+        message_id = strict_int(message.get("message_id"))
         data = str(query.get("data") or "")
         toast = None
         completed = True
         try:
-            if chat_id in self._allowed and isinstance(message_id, int):
+            if chat_id in self._allowed and message_id is not None:
                 completed = await self._button(data, chat_id, message_id, message, update_id)
         except Exception as error:
             log.error("button %s failed on update %s: %s", buttons.action(data), update_id, describe(error))
@@ -465,8 +511,10 @@ def replied_text(message: dict[str, Any]) -> str | None:
     """The text of the bot message this one replies to (swipe-reply or ✏️ Corrigir), the only
     context the agent gets from earlier messages besides the sheet's recent writes. A reply to
     the user's own message, or to one without text, gives none."""
-    replied = message.get("reply_to_message") or {}
-    if not (replied.get("from") or {}).get("is_bot"):
+    replied = message.get("reply_to_message")
+    author = replied.get("from") if isinstance(replied, dict) else None
+    # `is True`: a string ("false") or a number in `is_bot` does not make the author a bot.
+    if not isinstance(replied, dict) or not isinstance(author, dict) or author.get("is_bot") is not True:
         return None
     text = replied.get("text")
     return text if isinstance(text, str) and text.strip() else None

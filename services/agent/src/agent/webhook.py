@@ -14,7 +14,8 @@ from typing import Any
 
 import httpx
 
-from agent.handler import UpdateDeduplicator, build_handler
+from agent.handler import UpdateDeduplicator, build_handler, strict_int
+from agent.logs import describe
 from agent.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -36,17 +37,42 @@ def is_authorized(settings: Settings, given: str | None) -> bool:
     return hmac.compare_digest(given.encode(), expected.get_secret_value().encode())
 
 
+class HandlerNotBuilt(Exception):
+    """The handler could not be set up (settings, clients, the model): no update can be processed
+    until that is fixed, unlike a failure on one update. The cause is chained."""
+
+
 async def handle_update(settings: Settings, update: dict[str, Any]) -> None:
     async with httpx.AsyncClient() as http:
-        await build_handler(settings, http, deduplicator=_DEDUPLICATOR).handle_update(update)
+        try:
+            handler = build_handler(settings, http, deduplicator=_DEDUPLICATOR)
+        except Exception as error:
+            raise HandlerNotBuilt from error
+        await handler.handle_update(update)
 
 
 async def process(secret: str | None, body: Any) -> tuple[str, int]:
     """Returns (text, status). Unauthorized → 403; anything else → 200, so Telegram never retries
-    an update the bot has already seen or cannot use."""
+    an update the bot has already seen or cannot use.
+
+    The handler ignores a malformed update by itself; the `except` is the net under it, for a
+    failure nobody foresaw. It covers the processing only, never the check of the secret, and logs
+    the class of the error and the update id: the body and the traceback can carry content. The
+    line also names the phase, a fixed word: `phase=build` repeats on every update until the
+    service is fixed, `phase=handle` is about this update."""
     settings = get_settings()
     if not is_authorized(settings, secret):
         return "forbidden", 403
     if isinstance(body, dict):
-        await handle_update(settings, body)
+        try:
+            await handle_update(settings, body)
+        except Exception as error:
+            built = not isinstance(error, HandlerNotBuilt)
+            cause = error if built else (error.__cause__ or error)
+            log.error(
+                "update %s failed: phase=%s %s",
+                strict_int(body.get("update_id")),
+                "handle" if built else "build",
+                describe(cause),
+            )
     return "ok", 200

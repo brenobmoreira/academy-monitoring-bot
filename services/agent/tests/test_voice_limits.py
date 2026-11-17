@@ -1,33 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 import logging
 import threading
+import traceback
 import warnings
+import weakref
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from agent.voice_limits import (
-    CONCURRENCY_RETRY_AFTER,
-    DAY_WINDOW_S,
-    EXCHANGE_RATE_PER_DAY,
-    EXCHANGE_RATE_PER_MIN,
-    IDEMPOTENCY_TTL_S,
-    MINUTE_WINDOW_S,
-    VOICE_MAX_CONCURRENT,
-    VOICE_RATE_PER_DAY,
-    VOICE_RATE_PER_MIN,
     CachedResponse,
     ConcurrencyGate,
     ConcurrencyLimitError,
     ExchangeLimiter,
     IdempotencyCache,
     IdempotencyConflictError,
+    NoSpeechError,
     OwnerAborted,
     RateLimiter,
+    _InFlightEntry,
 )
 
 pytestmark = pytest.mark.unit
@@ -66,36 +63,36 @@ def test_rate_limiter_default_minute_limit_exact():
     clock = FakeClock(100.0)
     limiter = RateLimiter(clock=clock)
 
-    for _ in range(VOICE_RATE_PER_MIN):
+    for _ in range(6):
         decision = limiter.allow("test:u1")
         assert decision
         assert decision.allowed is True
         assert decision.retry_after == 0
 
+    # 7th request in the same minute is the first refusal (§5.6: 6 per minute).
     refused = limiter.allow("test:u1")
     assert not refused
     assert refused.allowed is False
-    assert refused.retry_after == int(MINUTE_WINDOW_S)
+    assert refused.retry_after == 60
 
 
 def test_rate_limiter_default_day_limit_exact():
     clock = FakeClock(0.0)
     limiter = RateLimiter(clock=clock)
 
-    # 10 batches of 6 spaced by 60 s = 60 requests (exact VOICE_RATE_PER_DAY).
-    batches = VOICE_RATE_PER_DAY // VOICE_RATE_PER_MIN
-    assert batches * VOICE_RATE_PER_MIN == VOICE_RATE_PER_DAY
-    for batch in range(batches):
-        for _ in range(VOICE_RATE_PER_MIN):
+    # 10 batches of 6 spaced by 60 s = 60 requests (§5.6: 60 per day).
+    for batch in range(10):
+        for _ in range(6):
             assert limiter.allow("test:u1")
-        if batch < batches - 1:
-            clock.advance(MINUTE_WINDOW_S)
+        if batch < 9:
+            clock.advance(60.0)
 
     # Advance past the last minute window: minute bucket is empty, day bucket is full (60).
-    clock.advance(MINUTE_WINDOW_S)  # now = 600.0
+    clock.advance(60.0)  # now = 600.0
+    # 61st request in 24h is the first refusal.
     refused = limiter.allow("test:u1")
     assert not refused
-    assert refused.retry_after == int(DAY_WINDOW_S - 600.0)
+    assert refused.retry_after == 85_800  # 86_400 - 600
 
 
 # ---- RateLimiter: sliding windows & boundary (< vs <=) -------------------------------------------
@@ -190,7 +187,7 @@ def test_rate_limiter_refused_requests_do_not_consume_daily_or_minute_quota():
     for _ in range(10):
         assert not limiter.allow("test:u1")
 
-    clock.advance(MINUTE_WINDOW_S)
+    clock.advance(60.0)
     # Daily quota must still have 2 remaining (not polluted by the 10 refused calls).
     assert limiter.allow("test:u1")
     assert limiter.allow("test:u1")
@@ -204,12 +201,12 @@ def test_rate_limiter_principals_are_independent():
     clock = FakeClock(0.0)
     limiter = RateLimiter(clock=clock)
 
-    for _ in range(VOICE_RATE_PER_MIN):
+    for _ in range(6):
         assert limiter.allow("test:u1")
     assert not limiter.allow("test:u1")
 
     # Second principal has full independent minute & day quotas.
-    for _ in range(VOICE_RATE_PER_MIN):
+    for _ in range(6):
         assert limiter.allow("test:u2")
     assert not limiter.allow("test:u2")
 
@@ -332,13 +329,13 @@ def test_exchange_limiter_process_minute_limit_exact_and_sliding():
     clock = FakeClock(10.0)
     limiter = ExchangeLimiter(clock=clock)
 
-    for i in range(EXCHANGE_RATE_PER_MIN):
+    for i in range(30):
         assert limiter.allow_process()
         if i == 0:
             clock.advance(1.0)
 
     # 30 requests: first at 10.0, remaining 29 at 11.0.
-    # At 69.9: first has not left yet -> refused.
+    # At 69.9: 31st request is refused because the first has not left the 60 s window yet.
     clock.now = 69.9
     refused = limiter.allow_process()
     assert not refused
@@ -356,11 +353,12 @@ def test_exchange_limiter_principal_day_limit_exact_and_rollover():
     clock = FakeDateTimeClock(datetime(2026, 11, 16, 23, 55, 0, tzinfo=SAO_PAULO))
     limiter = ExchangeLimiter(clock=clock)
 
-    for _ in range(EXCHANGE_RATE_PER_DAY):
+    for _ in range(20):
         assert limiter.allow("test:u1")
+    # 21st request for the same principal in 24h is the first refusal (§6.7: 20 per day).
     refused = limiter.allow("test:u1")
     assert not refused
-    assert refused.retry_after == int(DAY_WINDOW_S)
+    assert refused.retry_after == 86_400
 
     # Another principal is unaffected by u1's daily quota.
     assert limiter.allow("test:u2")
@@ -379,24 +377,25 @@ def test_exchange_limiter_combined_allow_is_atomic_and_process_limit_shared():
     limiter = ExchangeLimiter(clock=clock)
 
     # Exhaust u1's 20/day limit (uses 20 of the 30/min process slots).
-    for _ in range(EXCHANGE_RATE_PER_DAY):
+    for _ in range(20):
         assert limiter.allow("test:u1")
+    assert not limiter.allow("test:u1")
     # Refused u1 calls must NOT consume the remaining 10 process-minute slots.
     for _ in range(15):
         assert not limiter.allow("test:u1")
 
     # u2 can still take all 10 remaining process-minute slots (20 + 10 = 30).
-    for _ in range(EXCHANGE_RATE_PER_MIN - EXCHANGE_RATE_PER_DAY):
+    for _ in range(10):
         assert limiter.allow("test:u2")
 
     # 31st request in the minute (u3) is refused by the process limit and does not consume u3's daily quota.
     refused = limiter.allow("test:u3")
     assert not refused
-    assert refused.retry_after == int(MINUTE_WINDOW_S)
+    assert refused.retry_after == 60
 
-    clock.advance(MINUTE_WINDOW_S)
-    # u3 still has its full 20/day quota.
-    for _ in range(EXCHANGE_RATE_PER_DAY):
+    clock.advance(60.0)
+    # u3 still has its full 20/day quota; 21st is refused.
+    for _ in range(20):
         assert limiter.allow("test:u3")
     assert not limiter.allow("test:u3")
 
@@ -405,11 +404,11 @@ def test_exchange_limiter_backwards_clock_frees_nothing():
     clock = FakeClock(500.0)
     limiter = ExchangeLimiter(clock=clock)
 
-    for _ in range(EXCHANGE_RATE_PER_MIN):
+    for _ in range(30):
         assert limiter.allow_process()
     assert not limiter.allow_process()
 
-    for _ in range(EXCHANGE_RATE_PER_DAY):
+    for _ in range(20):
         assert limiter.allow_principal("test:u1")
     assert not limiter.allow_principal("test:u1")
 
@@ -493,7 +492,7 @@ def test_invalid_limits_and_clock_values_rejected():
 
 async def test_concurrency_gate_enforces_limit_and_retry_after():
     gate = ConcurrencyGate()
-    assert gate.max_concurrent == VOICE_MAX_CONCURRENT == 4
+    assert gate.max_concurrent == 4
     entered = [asyncio.Event() for _ in range(4)]
     release = asyncio.Event()
 
@@ -509,7 +508,7 @@ async def test_concurrency_gate_enforces_limit_and_retry_after():
     with pytest.raises(ConcurrencyLimitError) as exc_info:
         async with gate.slot():
             pass
-    assert exc_info.value.retry_after == CONCURRENCY_RETRY_AFTER == 2
+    assert exc_info.value.retry_after == 2
     assert gate.active == 4
 
     release.set()
@@ -667,6 +666,7 @@ async def test_idempotency_only_200_and_no_speech_are_cached():
         CachedResponse(status=504, code="timeout", body={"error": "timeout"}),
         CachedResponse(status=429, code="budget_exhausted", body={"error": "budget_exhausted"}),
         CachedResponse(status=422, code="too_long", body={"error": "too_long"}),
+        CachedResponse(status=422, code=None, body={"error": "unprocessable"}),
         CachedResponse(status=415, code="unsupported_format", body={"error": "unsupported_format"}),
         CachedResponse(status=500, code="internal", body={"error": "internal"}),
         CachedResponse(status=201, body={"created": True}),
@@ -702,7 +702,7 @@ async def test_idempotency_only_200_and_no_speech_are_cached():
     with pytest.raises(IdempotencyConflictError):
         await cache.run("test:u1", "k-ns-resp", "d2", no_speech_resp)
 
-    # Raised TranscribeError(code="no_speech") IS also cached as finished.
+    # Raised exception with code="no_speech" IS cached as a minimal outcome and replayed as a fresh exception.
     exc_runs = 0
 
     async def no_speech_exc() -> CachedResponse:
@@ -713,16 +713,159 @@ async def test_idempotency_only_200_and_no_speech_are_cached():
     with pytest.raises(FakeTranscribeError) as err1:
         await cache.run("test:u1", "k-ns-exc", "d1", no_speech_exc)
     assert err1.value.code == "no_speech"
-    with pytest.raises(FakeTranscribeError) as err2:
+    with pytest.raises(NoSpeechError) as err2:
         await cache.run("test:u1", "k-ns-exc", "d1", no_speech_exc)
     assert err2.value.code == "no_speech"
+    assert err2.value.status == 422
     assert exc_runs == 1
+
+    # Custom no_speech_error factory constructs the domain exception on each replay.
+    custom_cache = IdempotencyCache(
+        clock=clock,
+        no_speech_error=lambda: FakeTranscribeError("no_speech"),
+    )
+    custom_runs = 0
+
+    async def custom_ns() -> CachedResponse:
+        nonlocal custom_runs
+        custom_runs += 1
+        raise FakeTranscribeError("no_speech")
+
+    with pytest.raises(FakeTranscribeError):
+        await custom_cache.run("test:u1", "k-ns-custom", "d1", custom_ns)
+    with pytest.raises(FakeTranscribeError) as err_custom:
+        await custom_cache.run("test:u1", "k-ns-custom", "d1", custom_ns)
+    assert err_custom.value.code == "no_speech"
+    assert custom_runs == 1
+
+
+async def test_idempotency_out_of_contract_results_are_not_cached():
+    clock = FakeClock(0.0)
+    cache = IdempotencyCache(clock=clock)
+
+    out_of_contract: list[object] = [
+        {"status": 500, "code": "internal"},
+        {"status": 200, "body": {"text": "dict-not-cached"}},
+        SimpleNamespace(code="no_speech"),
+        SimpleNamespace(status=200, body={"text": "wrong-type"}),
+        None,
+        "plain-string",
+        200,
+    ]
+    for idx, value in enumerate(out_of_contract):
+        key = f"k-bad-{idx}"
+        runs = 0
+
+        async def work(val: object = value) -> object:
+            nonlocal runs
+            runs += 1
+            return val
+
+        first = await cache.run("test:u1", key, "d1", work)
+        assert first == value
+        assert len(cache) == 0
+        second = await cache.run("test:u1", key, "d1", work)
+        assert second == value
+        assert runs == 2
+
+
+async def test_idempotency_no_speech_does_not_retain_audio_or_closures():
+    class SyntheticAudio:
+        def __init__(self, size: int) -> None:
+            self.data = b"\x55" * size
+
+    clock = FakeClock(0.0)
+    cache = IdempotencyCache(
+        clock=clock,
+        no_speech_error=lambda: FakeTranscribeError("no_speech"),
+    )
+    audio_ref: weakref.ref[SyntheticAudio] | None = None
+
+    async def invoke_with_large_audio() -> None:
+        nonlocal audio_ref
+        audio = SyntheticAudio(2_000_000)
+        audio_ref = weakref.ref(audio)
+
+        async def transcribe_closure() -> CachedResponse:
+            assert len(audio.data) == 2_000_000
+            raise FakeTranscribeError("no_speech")
+
+        with contextlib.suppress(FakeTranscribeError):
+            await cache.run("test:u1", "k-retain", "d-retain", transcribe_closure)
+
+    await invoke_with_large_audio()
+    gc.collect()
+    assert len(cache) == 1
+    assert audio_ref is not None and audio_ref() is None
+
+    # Also verify with an in-flight waiter joining before no_speech is raised.
+    waiter_audio_ref: weakref.ref[SyntheticAudio] | None = None
+
+    async def invoke_owner_and_waiter() -> None:
+        nonlocal waiter_audio_ref
+        audio = SyntheticAudio(2_000_000)
+        waiter_audio_ref = weakref.ref(audio)
+        started = asyncio.Event()
+        proceed = asyncio.Event()
+
+        async def slow_no_speech() -> CachedResponse:
+            started.set()
+            await proceed.wait()
+            assert len(audio.data) == 2_000_000
+            raise FakeTranscribeError("no_speech")
+
+        owner = asyncio.create_task(cache.run("test:u1", "k-retain-waiter", "d-waiter", slow_no_speech))
+        await started.wait()
+        waiter = asyncio.create_task(cache.run("test:u1", "k-retain-waiter", "d-waiter", slow_no_speech))
+        await asyncio.sleep(0)
+        proceed.set()
+
+        for task in (owner, waiter):
+            with contextlib.suppress(FakeTranscribeError):
+                await task
+
+    await invoke_owner_and_waiter()
+    await asyncio.sleep(0)
+    gc.collect()
+    assert len(cache) == 2
+    assert waiter_audio_ref is not None and waiter_audio_ref() is None
+
+
+async def test_idempotency_no_speech_100_replays_fresh_exception_and_constant_traceback():
+    clock = FakeClock(0.0)
+    cache = IdempotencyCache(
+        clock=clock,
+        no_speech_error=lambda: FakeTranscribeError("no_speech"),
+    )
+    runs = 0
+
+    async def no_speech_work() -> CachedResponse:
+        nonlocal runs
+        runs += 1
+        raise FakeTranscribeError("no_speech")
+
+    with pytest.raises(FakeTranscribeError) as owner_err:
+        await cache.run("test:u1", "k-replay-100", "d1", no_speech_work)
+
+    trace_lengths: list[int] = []
+    replay_exceptions: list[BaseException] = []
+    for _ in range(100):
+        with pytest.raises(FakeTranscribeError) as exc_info:
+            await cache.run("test:u1", "k-replay-100", "d1", no_speech_work)
+        assert exc_info.value.code == "no_speech"
+        trace_lengths.append(len(traceback.extract_tb(exc_info.value.__traceback__)))
+        replay_exceptions.append(exc_info.value)
+
+    assert runs == 1
+    assert trace_lengths[0] == trace_lengths[-1]
+    assert set(trace_lengths) == {trace_lengths[0]}
+    assert len({id(exc) for exc in replay_exceptions}) == 100
+    assert owner_err.value not in replay_exceptions
 
 
 async def test_idempotency_expires_at_5_minutes_with_fake_clock():
     clock = FakeClock(100.0)
     cache = IdempotencyCache(clock=clock)
-    assert IDEMPOTENCY_TTL_S == 300.0
     runs = 0
 
     async def work() -> CachedResponse:
@@ -748,7 +891,7 @@ async def test_idempotency_expires_at_5_minutes_with_fake_clock():
     assert runs == 2
 
 
-async def test_idempotency_waiter_cancelled_leaves_owner_untouched_and_caches_result():
+async def test_idempotency_waiter_cancelled_leaves_owner_and_other_waiter_untouched():
     clock = FakeClock(0.0)
     cache = IdempotencyCache(clock=clock)
     started = asyncio.Event()
@@ -765,22 +908,36 @@ async def test_idempotency_waiter_cancelled_leaves_owner_untouched_and_caches_re
     owner = asyncio.create_task(cache.run("test:u1", "k1", "d1", work))
     await started.wait()
 
-    waiter = asyncio.create_task(cache.run("test:u1", "k1", "d1", work))
+    waiter_cancelled = asyncio.create_task(cache.run("test:u1", "k1", "d1", work))
+    waiter_surviving = asyncio.create_task(cache.run("test:u1", "k1", "d1", work))
     await asyncio.sleep(0)
-    waiter.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await waiter
 
-    # Owner still runs to completion and populates the finished cache entry.
+    entry = cache._entries[("test:u1", "k1")]
+    assert isinstance(entry, _InFlightEntry)
+    shared_future = entry.future
+    assert not shared_future.cancelled()
+
+    waiter_cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter_cancelled
+
+    # Shared future, owner, and the second waiter are all untouched.
+    assert not shared_future.cancelled()
+    assert not shared_future.done()
     assert not owner.done()
+    assert not waiter_surviving.done()
+
     proceed.set()
-    result = await owner
-    assert result == CachedResponse(status=200, body={"text": "treino ok"})
+    owner_result, waiter_result = await asyncio.gather(owner, waiter_surviving)
+    expected = CachedResponse(status=200, body={"text": "treino ok"})
+    assert owner_result == expected
+    assert waiter_result == expected
+    assert shared_future.done() and not shared_future.cancelled()
     assert len(cache) == 1
 
     # Later request with the same key gets the cached response without a second run.
     replayed = await cache.run("test:u1", "k1", "d1", work)
-    assert replayed == result
+    assert replayed == expected
     assert runs == 1
 
 

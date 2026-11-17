@@ -16,7 +16,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, TypeVar
+from typing import Any, TypeGuard, TypeVar
 
 # Spec §5.6: per-principal voice transcription limits.
 VOICE_RATE_PER_MIN = 6
@@ -315,6 +315,15 @@ class OwnerAborted(Exception):
     """Raised in waiters when the in-flight owner is cancelled or fails unexpectedly (§5.5)."""
 
 
+class NoSpeechError(Exception):
+    """Fresh exception built on each delivery of a cached `no_speech` outcome (§5.5)."""
+
+    def __init__(self, code: str = "no_speech", status: int = 422) -> None:
+        super().__init__(code)
+        self.code = code
+        self.status = status
+
+
 @dataclass(frozen=True)
 class CachedResponse:
     """Pure response value tracked by `IdempotencyCache` without coupling to HTTP."""
@@ -322,6 +331,14 @@ class CachedResponse:
     status: int
     body: Any = None
     code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedNoSpeech:
+    """Reference-free representation of a cached `no_speech` outcome (never an exception)."""
+
+    status: int = 422
+    code: str = "no_speech"
 
 
 @dataclass
@@ -334,8 +351,7 @@ class _InFlightEntry:
 class _FinishedEntry:
     digest: str
     expires_at: float
-    result: Any
-    is_error: bool = False
+    outcome: CachedResponse | _CachedNoSpeech
 
 
 def _consume_exception(future: asyncio.Future[Any]) -> None:
@@ -343,12 +359,12 @@ def _consume_exception(future: asyncio.Future[Any]) -> None:
         future.exception()
 
 
-def _is_cacheable(result: Any) -> bool:
-    status = getattr(result, "status", None)
-    if status is not None:
-        code = getattr(result, "code", None)
-        return status == 200 or (status == 422 and code == "no_speech")
-    return True
+def _is_cacheable(result: Any) -> TypeGuard[CachedResponse]:
+    if not isinstance(result, CachedResponse):
+        return False
+    if type(result.status) is not int:
+        return False
+    return result.status == 200 or (result.status == 422 and result.code == "no_speech")
 
 
 def _default_error_code(exc: BaseException) -> str | None:
@@ -362,9 +378,9 @@ def _default_error_code(exc: BaseException) -> str | None:
 class IdempotencyCache:
     """Digest-first idempotency store with owner/waiter semantics (§5.5).
 
-    Keyed by `(principal_key, idempotency_key)`. Stores only digests and responses (never audio).
-    Only `200` and `no_speech` outcomes are kept for `ttl_s` (5 minutes); other errors delete the
-    entry so a retry can run again.
+    Keyed by `(principal_key, idempotency_key)`. Stores only digests and minimal outcomes (never
+    audio, exceptions, tracebacks, or closures). Only `200` and `no_speech` outcomes are kept for
+    `ttl_s` (5 minutes); other errors delete the entry so a retry can run again.
     """
 
     def __init__(
@@ -373,12 +389,14 @@ class IdempotencyCache:
         *,
         clock: Clock = time.monotonic,
         error_code: Callable[[BaseException], str | None] = _default_error_code,
+        no_speech_error: Callable[[], BaseException] = NoSpeechError,
     ) -> None:
         if ttl_s <= 0:
             raise ValueError(f"ttl_s must be > 0, got {ttl_s}")
         self._ttl_s = ttl_s
         self._clock = clock
         self._error_code = error_code
+        self._no_speech_error = no_speech_error
         self._entries: dict[tuple[str, str], _InFlightEntry | _FinishedEntry] = {}
         self._last_now: float | None = None
 
@@ -401,6 +419,11 @@ class IdempotencyCache:
         self._prune(self._now())
         return len(self._entries)
 
+    @staticmethod
+    def _clone_response(response: CachedResponse) -> Any:
+        body = dict(response.body) if isinstance(response.body, dict) else response.body
+        return CachedResponse(status=response.status, body=body, code=response.code)
+
     async def run(
         self,
         principal_key: str,
@@ -416,13 +439,18 @@ class IdempotencyCache:
             if existing.digest != digest:
                 raise IdempotencyConflictError()
             if isinstance(existing, _FinishedEntry):
-                if existing.is_error:
-                    raise existing.result
-                return existing.result
-            return await asyncio.shield(existing.future)
+                if isinstance(existing.outcome, _CachedNoSpeech):
+                    raise self._no_speech_error()
+                return self._clone_response(existing.outcome)
+            outcome = await asyncio.shield(existing.future)
+            if isinstance(outcome, _CachedNoSpeech):
+                raise self._no_speech_error()
+            if isinstance(outcome, CachedResponse):
+                return self._clone_response(outcome)
+            return outcome
 
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[T] = loop.create_future()
+        future: asyncio.Future[Any] = loop.create_future()
         future.add_done_callback(_consume_exception)
         in_flight = _InFlightEntry(digest=digest, future=future)
         self._entries[key] = in_flight
@@ -437,14 +465,16 @@ class IdempotencyCache:
                     self._entries[key] = _FinishedEntry(
                         digest=digest,
                         expires_at=finish_now + self._ttl_s,
-                        result=exc,
-                        is_error=True,
+                        outcome=_CachedNoSpeech(),
                     )
-                elif self._entries.get(key) is in_flight:
-                    del self._entries[key]
-                if not future.done():
-                    future.set_exception(exc)
-                    future.exception()
+                    if not future.done():
+                        future.set_result(_CachedNoSpeech())
+                else:
+                    if self._entries.get(key) is in_flight:
+                        del self._entries[key]
+                    if not future.done():
+                        future.set_exception(exc)
+                        future.exception()
                 raise
             if self._entries.get(key) is in_flight:
                 del self._entries[key]
@@ -455,14 +485,17 @@ class IdempotencyCache:
 
         if _is_cacheable(result):
             finish_now = self._now()
+            stored = self._clone_response(result)
             self._entries[key] = _FinishedEntry(
                 digest=digest,
                 expires_at=finish_now + self._ttl_s,
-                result=result,
-                is_error=False,
+                outcome=stored,
             )
-        elif self._entries.get(key) is in_flight:
-            del self._entries[key]
-        if not future.done():
-            future.set_result(result)
+            if not future.done():
+                future.set_result(stored)
+        else:
+            if self._entries.get(key) is in_flight:
+                del self._entries[key]
+            if not future.done():
+                future.set_result(result)
         return result

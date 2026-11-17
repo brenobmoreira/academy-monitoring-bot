@@ -30,10 +30,11 @@ from agent.bot import (
     Media,
 )
 from agent.handler import DOWNLOAD_FAILED, FAILURE, Handler
+from agent.llm import RetryingClient
 from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient, TelegramError
 
-from .fakes import FakeSheet, ScriptedLlm, call, say
+from .fakes import FakeLiteLLMClient, FakeSheet, ScriptedLlm, call, say, text_response
 from .test_handler import FakeBot, FakeTelegram, tap, update, voice_update
 from .test_miniapp import FOOD, tap_retry, web_app_update
 from .test_miniapp import clock as miniapp_clock
@@ -355,6 +356,34 @@ async def test_a_failing_model_call_logs_no_text_and_no_exception_content(captur
     assert_clean(caplog.records, stream.getvalue())
     assert (
         "model call failed: tests.test_log_safety.LeakyError[status=other code=other] <- ValueError"
+        in caplog.text
+    )
+
+
+async def test_a_transient_model_retry_logs_through_describe_without_sentinel_class_name(captured, capsys):
+    caplog, stream = captured
+    smuggled = type(f"Leak {TEXT_SENTINEL}", (litellm.ServiceUnavailableError,), {})
+    err = smuggled(
+        f"overloaded {TEXT_SENTINEL} {AUDIO_B64}",
+        llm_provider=TEXT_SENTINEL,
+        model="gemini/gemini-3.8-flash",
+    )
+    err.code = TEXT_SENTINEL
+    client = FakeLiteLLMClient([err, text_response("ok")])
+    retrying = RetryingClient(client, retries=1, wait_s=0)
+
+    response = await retrying.acompletion(
+        "gemini/gemini-3.8-flash",
+        [{"role": "user", "content": TEXT_SENTINEL}],
+        None,
+    )
+
+    assert response.choices[0].message.content == "ok"
+    assert len(client.requests) == 2
+    std = capsys.readouterr()
+    assert_clean(caplog.records, stream.getvalue() + std.out + std.err)
+    assert (
+        "model gemini/gemini-3.8-flash unavailable (Exception[status=503 code=other]), attempt 1 of 2"
         in caplog.text
     )
 

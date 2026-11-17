@@ -183,7 +183,7 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 .tabs[data-view="food"]::before { transform: translateX(calc(100% + 4px)); }
 .tab {
   position: relative;
-  height: 42px;
+  height: 44px;
   border-radius: 12px;
   font-size: 15px;
   font-weight: 650;
@@ -205,7 +205,7 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
   align-items: baseline;
   justify-content: center;
   gap: 6px;
-  height: 40px;
+  min-height: 44px;
   border-radius: 12px;
   border: 1.5px solid var(--line);
   font-size: 14px;
@@ -244,7 +244,8 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 .chip-wrap { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip {
   flex: 0 0 auto;
-  min-height: 40px;
+  min-height: 44px;
+  min-width: 44px;
   padding: 0 15px;
   border-radius: 999px;
   background: var(--surface);
@@ -329,11 +330,11 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 .set-label .kind-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--accent); }
 .set.warm .kind-dot { background: var(--cool); }
 .btn-x {
-  width: 36px; height: 36px; margin-right: -6px;
+  width: 44px; height: 44px; margin-right: -6px;
   border-radius: 50%;
   color: var(--hint);
   font-size: 20px;
-  line-height: 36px;
+  line-height: 44px;
 }
 
 /* Stepper: the readout is the hero of the workout screen. */
@@ -378,14 +379,14 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 .pair .stepper { grid-template-columns: 44px minmax(0, 1fr) 44px; padding: 3px; gap: 2px; }
 .pair .step-btn { height: 44px; font-size: 22px; font-weight: 500; }
-.pair .step-input { font-size: 24px; }
+.pair .step-input { font-size: 24px; min-height: 44px; }
 
 .extras { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .extra {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 40px;
+  min-height: 44px;
   padding: 0 14px 0 6px;
   border-radius: 999px;
   box-shadow: inset 0 0 0 1px var(--line);
@@ -419,7 +420,7 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 .errors { margin: 12px 0 0; padding: 10px 12px; border-radius: 14px; background: var(--alert-soft); color: var(--alert); font-size: 14px; list-style: none; }
 .errors li + li { margin-top: 4px; }
 .card-foot { display: flex; justify-content: flex-end; margin-top: 10px; }
-.btn-text { min-height: 40px; padding: 0 8px; color: var(--hint); font-size: 14px; font-weight: 600; }
+.btn-text { min-height: 44px; padding: 0 8px; color: var(--hint); font-size: 14px; font-weight: 600; }
 .btn-text.danger { color: var(--alert); }
 
 .add-ex { margin-top: 12px; }
@@ -462,9 +463,9 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 
 .panel { padding: 14px; border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
 .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; border-radius: 14px; background: var(--fill); }
-.seg button { min-height: 40px; border-radius: 11px; font-size: 14px; font-weight: 650; color: var(--hint); }
+.seg button { min-height: 44px; border-radius: 11px; font-size: 14px; font-weight: 650; color: var(--hint); }
 .seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
-.seg.small button { min-height: 38px; font-size: 13.5px; }
+.seg.small button { min-height: 44px; font-size: 13.5px; }
 .panel-body { margin-top: 12px; }
 .hint { margin: 8px 0 0; font-size: 13px; color: var(--hint); line-height: 1.35; }
 .hint.warn { color: var(--amber); }
@@ -520,7 +521,7 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 .plate-right { display: flex; align-items: center; gap: 2px; }
 .plate-qty { padding: 0 4px; font: 600 15px var(--font-num); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .mini-step { display: flex; align-items: center; gap: 2px; background: var(--fill); border-radius: 12px; padding: 2px; }
-.mini-step button { width: 36px; height: 36px; border-radius: 10px; color: var(--accent-text); font-size: 20px; font-weight: 600; }
+.mini-step button { width: 44px; height: 44px; border-radius: 10px; color: var(--accent-text); font-size: 20px; font-weight: 600; }
 .mini-step output { min-width: 34px; text-align: center; font: 700 15px var(--font-num); font-variant-numeric: tabular-nums; }
 .empty-plate { padding: 4px 16px; border-radius: 14px; border: 1.5px dashed var(--line); color: var(--hint); font-size: 14.5px; text-align: center; }
 

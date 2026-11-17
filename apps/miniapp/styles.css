@@ -273,7 +273,7 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 .card[data-status="error"] { box-shadow: inset 0 0 0 2px var(--alert), var(--shadow); }
 .card-head {
   display: grid;
-  grid-template-columns: 22px 1fr auto;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -281,6 +281,7 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
   padding: 12px 14px 12px 16px;
   text-align: left;
 }
+.card-head > :last-child { display: inline-flex; align-items: center; justify-content: flex-end; min-width: 0; }
 /* Status disc: empty ring, ember disc with a check when filled, red when it needs a fix. */
 .dot { position: relative; width: 22px; height: 22px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--fill-strong); }
 .card[data-status="filled"] .dot { background: var(--accent); box-shadow: none; }
@@ -297,11 +298,18 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
   font-weight: 650;
   color: var(--hint);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  white-space: normal;
+  text-align: right;
+  max-width: 112px;
+  line-height: 1.25;
 }
 .card[data-status="filled"] .card-summary { color: var(--text); }
-.chev { display: inline-block; margin-left: 6px; transition: transform 0.2s; }
+.chev { display: inline-block; flex: 0 0 auto; margin-left: 6px; transition: transform 0.2s; }
 .card-head[aria-expanded="true"] .chev { transform: rotate(180deg); }
+@media (max-width: 380px) {
+  .card-head { gap: 8px; padding: 12px; }
+  .card-summary { max-width: 96px; }
+}
 
 .card-body { padding: 0 14px 16px; }
 .ref { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -380,9 +388,9 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 .step-label { display: block; font-size: 12px; color: var(--hint); text-align: center; margin-top: 4px; }
 
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
-.pair .stepper { grid-template-columns: 44px minmax(0, 1fr) 44px; padding: 3px; gap: 2px; }
+.pair .stepper { grid-template-columns: 44px minmax(0, 1fr) 44px; padding: 3px; gap: 2px; border-radius: 16px; }
 .pair .step-btn { height: 44px; font-size: 22px; font-weight: 500; }
-.pair .step-input { font-size: 24px; min-height: 44px; }
+.pair .step-input { font-size: 20px; min-height: 44px; }
 
 .extras { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .extra {
@@ -490,8 +498,11 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
   border-radius: 14px; background: var(--accent-soft); color: var(--accent-text);
   font-weight: 700;
 }
-.qty-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-top: 10px; }
-.parsed { font-size: 13px; color: var(--hint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.qty-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.qty-row .text-input { flex: 1 1 140px; min-width: 0; width: auto; }
+.parsed { font-size: 13px; color: var(--hint); font-variant-numeric: tabular-nums; min-width: 0; overflow-wrap: anywhere; }
+.parsed:empty { display: none; }
+.qty-row .parsed { min-width: 0; max-width: 45%; overflow-wrap: anywhere; }
 .parsed.bad { color: var(--alert); }
 .sub-label { margin: 12px 0 6px; font-size: 13px; font-weight: 700; color: var(--hint); }
 .btn-primary {
@@ -527,6 +538,11 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 .mini-step button { width: 44px; height: 44px; border-radius: 10px; color: var(--accent-text); font-size: 20px; font-weight: 600; }
 .mini-step output { min-width: 34px; text-align: center; font: 700 15px var(--font-num); font-variant-numeric: tabular-nums; }
 .empty-plate { padding: 4px 16px; border-radius: 14px; border: 1.5px dashed var(--line); color: var(--hint); font-size: 14.5px; text-align: center; }
+@media (max-width: 400px) {
+  .plate-item.k-favorite { grid-template-columns: 6px minmax(0, 1fr); row-gap: 8px; }
+  .plate-item.k-favorite .plate-bar { grid-row: 1 / 3; }
+  .plate-item.k-favorite .plate-right { grid-column: 2; justify-self: end; }
+}
 
 /* Review ------------------------------------------------------------------------------- */
 
@@ -537,7 +553,7 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 .review-item span { display: block; font-size: 14px; color: var(--hint); font-variant-numeric: tabular-nums; }
 .facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0 0 14px; padding: 14px; border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); font-size: 15px; }
 .facts dt { color: var(--hint); }
-.facts dd { margin: 0; font-weight: 650; }
+.facts dd { margin: 0; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
 .meter { margin-top: 14px; }
 .meter-bar { height: 8px; border-radius: 4px; background: var(--fill-strong); overflow: hidden; }
 .meter-bar i { display: block; height: 100%; border-radius: 4px; background: var(--mint); }

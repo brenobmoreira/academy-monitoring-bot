@@ -93,6 +93,7 @@ DIAGNOSTIC_CODES = frozenset(
         "not_latest",
         # model calls and the voice service
         "timeout",
+        "failed",
         "rate_limited",
         "budget_exhausted",
         "bad_request",

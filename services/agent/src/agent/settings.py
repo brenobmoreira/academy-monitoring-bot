@@ -18,7 +18,7 @@ from typing import Annotated, Any, ClassVar
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     NoDecode,
@@ -57,7 +57,125 @@ class ConfigError(RuntimeError):
     pass
 
 
-class Settings(BaseSettings):
+class TranscribeSettings(BaseModel):
+    """Transcription and voice-budget settings (voice spec §3.1, §5.6), shared by the bot's Settings
+    and, later, the voice service's. The host class may define LLM_MODEL, LLM_API_KEY and
+    MEDIA_ENABLED; without them (the voice service) the key must be given explicitly."""
+
+    # Gemini through Google AI Studio or Vertex AI only: the audio-native providers (spec §3.1).
+    TRANSCRIBE_MODEL: str = "gemini/gemini-3.8-flash"
+    # Optional for vertex_ai (ADC). For gemini it defaults to LLM_API_KEY when LLM_MODEL has the same
+    # provider; otherwise it is required (while media is enabled).
+    TRANSCRIBE_API_KEY: SecretStr | None = None
+    # Primary model only; never inherited from LLM_API_BASE (a proxy for the agent may not take audio).
+    TRANSCRIBE_API_BASE: str | None = None
+    TRANSCRIBE_FALLBACK_MODEL: str | None = None
+    # Defaults to the primary's key when the fallback has the same provider; required otherwise.
+    TRANSCRIBE_FALLBACK_API_KEY: SecretStr | None = None
+    # Seconds per attempt; must not pass TRANSCRIBE_DEADLINE_S.
+    TRANSCRIBE_TIMEOUT_S: float = Field(15.0, gt=0, le=600)
+    # Retries per model for transient errors; the first wait doubles each time.
+    TRANSCRIBE_RETRIES: int = Field(1, ge=0, le=5)
+    TRANSCRIBE_RETRY_WAIT_S: float = Field(1.0, ge=0, le=30)
+    # Hard limit for the whole transcription: every attempt, wait and fallback.
+    TRANSCRIBE_DEADLINE_S: float = Field(45.0, gt=0, le=600)
+    # Longest voice note, in seconds (decision D2).
+    VOICE_MAX_SECONDS: int = Field(90, ge=1, le=3600)
+    # Token budgets per day (in TIMEZONE) and per process: approximate, in memory (spec §5.6).
+    VOICE_DAILY_TOKENS: int = Field(120_000, ge=1)
+    VOICE_GLOBAL_DAILY_TOKENS: int = Field(500_000, ge=1)
+    # Lowest bitrate an accepted format can have: sizes a reservation from the body when the duration
+    # cannot be trusted (6 kbps is Opus's floor).
+    VOICE_MIN_BITRATE_BPS: int = Field(6000, ge=1)
+
+    @field_validator("TRANSCRIBE_API_KEY", "TRANSCRIBE_FALLBACK_API_KEY", mode="before")
+    @classmethod
+    def _blank_transcribe_key_is_missing(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("TRANSCRIBE_FALLBACK_MODEL", "TRANSCRIBE_API_BASE", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("TRANSCRIBE_API_KEY", "TRANSCRIBE_FALLBACK_API_KEY", mode="after")
+    @classmethod
+    def _transcribe_key_is_long_enough(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and len(value.get_secret_value().strip()) < logs.MIN_SECRET_LEN:
+            raise ValueError(f"must be at least {logs.MIN_SECRET_LEN} characters")
+        return value
+
+    @field_validator("TRANSCRIBE_MODEL", "TRANSCRIBE_FALLBACK_MODEL", mode="after")
+    @classmethod
+    def _transcribe_provider_is_gemini_or_vertex(cls, value: str | None) -> str | None:
+        if value is not None and _provider(value) not in TRANSCRIBE_PROVIDERS:
+            raise ValueError(
+                "must be a gemini/<model> or vertex_ai/<model> model "
+                "(audio goes only to providers that take it)"
+            )
+        return value
+
+    def transcribe_api_key(self) -> str | None:
+        """The primary's key: its own, else the bot's LLM_API_KEY when both models share a provider."""
+        if self.TRANSCRIBE_API_KEY is not None:
+            return self.TRANSCRIBE_API_KEY.get_secret_value()
+        llm_model = getattr(self, "LLM_MODEL", None)
+        llm_key = getattr(self, "LLM_API_KEY", None)
+        if (
+            isinstance(llm_model, str)
+            and isinstance(llm_key, SecretStr)
+            and _provider(llm_model) == _provider(self.TRANSCRIBE_MODEL)
+        ):
+            return llm_key.get_secret_value()
+        return None
+
+    def transcribe_fallback_api_key(self) -> str | None:
+        """The fallback's key: its own, else the primary's when both share a provider."""
+        if self.TRANSCRIBE_FALLBACK_API_KEY is not None:
+            return self.TRANSCRIBE_FALLBACK_API_KEY.get_secret_value()
+        fallback = self.TRANSCRIBE_FALLBACK_MODEL
+        if fallback and _provider(fallback) == _provider(self.TRANSCRIBE_MODEL):
+            return self.transcribe_api_key()
+        return None
+
+    @model_validator(mode="after")
+    def _transcribe_consistency(self) -> TranscribeSettings:
+        if self.TRANSCRIBE_TIMEOUT_S > self.TRANSCRIBE_DEADLINE_S:
+            raise ValueError("TRANSCRIBE_TIMEOUT_S must not be longer than TRANSCRIBE_DEADLINE_S")
+        if (
+            getattr(self, "MEDIA_ENABLED", True)
+            and _provider(self.TRANSCRIBE_MODEL) == "gemini"
+            and self.transcribe_api_key() is None
+            and not _sdk_gemini_key_in_environment()
+        ):
+            raise ValueError(
+                "TRANSCRIBE_API_KEY is required for a gemini transcription model (or MEDIA_ENABLED=false, "
+                "or GEMINI_API_KEY in the environment; LLM_API_KEY is reused only when LLM_MODEL "
+                "is also gemini)"
+            )
+        fallback = self.TRANSCRIBE_FALLBACK_MODEL
+        if fallback:
+            if (
+                _provider(fallback) != _provider(self.TRANSCRIBE_MODEL)
+                and self.TRANSCRIBE_FALLBACK_API_KEY is None
+            ):
+                raise ValueError(
+                    f"TRANSCRIBE_FALLBACK_MODEL {fallback} is not a "
+                    f"{_provider(self.TRANSCRIBE_MODEL)} model: set TRANSCRIBE_FALLBACK_API_KEY for it"
+                )
+            if self.TRANSCRIBE_API_BASE and self.transcribe_fallback_api_key() is None:
+                raise ValueError(
+                    "TRANSCRIBE_API_BASE with a fallback that has no key would send the base to the "
+                    "fallback: give TRANSCRIBE_FALLBACK_API_KEY or drop TRANSCRIBE_API_BASE"
+                )
+        return self
+
+
+class Settings(BaseSettings, TranscribeSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     SECRETS: ClassVar[frozenset[str]] = frozenset(
@@ -68,6 +186,8 @@ class Settings(BaseSettings):
             "LLM_API_KEY",
             "LLM_FALLBACK_API_KEY",
             "REMINDER_TOKEN",
+            "TRANSCRIBE_API_KEY",
+            "TRANSCRIBE_FALLBACK_API_KEY",
         }
     )
 
@@ -220,6 +340,14 @@ PROVIDER_KEY_VARIABLES = (
     "GROQ_API_KEY",
     "OPENROUTER_API_KEY",
 )
+
+
+TRANSCRIBE_PROVIDERS = frozenset({"gemini", "vertex_ai"})
+
+
+def _sdk_gemini_key_in_environment() -> bool:
+    """LiteLLM reads these on its own when no key is passed, so the call needs no explicit one."""
+    return any((os.environ.get(name) or "").strip() for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"))
 
 
 def _provider(model: str) -> str:

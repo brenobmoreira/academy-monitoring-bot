@@ -48,3 +48,27 @@ MEDIA_ENABLED: true
 
 # Largest voice/audio/photo downloaded, in bytes (at most 20000000, the Bot API's limit).
 MEDIA_MAX_BYTES: 5000000
+
+# --- Voice transcription (voice spec, §3.1 and §5.6) --------------------------------------------
+# Audio goes to a Gemini model only (gemini/... or vertex_ai/...). TRANSCRIBE_API_KEY comes from the
+# environment; it defaults to LLM_API_KEY when LLM_MODEL is also a gemini model.
+TRANSCRIBE_MODEL: gemini/gemini-3.8-flash
+# TRANSCRIBE_FALLBACK_MODEL: gemini/gemini-3.7-flash   (same provider = same key)
+
+# Seconds per attempt, retries per model (the wait doubles), and the hard limit for the whole
+# transcription (every attempt, wait and fallback).
+TRANSCRIBE_TIMEOUT_S: 15
+TRANSCRIBE_RETRIES: 1
+TRANSCRIBE_RETRY_WAIT_S: 1.0
+TRANSCRIBE_DEADLINE_S: 45
+
+# Longest voice note, in seconds.
+VOICE_MAX_SECONDS: 90
+
+# Token budgets, per day (in TIMEZONE) and per process: approximate, kept in memory, renewed at
+# midnight and at every restart. The provider's own spend cap is the real ceiling.
+VOICE_DAILY_TOKENS: 120000
+VOICE_GLOBAL_DAILY_TOKENS: 500000
+# Lowest bitrate an accepted audio format can have; sizes a reservation from the body size when the
+# duration cannot be trusted.
+VOICE_MIN_BITRATE_BPS: 6000

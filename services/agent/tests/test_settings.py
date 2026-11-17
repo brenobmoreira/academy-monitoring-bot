@@ -23,6 +23,21 @@ ALL_KEYS = [
     "TIMEZONE",
     "MEDIA_ENABLED",
     "MEDIA_MAX_BYTES",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "TRANSCRIBE_MODEL",
+    "TRANSCRIBE_API_KEY",
+    "TRANSCRIBE_API_BASE",
+    "TRANSCRIBE_FALLBACK_MODEL",
+    "TRANSCRIBE_FALLBACK_API_KEY",
+    "TRANSCRIBE_TIMEOUT_S",
+    "TRANSCRIBE_RETRIES",
+    "TRANSCRIBE_RETRY_WAIT_S",
+    "TRANSCRIBE_DEADLINE_S",
+    "VOICE_MAX_SECONDS",
+    "VOICE_DAILY_TOKENS",
+    "VOICE_GLOBAL_DAILY_TOKENS",
+    "VOICE_MIN_BITRATE_BPS",
 ]
 
 
@@ -37,6 +52,8 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setenv("SETTINGS_FILE", str(yaml_file))
     for key, value in REQUIRED.items():
         monkeypatch.setenv(key, value)
+    # The transcription model (Gemini by default) needs a key the bot's own model may not provide.
+    monkeypatch.setenv("TRANSCRIBE_API_KEY", "transcribe-key-1234")
     return yaml_file
 
 
@@ -226,4 +243,180 @@ def test_miniapp_url_accepts_https_addresses(env, monkeypatch, url):
 def test_miniapp_url_must_be_a_real_https_address(env, monkeypatch, url):
     monkeypatch.setenv("MINIAPP_URL", url)
     with pytest.raises(ConfigError, match="MINIAPP_URL"):
+        Settings.load()
+
+
+# --- transcription (voice spec §3.1) -----------------------------------------------------------
+
+
+def test_transcription_defaults(env):
+    s = Settings.load()
+    assert s.TRANSCRIBE_MODEL == "gemini/gemini-3.8-flash"
+    assert s.TRANSCRIBE_API_BASE is None
+    assert s.TRANSCRIBE_FALLBACK_MODEL is None
+    assert s.TRANSCRIBE_TIMEOUT_S == 15
+    assert s.TRANSCRIBE_RETRIES == 1
+    assert s.TRANSCRIBE_RETRY_WAIT_S == 1.0
+    assert s.TRANSCRIBE_DEADLINE_S == 45
+    assert s.VOICE_MAX_SECONDS == 90
+    assert s.VOICE_DAILY_TOKENS == 120_000
+    assert s.VOICE_GLOBAL_DAILY_TOKENS == 500_000
+    assert s.VOICE_MIN_BITRATE_BPS == 6000
+
+
+@pytest.mark.parametrize("model", ["anthropic/claude-sonnet-5", "openai/gpt-5.6", "gemini-3.8-flash", ""])
+def test_the_transcription_model_must_be_gemini_or_vertex(env, monkeypatch, model):
+    monkeypatch.setenv("TRANSCRIBE_MODEL", model)
+    with pytest.raises(ConfigError, match="TRANSCRIBE_MODEL"):
+        Settings.load()
+
+
+def test_the_transcription_fallback_follows_the_same_provider_rule(env, monkeypatch):
+    monkeypatch.setenv("TRANSCRIBE_FALLBACK_MODEL", "anthropic/claude-haiku-5-5")
+    monkeypatch.setenv("TRANSCRIBE_FALLBACK_API_KEY", "fallback-key-12")
+    with pytest.raises(ConfigError, match="TRANSCRIBE_FALLBACK_MODEL"):
+        Settings.load()
+
+
+def test_a_gemini_model_without_any_key_is_refused(env, monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_API_KEY")
+    with pytest.raises(ConfigError, match="TRANSCRIBE_API_KEY"):
+        Settings.load()
+
+
+def test_the_bot_key_is_reused_when_the_providers_match(env, monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_API_KEY")
+    env.write_text("LLM_MODEL: gemini/gemini-3.7-flash\n", encoding="utf-8")
+    monkeypatch.setenv("LLM_API_KEY", "bot-gemini-key-12")
+    assert Settings.load().transcribe_api_key() == "bot-gemini-key-12"
+
+
+def test_the_bot_key_is_not_reused_for_another_provider(env, monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_API_KEY")
+    env.write_text("LLM_MODEL: anthropic/claude-sonnet-5\n", encoding="utf-8")
+    monkeypatch.setenv("LLM_API_KEY", "bot-anthropic-key")
+    with pytest.raises(ConfigError, match="TRANSCRIBE_API_KEY"):
+        Settings.load()
+
+
+def test_an_explicit_transcription_key_wins_over_the_bot_key(env, monkeypatch):
+    env.write_text("LLM_MODEL: gemini/gemini-3.7-flash\n", encoding="utf-8")
+    monkeypatch.setenv("LLM_API_KEY", "bot-gemini-key-12")
+    assert Settings.load().transcribe_api_key() == "transcribe-key-1234"
+
+
+def test_vertex_needs_no_key(env, monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_API_KEY")
+    monkeypatch.setenv("TRANSCRIBE_MODEL", "vertex_ai/gemini-3.8-flash")
+    assert Settings.load().transcribe_api_key() is None
+
+
+def test_without_media_the_transcription_key_is_not_required(env, monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_API_KEY")
+    monkeypatch.setenv("MEDIA_ENABLED", "false")
+    assert Settings.load().transcribe_api_key() is None
+
+
+def test_the_transcription_base_is_never_inherited_from_the_bot(env, monkeypatch):
+    monkeypatch.setenv("LLM_API_BASE", "http://proxy:4000")
+    s = Settings.load()
+    assert s.LLM_API_BASE == "http://proxy:4000"
+    assert s.TRANSCRIBE_API_BASE is None
+
+
+def test_the_fallback_reuses_the_primary_key_for_the_same_provider(env, monkeypatch):
+    monkeypatch.setenv("TRANSCRIBE_FALLBACK_MODEL", "gemini/gemini-3.7-flash")
+    assert Settings.load().transcribe_fallback_api_key() == "transcribe-key-1234"
+
+
+def test_a_fallback_of_another_provider_needs_its_own_key_for_transcription(env, monkeypatch):
+    monkeypatch.setenv("TRANSCRIBE_FALLBACK_MODEL", "vertex_ai/gemini-3.8-flash")
+    with pytest.raises(ConfigError, match="TRANSCRIBE_FALLBACK_API_KEY"):
+        Settings.load()
+    monkeypatch.setenv("TRANSCRIBE_FALLBACK_API_KEY", "fallback-key-12")
+    assert Settings.load().transcribe_fallback_api_key() == "fallback-key-12"
+
+
+def test_a_base_with_a_fallback_that_has_no_key_is_refused(env, monkeypatch):
+    # Vertex on ADC both ways: no key anywhere, so the fallback would be handed the primary's base.
+    monkeypatch.delenv("TRANSCRIBE_API_KEY")
+    monkeypatch.setenv("TRANSCRIBE_MODEL", "vertex_ai/gemini-3.8-flash")
+    monkeypatch.setenv("TRANSCRIBE_FALLBACK_MODEL", "vertex_ai/gemini-3.7-flash")
+    monkeypatch.setenv("TRANSCRIBE_API_BASE", "https://proxy.example/v1")
+    with pytest.raises(ConfigError, match="TRANSCRIBE_API_BASE"):
+        Settings.load()
+    monkeypatch.delenv("TRANSCRIBE_API_BASE")
+    assert Settings.load().transcribe_fallback_api_key() is None
+
+
+def test_a_base_with_a_fallback_that_has_a_key_is_fine(env, monkeypatch):
+    monkeypatch.setenv("TRANSCRIBE_FALLBACK_MODEL", "gemini/gemini-3.7-flash")
+    monkeypatch.setenv("TRANSCRIBE_API_BASE", "https://proxy.example/v1")
+    assert Settings.load().TRANSCRIBE_API_BASE == "https://proxy.example/v1"
+
+
+def test_the_attempt_timeout_cannot_pass_the_deadline(env, monkeypatch):
+    monkeypatch.setenv("TRANSCRIBE_TIMEOUT_S", "30")
+    monkeypatch.setenv("TRANSCRIBE_DEADLINE_S", "20")
+    with pytest.raises(ConfigError, match="TRANSCRIBE_TIMEOUT_S"):
+        Settings.load()
+    monkeypatch.setenv("TRANSCRIBE_DEADLINE_S", "30")
+    assert Settings.load().TRANSCRIBE_TIMEOUT_S == 30
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("TRANSCRIBE_RETRIES", "-1"),
+        ("TRANSCRIBE_RETRIES", "6"),
+        ("TRANSCRIBE_RETRY_WAIT_S", "-1"),
+        ("TRANSCRIBE_DEADLINE_S", "0"),
+        ("VOICE_MAX_SECONDS", "0"),
+        ("VOICE_DAILY_TOKENS", "0"),
+        ("VOICE_GLOBAL_DAILY_TOKENS", "0"),
+        ("VOICE_MIN_BITRATE_BPS", "0"),
+    ],
+)
+def test_transcription_numbers_are_bounded(env, monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ConfigError, match=name):
+        Settings.load()
+
+
+def test_the_transcription_keys_are_secrets(env, monkeypatch):
+    from agent import logs
+
+    for name in ("TRANSCRIBE_API_KEY", "TRANSCRIBE_FALLBACK_API_KEY"):
+        env.write_text(f"{name}: leaked\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match=name):
+            Settings.load()
+    env.write_text("TRANSCRIBE_FALLBACK_MODEL: gemini/gemini-3.7-flash\n", encoding="utf-8")
+    monkeypatch.setenv("TRANSCRIBE_FALLBACK_API_KEY", "fallback-sentinel-9")
+    monkeypatch.setattr(logs, "_SECRETS", set())
+    Settings.load()
+    assert {"transcribe-key-1234", "fallback-sentinel-9"} <= logs._SECRETS
+
+
+def test_a_short_or_blank_transcription_key_is_refused(env, monkeypatch):
+    monkeypatch.setenv("TRANSCRIBE_API_KEY", "abc1234")
+    with pytest.raises(ConfigError, match="TRANSCRIBE_API_KEY"):
+        Settings.load()
+    monkeypatch.setenv("TRANSCRIBE_API_KEY", "  ")
+    with pytest.raises(ConfigError, match="TRANSCRIBE_API_KEY"):
+        Settings.load()
+
+
+@pytest.mark.parametrize("variable", ["GEMINI_API_KEY", "GOOGLE_API_KEY"])
+def test_a_key_the_sdk_reads_from_the_environment_satisfies_a_gemini_model(env, monkeypatch, variable):
+    monkeypatch.delenv("TRANSCRIBE_API_KEY")
+    monkeypatch.setenv(variable, "sdk-env-key-1234")
+    s = Settings.load()
+    # Nothing is passed explicitly: LiteLLM finds the variable on its own.
+    assert s.transcribe_api_key() is None
+
+
+def test_a_blank_sdk_variable_does_not_count_as_a_key(env, monkeypatch):
+    monkeypatch.delenv("TRANSCRIBE_API_KEY")
+    monkeypatch.setenv("GEMINI_API_KEY", "  ")
+    with pytest.raises(ConfigError, match="TRANSCRIBE_API_KEY"):
         Settings.load()

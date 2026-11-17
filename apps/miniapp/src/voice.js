@@ -538,6 +538,14 @@
         signal: controller.signal,
       };
 
+      function clearUploadState() {
+        if (uploadObj.timeoutId !== null) {
+          try { clearTimer(uploadObj.timeoutId); } catch (e) { /* ignore */ }
+          uploadObj.timeoutId = null;
+        }
+        if (activeUpload === uploadObj) activeUpload = null;
+      }
+
       uploadObj.timeoutId = setTimer(function () {
         uploadObj.timeoutId = null;
         if (activeUpload !== uploadObj) return;
@@ -562,15 +570,14 @@
       }
 
       fetchPromise.then(function (res) {
-        if (uploadObj.timeoutId !== null) {
-          try { clearTimer(uploadObj.timeoutId); } catch (e) { /* ignore */ }
-          uploadObj.timeoutId = null;
+        if (uploadObj.abortedBy) {
+          clearUploadState();
+          return;
         }
-        if (activeUpload === uploadObj) activeUpload = null;
-        if (uploadObj.abortedBy === 'cancel' || uploadObj.abortedBy === 'timeout') return;
 
         return readResponseJson(res).then(function (body) {
-          if (uploadObj.abortedBy === 'cancel' || uploadObj.abortedBy === 'timeout') return;
+          clearUploadState();
+          if (uploadObj.abortedBy) return;
           if (!res || !res.ok) {
             dispatch({
               type: 'TRANSCRIBE_ERROR',
@@ -596,13 +603,9 @@
             text: body.text,
           });
         });
-      }, function (err) {
-        if (uploadObj.timeoutId !== null) {
-          try { clearTimer(uploadObj.timeoutId); } catch (e) { /* ignore */ }
-          uploadObj.timeoutId = null;
-        }
-        if (activeUpload === uploadObj) activeUpload = null;
-        if (uploadObj.abortedBy === 'cancel' || uploadObj.abortedBy === 'timeout') return;
+      }).then(null, function (err) {
+        clearUploadState();
+        if (uploadObj.abortedBy) return;
         var code = err && err.name === 'AbortError' ? 'timeout' : 'network_error';
         dispatch({
           type: 'TRANSCRIBE_ERROR',

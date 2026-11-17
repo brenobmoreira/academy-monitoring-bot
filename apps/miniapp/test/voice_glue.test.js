@@ -1360,5 +1360,85 @@ test('C6b-fix1: cancelled recording late ondataavailable/onstop/onerror cannot p
   assert.equal(ctrl.state().status, 'transcribed');
 });
 
+test('C6b-fix2: 45 s timeout and cancel abort controller remain active while res.json() is pending after headers', async () => {
+  let nowMs = T_MS;
+  const storage = memoryStorage({ [C.VOICE_CONSENT_KEY]: '1' });
+  const { FakeMediaRecorder, instances } = makeFakeRecorderClass({ syncOnStop: true });
+  const timers = makeFakeTimers();
+  const requests = [];
+
+  const ctrl = V.createVoiceController({
+    storage,
+    session: makeTestSession(),
+    clock: () => nowMs,
+    getUserMedia: async () => makeFakeStream(1),
+    MediaRecorder: FakeMediaRecorder,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    fetch: async (_url, init) => {
+      const bodyDeferred = makeDeferred();
+      requests.push({ init, bodyDeferred });
+      // Headers arrive immediately; res.json() remains pending.
+      return {
+        ok: true,
+        status: 200,
+        json: () => bodyDeferred.promise,
+      };
+    },
+  });
+
+  // Part A: headers arrive, json() stalls -> 45 s timer stays active and aborts -> timeout error
+  ctrl.start();
+  await flushMicrotasks();
+  instances[0].emitChunk(new Uint8Array([1, 2, 3]));
+  nowMs += 1500;
+  ctrl.stop();
+  await flushMicrotasks();
+
+  assert.equal(requests.length, 1);
+  assert.equal(ctrl.state().status, 'sending');
+  assert.equal(requests[0].init.signal.aborted, false);
+  const timeoutEntry1 = [...timers.timers.entries()].find(([, t]) => t.ms === 45_000);
+  assert.ok(timeoutEntry1, '45 s timer must remain active while res.json() is pending');
+
+  nowMs += 45_000;
+  timers.timers.delete(timeoutEntry1[0]);
+  timeoutEntry1[1].fn();
+  assert.equal(requests[0].init.signal.aborted, true);
+  assert.equal(ctrl.state().status, 'error');
+  assert.equal(ctrl.state().error.code, 'timeout');
+  assert.equal(ctrl.state().error.canRetry, true);
+  assert.ok(ctrl.blob());
+
+  // Late body resolution after timeout must be ignored
+  requests[0].bodyDeferred.resolve({ v: 1, id: 'a'.repeat(32), text: 'late body' });
+  await flushMicrotasks();
+  assert.equal(ctrl.state().status, 'error');
+  assert.equal(ctrl.state().error.code, 'timeout');
+
+  // Part B: retry -> headers arrive, json() pending -> cancel() must abort signal and clear timer
+  nowMs += 1000;
+  ctrl.retry();
+  await flushMicrotasks();
+
+  assert.equal(requests.length, 2);
+  assert.equal(ctrl.state().status, 'sending');
+  assert.equal(requests[1].init.signal.aborted, false);
+  assert.ok([...timers.timers.values()].some((t) => t.ms === 45_000));
+
+  ctrl.cancel();
+  assert.equal(ctrl.state().status, 'idle');
+  assert.equal(requests[1].init.signal.aborted, true, 'cancel during pending res.json() must abort signal');
+  assert.equal(ctrl.blob(), null);
+  assert.equal(timers.timers.size, 0);
+
+  const abortErr = new Error('aborted');
+  abortErr.name = 'AbortError';
+  requests[1].bodyDeferred.reject(abortErr);
+  await flushMicrotasks();
+  assert.equal(ctrl.state().status, 'idle');
+});
+
+
 
 

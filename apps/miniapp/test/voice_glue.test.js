@@ -1439,6 +1439,86 @@ test('C6b-fix2: 45 s timeout and cancel abort controller remain active while res
   assert.equal(ctrl.state().status, 'idle');
 });
 
+test('C6b-fix3: global media APIs (bound getUserMedia & MediaRecorder) work when omitted or undefined, while null disables', async () => {
+  const voiceCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'voice.js'), 'utf8');
+  const coreCode = fs.readFileSync(path.join(__dirname, '..', 'src', 'core.js'), 'utf8');
+  const timers = makeFakeTimers();
+  const { FakeMediaRecorder, instances } = makeFakeRecorderClass();
+  const gumCalls = [];
+
+  const mediaDevices = {
+    getUserMedia(constraints) {
+      if (this !== mediaDevices) {
+        return Promise.reject(new TypeError('Illegal invocation'));
+      }
+      gumCalls.push(constraints);
+      return Promise.resolve(makeFakeStream(1));
+    },
+  };
+
+  assert.equal(typeof mediaDevices.getUserMedia, 'function');
+
+  const sandbox = {
+    ShapeCore: C,
+    navigator: { mediaDevices },
+    MediaRecorder: FakeMediaRecorder,
+    Blob,
+    AbortController,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    console,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(coreCode, sandbox);
+  vm.runInContext(voiceCode, sandbox);
+
+  const storage = memoryStorage({ [C.VOICE_CONSENT_KEY]: '1' });
+
+  // 1. Omitted media properties use global navigator.mediaDevices.getUserMedia (bound to mediaDevices) & global MediaRecorder
+  const ctrl1 = sandbox.ShapeVoice.createVoiceController({
+    storage,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  ctrl1.start();
+  await flushMicrotasks();
+  assert.equal(gumCalls.length, 1);
+  assert.equal(instances.length, 1);
+  assert.equal(ctrl1.state().status, 'listening');
+  ctrl1.cancel();
+
+  // 2. Properties explicitly set to undefined behave like omitted properties
+  const ctrl2 = sandbox.ShapeVoice.createVoiceController({
+    storage,
+    getUserMedia: undefined,
+    MediaRecorder: undefined,
+    fetch: undefined,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  ctrl2.start();
+  await flushMicrotasks();
+  assert.equal(gumCalls.length, 2);
+  assert.equal(instances.length, 2);
+  assert.equal(ctrl2.state().status, 'listening');
+  ctrl2.cancel();
+
+  // 3. Explicit null still disables the media API cleanly
+  const ctrl3 = sandbox.ShapeVoice.createVoiceController({
+    storage,
+    getUserMedia: null,
+    MediaRecorder: null,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+  });
+  ctrl3.start();
+  await flushMicrotasks();
+  assert.equal(gumCalls.length, 2);
+  assert.equal(ctrl3.state().status, 'error');
+  assert.equal(ctrl3.state().error.code, 'api_missing');
+});
+
+
 
 
 

@@ -1890,16 +1890,19 @@
         expires_at: Math.floor(Date.now() / 1000) + 43200,
       };
       voiceSessionResult = { ok: true, status: 'ready', session: previewSession, showButton: true, canRecord: true };
-      voiceCtrl = V.createVoiceController({
+      var ctrlOpts = {
         storage: storage,
         fetch: previewFetch,
         session: previewSession,
-        getUserMedia: useReal ? undefined : fallbackMedia.getUserMedia,
-        MediaRecorder: useReal ? undefined : fallbackMedia.MediaRecorder,
         onState: function (next, prev) { syncVoiceUi(prev); },
         onSendData: sendVoicePayload,
         onPlanB: openPlanB,
-      });
+      };
+      if (!useReal) {
+        ctrlOpts.getUserMedia = fallbackMedia.getUserMedia;
+        ctrlOpts.MediaRecorder = fallbackMedia.MediaRecorder;
+      }
+      voiceCtrl = V.createVoiceController(ctrlOpts);
       syncVoiceDock();
       return;
     }

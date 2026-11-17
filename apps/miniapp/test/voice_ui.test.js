@@ -693,3 +693,49 @@ test('C6b-4 visibilitychange, viewportChanged collapse, and cancelled permission
   assert.equal(p.doc.getElementById('voice-panel').hidden, true);
   assert.equal(p.doc.getElementById('view').classList.contains('is-voice-locked'), false);
 });
+
+test('C6b-fix3: preview (!inTelegram) with real global getUserMedia and MediaRecorder starts recorder without api_missing', async () => {
+  const media = makeFakeMediaHarness();
+  let gumCalls = 0;
+  const mediaDevices = {
+    getUserMedia(constraints) {
+      if (this !== mediaDevices) {
+        return Promise.reject(new TypeError('Illegal invocation'));
+      }
+      gumCalls += 1;
+      return media.getUserMedia(constraints);
+    },
+  };
+  assert.equal(typeof mediaDevices.getUserMedia, 'function');
+
+  const p = await bootApp({
+    preview: true,
+    telegram: null,
+    navigator: { mediaDevices },
+    globals: { MediaRecorder: media.MediaRecorder },
+    fetch: async (url) => {
+      assert.equal(url, 'dev/sample-catalog.json');
+      return { ok: true, status: 200, json: async () => SAMPLE };
+    },
+  });
+
+  p.doc.getElementById('dock-mic').click();
+  p.button('Entendi').click();
+  await flushMicrotasks();
+
+  assert.equal(gumCalls, 1, 'real global navigator.mediaDevices.getUserMedia must be called');
+  assert.equal(media.recorders.length, 1, 'real global MediaRecorder must start');
+  assert.equal(p.doc.getElementById('shape').getAttribute('data-state'), 'listening');
+  assert.equal(p.doc.getElementById('voice-panel').textContent.includes('Este aparelho não grava aqui.'), false);
+
+  p.advanceMs(1500);
+  p.button('Parar').click();
+  await flushMicrotasks();
+  p.runPendingTimers((t) => t.ms === 250);
+  await flushMicrotasks();
+
+  const ta = p.doc.getElementById('voice-textarea');
+  assert.ok(ta);
+  assert.equal(ta.value, p.ctx.ShapeVoiceStub.SAMPLES.workout);
+});
+

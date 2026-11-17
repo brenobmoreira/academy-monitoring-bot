@@ -17,12 +17,12 @@
   }
 
   function pickStorage(opts) {
-    if (opts && Object.prototype.hasOwnProperty.call(opts, 'storage')) return opts.storage || null;
+    if (opts && opts.storage !== undefined) return opts.storage || null;
     return getDefaultStorage();
   }
 
   function pickFetch(opts) {
-    if (opts && Object.prototype.hasOwnProperty.call(opts, 'fetch')) return opts.fetch || null;
+    if (opts && opts.fetch !== undefined) return opts.fetch || null;
     if (root && typeof root.fetch === 'function') return root.fetch.bind(root);
     if (typeof fetch === 'function') return fetch;
     return null;
@@ -299,7 +299,7 @@
   }
 
   function pickGetUserMedia(opts) {
-    if (opts && Object.prototype.hasOwnProperty.call(opts, 'getUserMedia')) return opts.getUserMedia || null;
+    if (opts && opts.getUserMedia !== undefined) return opts.getUserMedia || null;
     try {
       var md = root && root.navigator && root.navigator.mediaDevices;
       if (md && typeof md.getUserMedia === 'function') return md.getUserMedia.bind(md);
@@ -310,7 +310,7 @@
   }
 
   function pickMediaRecorder(opts) {
-    if (opts && Object.prototype.hasOwnProperty.call(opts, 'MediaRecorder')) return opts.MediaRecorder || null;
+    if (opts && opts.MediaRecorder !== undefined) return opts.MediaRecorder || null;
     try {
       if (root && typeof root.MediaRecorder === 'function') return root.MediaRecorder;
     } catch (e) {
@@ -325,7 +325,7 @@
   }
 
   function buildAudioBlob(opts, chunks, mime) {
-    var BlobCtor = opts && Object.prototype.hasOwnProperty.call(opts, 'Blob')
+    var BlobCtor = (opts && opts.Blob !== undefined)
       ? opts.Blob
       : (root && typeof root.Blob === 'function' ? root.Blob : (typeof Blob === 'function' ? Blob : null));
     if (typeof BlobCtor === 'function') return new BlobCtor(chunks, { type: mime || '' });
@@ -333,7 +333,7 @@
   }
 
   function pickAbortController(opts) {
-    if (opts && Object.prototype.hasOwnProperty.call(opts, 'AbortController')) return opts.AbortController || null;
+    if (opts && opts.AbortController !== undefined) return opts.AbortController || null;
     if (root && typeof root.AbortController === 'function') return root.AbortController;
     if (typeof AbortController === 'function') return AbortController;
     return null;
@@ -391,7 +391,7 @@
     var setTimer = pickTimer(o, 'setTimeout', setTimeout);
     var clearTimer = pickTimer(o, 'clearTimeout', clearTimeout);
     var hasUploadConfig = Boolean(
-      Object.prototype.hasOwnProperty.call(o, 'fetch') ||
+      o.fetch !== undefined ||
       o.vu ||
       o.session !== undefined ||
       typeof o.getSession === 'function'

@@ -933,6 +933,3 @@ test('C6b-fix5: real window pagehide stops tracks/upload and stale permission A 
   assert.equal(p.doc.getElementById('voice-panel').hidden, true);
   assert.equal(p.doc.getElementById('view').classList.contains('is-voice-locked'), false);
 });
-
-
-

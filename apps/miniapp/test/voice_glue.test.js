@@ -1604,8 +1604,3 @@ test('C6b-fix3: global media APIs (bound getUserMedia & MediaRecorder) work when
   assert.equal(ctrl3.state().status, 'error');
   assert.equal(ctrl3.state().error.code, 'api_missing');
 });
-
-
-
-
-

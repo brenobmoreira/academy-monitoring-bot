@@ -839,20 +839,117 @@
 
   /* exercise picker (bottom sheet) ---------------------------------------------------------- */
 
+  var sheetOpener = null;
+  var sheetFocusTimer = null;
+
+  function isElementConnected(el) {
+    if (!el) return false;
+    if (typeof el.isConnected === 'boolean') return el.isConnected;
+    if (typeof document.contains === 'function') return document.contains(el);
+    for (var cur = el; cur; cur = cur.parentNode) {
+      if (cur === document || cur === document.body || cur === document.documentElement) return true;
+    }
+    return false;
+  }
+
+  function isSheetElVisible(el) {
+    if (!el || el.hidden) return false;
+    for (var cur = el; cur && cur !== document && cur.nodeType !== 9; cur = cur.parentNode) {
+      if (cur.hidden || (cur.hasAttribute && cur.hasAttribute('hidden'))) return false;
+      if (cur.style && (cur.style.display === 'none' || cur.style.visibility === 'hidden')) return false;
+      if (cur === els.sheet) break;
+    }
+    if (typeof window.getComputedStyle === 'function') {
+      try {
+        var cs = window.getComputedStyle(el);
+        if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return false;
+      } catch (e) { /* ignore */ }
+    }
+    return true;
+  }
+
+  function isSheetFocusable(el) {
+    if (!el || !el.tagName || el.disabled || (el.hasAttribute && el.hasAttribute('disabled'))) return false;
+    if (!isSheetElVisible(el)) return false;
+    var ti = el.getAttribute ? el.getAttribute('tabindex') : null;
+    if (ti === '-1') return false;
+    var tag = el.tagName;
+    if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return true;
+    if (tag === 'A' && el.hasAttribute && el.hasAttribute('href')) return true;
+    return ti !== null && ti !== '';
+  }
+
+  function sheetFocusables() {
+    var out = [];
+    function walk(node) {
+      var kids = node && node.children ? node.children : [];
+      for (var i = 0; i < kids.length; i++) {
+        var c = kids[i];
+        if (isSheetFocusable(c)) out.push(c);
+        walk(c);
+      }
+    }
+    walk(els.sheet);
+    return out;
+  }
+
+  function onSheetKeydown(e) {
+    if (!S.sheetOpen) return;
+    if (e.key === 'Escape') {
+      closeSheet();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    var list = sheetFocusables();
+    if (!list.length) {
+      if (typeof e.preventDefault === 'function') e.preventDefault();
+      var titleEl = $('sheet-title');
+      if (titleEl && typeof titleEl.focus === 'function') titleEl.focus();
+      return;
+    }
+    var first = list[0];
+    var last = list[list.length - 1];
+    var idx = list.indexOf(document.activeElement);
+    if (e.shiftKey) {
+      if (idx <= 0) {
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+        last.focus();
+      }
+    } else if (idx < 0 || idx === list.length - 1) {
+      if (typeof e.preventDefault === 'function') e.preventDefault();
+      first.focus();
+    }
+  }
+
   function openSheet(title, content, focusEl) {
-    els.sheet.replaceChildren(h('div', { class: 'sheet-grip', 'aria-hidden': 'true' }), h('h2', { class: 'sheet-title', id: 'sheet-title', text: title }), content);
+    if (!S.sheetOpen) sheetOpener = document.activeElement || null;
+    clearTimeout(sheetFocusTimer);
+    sheetFocusTimer = null;
+    var titleEl = h('h2', { class: 'sheet-title', id: 'sheet-title', tabindex: '-1', text: title });
+    els.sheet.replaceChildren(h('div', { class: 'sheet-grip', 'aria-hidden': 'true' }), titleEl, content);
     cancelReview();
     motion('keep', els.sheet); // reopened while it was still sliding out
     motion('keep', els.backdrop);
     els.sheet.hidden = false;
     els.backdrop.hidden = false;
     S.sheetOpen = true;
+    document.removeEventListener('keydown', onSheetKeydown);
+    document.addEventListener('keydown', onSheetKeydown);
     updateBack();
     syncVoiceDock();
-    if (focusEl) setTimeout(function () { focusEl.focus(); }, 60);
+    var target = focusEl || sheetFocusables()[0] || titleEl;
+    if (target && typeof target.focus === 'function') {
+      sheetFocusTimer = setTimeout(function () {
+        sheetFocusTimer = null;
+        if (S.sheetOpen && typeof target.focus === 'function') target.focus();
+      }, 60);
+    }
   }
   /** The state closes at once; the sheet and backdrop only finish sliding out (taps pass through). */
   function closeSheet() {
+    clearTimeout(sheetFocusTimer);
+    sheetFocusTimer = null;
+    document.removeEventListener('keydown', onSheetKeydown);
     [els.sheet, els.backdrop].forEach(function (el) {
       if (el.hidden) return;
       if (!motion('out', el, function () { el.hidden = true; })) el.hidden = true;
@@ -860,9 +957,11 @@
     S.sheetOpen = false;
     updateBack();
     syncVoiceDock();
+    var opener = sheetOpener;
+    sheetOpener = null;
+    if (opener && isElementConnected(opener) && typeof opener.focus === 'function') opener.focus();
   }
   els.backdrop.addEventListener('click', closeSheet);
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && S.sheetOpen) closeSheet(); });
 
   function openExercisePicker() {
     var present = cards().map(function (c) { return C.fold(c.name); });

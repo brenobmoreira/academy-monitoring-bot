@@ -22,9 +22,10 @@ from urllib.parse import quote
 
 import pytest
 from pydantic import ValidationError
+from pydantic_settings import SettingsConfigDict
 
 from agent import auth, logs
-from agent.voice_settings import AuthSettings
+from agent.voice_settings import AuthSettings, validation_problems
 
 pytestmark = pytest.mark.unit
 
@@ -1221,3 +1222,245 @@ def test_lifetimes_out_of_range_are_refused(auth_env, name, value):
     auth_env.setenv(name, value)
     with pytest.raises(ValidationError):
         load_auth_settings()
+
+
+# --- review of 0d4230b: pruning must not reopen a replay -------------------------------------------
+
+
+def test_a_key_pruned_from_the_used_set_cannot_be_claimed_again_by_a_stale_clock():
+    used = auth.UsedSet()
+    assert used.claim("j1", T0 + 10, now=T0) is True
+    assert used.claim("other", T0 + 99, now=T0 + 11) is True  # prunes j1
+    assert len(used) == 1
+    assert used.claim("j1", T0 + 10, now=T0 + 5) is False  # a request suspended with an old `now`
+    assert used.claim("j1", T0 + 10, now=T0 + 11) is False
+    assert used.claim("never-seen", T0 + 10, now=T0 + 5) is False  # below the watermark: maybe pruned
+    assert len(used) == 1  # and a refused claim stores nothing
+
+
+def test_the_watermark_only_moves_forward_and_spares_what_can_still_be_presented():
+    used = auth.UsedSet()
+    assert used.claim("a", T0 + 50, now=T0 + 40) is True
+    assert used.claim("b", T0 + 99, now=T0) is True  # an old `now` does not lower the watermark
+    assert used.claim("c", T0 + 39, now=T0) is False
+    assert used.claim("d", T0 + 40, now=T0) is True  # its last second is the watermark: never pruned
+    assert used.claim("d", T0 + 40, now=T0 + 40) is False
+
+
+def test_a_redeemed_code_stays_redeemed_after_the_set_is_pruned(world):
+    code = world.code(ALICE)  # exp T0 + 900
+    later = world.code(BOB, at(100))  # exp T0 + 1000
+    assert world.codes.verify(code, at(899))
+    assert world.codes.verify(later, at(901))  # a newer exchange prunes the first entry
+    assert len(world.codes.used) == 1
+    # the same code again, by a request whose clock was read before the prune
+    assert code_error(world, code, at(899)) == "credential_used"
+
+
+def test_redeemed_init_data_stays_redeemed_after_the_set_is_pruned(world):
+    credential = init_data()  # presentable until T0 + 300
+    assert world.init_data.verify(credential, at(300))
+    assert world.init_data.verify(init_data(auth_date=T0 + 200), at(301))  # prunes the first entry
+    assert len(world.init_data.used) == 1
+    assert init_error(world, credential, at(300)) == "credential_used"
+
+
+class _Interleaved:
+    """An authorizer that lets other requests run to completion in the middle of a redemption:
+    after the expiry check that read an old `now`, before the claim."""
+
+    def __init__(self, inner: auth.Authorizer, meanwhile: Any) -> None:
+        self._inner = inner
+        self._meanwhile = meanwhile
+
+    def allows(self, principal: auth.Principal, scope: str) -> bool:
+        meanwhile, self._meanwhile = self._meanwhile, None
+        if meanwhile is not None:
+            meanwhile()
+        return self._inner.allows(principal, scope)
+
+
+def test_a_redemption_suspended_across_a_prune_cannot_redeem_the_code_again(world):
+    used = auth.UsedSet()
+    fast = auth.LinkCodes(world.keys, world.directory, world.authorizer, used, ttl_s=900)
+    code = fast.issue(auth.telegram_principal(ALICE), NOW)[0]
+    later = fast.issue(auth.telegram_principal(BOB), at(100))[0]
+
+    def meanwhile() -> None:
+        assert fast.verify(code, at(899))  # the code is redeemed by another request...
+        assert fast.verify(later, at(901))  # ...and a newer exchange prunes its entry
+        assert len(used) == 1
+
+    slow = auth.LinkCodes(
+        world.keys, world.directory, _Interleaved(world.authorizer, meanwhile), used, ttl_s=900
+    )
+    with pytest.raises(auth.AuthError) as err:
+        slow.verify(code, at(899))  # read its clock first, reaches the claim last
+    assert err.value.code == "credential_used"
+
+
+def test_init_data_suspended_across_a_prune_cannot_be_redeemed_again(world):
+    used = auth.UsedSet()
+    fast = auth.TelegramInitData(BOT_TOKEN, world.authorizer, used, max_age_s=300)
+    credential = init_data()
+
+    def meanwhile() -> None:
+        assert fast.verify(credential, at(300))
+        assert fast.verify(init_data(auth_date=T0 + 200), at(301))
+        assert len(used) == 1
+
+    slow = auth.TelegramInitData(BOT_TOKEN, _Interleaved(world.authorizer, meanwhile), used, max_age_s=300)
+    with pytest.raises(auth.AuthError) as err:
+        slow.verify(credential, at(300))
+    assert err.value.code == "credential_used"
+
+
+# --- review of 0d4230b: nothing of a token is decoded before its MAC -------------------------------
+
+
+def test_nothing_of_a_token_is_decoded_before_its_mac_is_verified(world, monkeypatch):
+    code, session = world.code(), world.session()
+    code_head, code_mac = code.rsplit(".", 1)
+    session_head, session_mac = session.rsplit(".", 1)
+    twin = "A" if code_mac[0] != "A" else "B"
+    forged_codes = [
+        sign("c1", world.keys.session, compact(good_code_payload(world))),  # another key
+        f"{code_head}.{twin}{code_mac[1:]}",  # one character of the MAC
+        f"{code_head}.{code_mac[:-1]}",  # truncated MAC
+        f"{code_head}.{code_mac}A",  # longer MAC
+        f"{code_head}.{session_mac}",  # the MAC of another token
+        f"c1.{b64(b'not json')}.{code_mac}",  # another payload under a real MAC
+        f"c1.!!!!.{code_mac}",
+        "c1..",
+    ]
+    forged_sessions = [
+        sign("s1", world.keys.code, compact(good_session_payload(world))),
+        f"{session_head}.{code_mac}",
+        f"{session_head}.{session_mac[:-1]}",
+    ]
+    decoded: list[str] = []
+    real = auth.b64url_decode
+
+    def spy(text: str) -> bytes:
+        decoded.append(text)
+        return real(text)
+
+    monkeypatch.setattr(auth, "b64url_decode", spy)
+    for token in forged_codes:
+        assert code_error(world, token) == "unauthenticated", token[:8]
+    for token in forged_sessions:
+        assert session_error(world, token) == "unauthenticated", token[:8]
+    assert decoded == []
+    # the spy is on the path: a token with a valid MAC has its payload, and only it, decoded
+    assert world.codes.verify(code, NOW)
+    assert world.sessions.verify(session, "voice", NOW)
+    assert decoded == [code.split(".")[1], session.split(".")[1]]
+
+
+# --- review of 0d4230b: a settings error shows no value --------------------------------------------
+
+SECRET_SENTINEL = "SENTINELA-SEGREDO-4d1c"  # too short to be accepted
+CHAT_SENTINEL = 7_700_000_001  # made up
+REVOCATION_SENTINEL = "SENTINELA-REVOGACAO-8e2f"
+TTL_SENTINEL = "SENTINELA-TTL-55a0"
+SETTINGS_SENTINELS = ("SENTINELA", str(CHAT_SENTINEL), str(CHAT_SENTINEL + 1))
+
+
+def _assert_shows_no_value(err: ValidationError, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.clear()
+    log = logging.getLogger("tests.auth_settings")
+    log.error("invalid settings: %s", err)
+    log.error("invalid settings: %r", err)
+    log.error("invalid settings: %s", logs.describe(err))
+    log.error("invalid settings: %s", "; ".join(validation_problems(err)))
+    shown = (
+        str(err)
+        + repr(err)
+        + caplog.text
+        + "".join(record.getMessage() for record in caplog.records)
+        + repr(err.errors(include_input=False))
+        + err.json(include_input=False)
+        + repr(validation_problems(err))
+    )
+    for sentinel in (*SETTINGS_SENTINELS, SECRET):
+        assert sentinel not in shown, sentinel
+    assert "input_value" not in shown
+
+
+@pytest.mark.parametrize(
+    ("env", "fields"),
+    [
+        ({"APP_AUTH_SECRET": SECRET_SENTINEL}, ["APP_AUTH_SECRET"]),
+        (
+            {
+                "APP_AUTH_SECRET": SECRET,
+                "APP_SESSION_NOT_BEFORE": f"{CHAT_SENTINEL}:5,{CHAT_SENTINEL + 1}:{REVOCATION_SENTINEL}",
+            },
+            ["APP_SESSION_NOT_BEFORE"],
+        ),
+        ({"APP_SESSION_NOT_BEFORE": f"{REVOCATION_SENTINEL}:5"}, ["APP_SESSION_NOT_BEFORE"]),
+        ({"APP_SESSION_NOT_BEFORE": f"{CHAT_SENTINEL}"}, ["APP_SESSION_NOT_BEFORE"]),
+        ({"APP_AUTH_SECRET": SECRET, "APP_CODE_TTL_S": TTL_SENTINEL}, ["APP_CODE_TTL_S"]),
+        (
+            {
+                "APP_AUTH_SECRET": SECRET_SENTINEL,
+                "APP_SESSION_NOT_BEFORE": f"{CHAT_SENTINEL}:{REVOCATION_SENTINEL}",
+                "APP_SESSION_TTL_S": TTL_SENTINEL,
+                "INITDATA_MAX_AGE_S": "-1",
+            },
+            ["APP_AUTH_SECRET", "APP_SESSION_NOT_BEFORE", "APP_SESSION_TTL_S", "INITDATA_MAX_AGE_S"],
+        ),
+    ],
+)
+def test_a_settings_error_names_the_field_and_shows_no_value(auth_env, caplog, env, fields):
+    for name, value in env.items():
+        auth_env.setenv(name, value)
+    with pytest.raises(ValidationError) as err:
+        load_auth_settings()
+    _assert_shows_no_value(err.value, caplog)
+    problems = validation_problems(err.value)
+    assert sorted(problem.split(":")[0] for problem in problems) == sorted(fields)
+    for name in fields:
+        assert name in str(err.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {CHAT_SENTINEL: REVOCATION_SENTINEL},
+        {CHAT_SENTINEL: -1},
+        {CHAT_SENTINEL: True},
+        {CHAT_SENTINEL: 1.5},
+        {REVOCATION_SENTINEL: 5},
+        {str(CHAT_SENTINEL): 5},
+        {True: 5},
+        [f"{CHAT_SENTINEL}:5"],
+        CHAT_SENTINEL,
+    ],
+)
+def test_a_not_before_from_a_file_is_checked_without_showing_its_keys(auth_env, caplog, value):
+    """A YAML mapping reaches the field already parsed; its keys are chat ids and must not become
+    the location of an error."""
+    with pytest.raises(ValidationError) as err:
+        AuthSettings(_env_file=None, APP_SESSION_NOT_BEFORE=value)  # type: ignore[call-arg]
+    _assert_shows_no_value(err.value, caplog)
+    assert validation_problems(err.value) == [
+        "APP_SESSION_NOT_BEFORE: Value error, must be a comma-separated list of <chat_id>:<unix seconds>"
+    ]
+
+
+def test_a_not_before_mapping_of_integers_is_accepted(auth_env):
+    settings = AuthSettings(_env_file=None, APP_SESSION_NOT_BEFORE={CHAT_SENTINEL: 5})  # type: ignore[call-arg]
+    assert settings.APP_SESSION_NOT_BEFORE == {CHAT_SENTINEL: 5}
+
+
+def test_a_settings_class_that_inherits_the_mixin_hides_values_too(auth_env, caplog):
+    class Service(AuthSettings):
+        model_config = SettingsConfigDict(extra="ignore")
+        OTHER: int = 1
+
+    auth_env.setenv("APP_AUTH_SECRET", SECRET_SENTINEL)
+    auth_env.setenv("OTHER", TTL_SENTINEL)
+    with pytest.raises(ValidationError) as err:
+        Service(_env_file=None)  # type: ignore[call-arg]
+    _assert_shows_no_value(err.value, caplog)

@@ -231,20 +231,26 @@ def _seal(prefix: str, key: bytes, payload: dict[str, object]) -> str:
 
 
 def _open(prefix: str, key: bytes, token: object) -> dict[str, object] | None:
-    """The payload of `<prefix>.<B>.<MAC>`, or None. Order of §6.6: length, prefix, strict
-    base64url, MAC in constant time, and only then the JSON, so nothing unsigned is parsed."""
+    """The payload of `<prefix>.<B>.<MAC>`, or None. Order: length, prefix, alphabet, MAC in
+    constant time, and only then the payload is decoded (strict base64url) and parsed, so nothing
+    unsigned is ever decoded.
+
+    The MAC is compared as text with the one spelling this module writes, which also refuses a
+    padded or non-canonical MAC without decoding it."""
     if not isinstance(token, str) or len(token) > MAX_TOKEN_LEN:
         return None
     parts = token.split(".")
     if len(parts) != 3 or parts[0] != prefix:
         return None
     body, signature = parts[1], parts[2]
-    payload, given = _decoded(body), _decoded(signature)
-    if payload is None or given is None:
+    # Syntax only (ASCII letters of the alphabet): what the MAC and the comparison need.
+    if _B64URL.fullmatch(body) is None or _B64URL.fullmatch(signature) is None:
         return None
-    if not hmac.compare_digest(_mac(key, f"{prefix}.{body}"), given):
+    expected = b64url_encode(_mac(key, f"{prefix}.{body}"))
+    if not hmac.compare_digest(expected.encode("ascii"), signature.encode("ascii")):
         return None
-    return _parsed(payload)
+    payload = _decoded(body)
+    return None if payload is None else _parsed(payload)
 
 
 # --- opaque reference and the Telegram directory (§6.3) --------------------------------------------
@@ -320,20 +326,29 @@ class ConfigRevocations:
 
 
 class UsedSet:
-    """The one-time keys already redeemed in this process, each kept until its expiry (§6.8 T4)."""
+    """The one-time keys already redeemed in this process, each kept until its expiry (§6.8 T4).
+
+    Forgetting a key must not make it redeemable again. Callers read their clock before they reach
+    claim(), so a request can arrive here with a `now` older than the one that pruned its key: it
+    passed its own expiry check, and the entry that would have refused it is gone. Hence the
+    watermark: the largest `now` ever seen. Every key whose expiry is below it may have been
+    pruned, so none of them can be claimed any more, whatever clock the caller holds."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._seen: dict[str, int] = {}
+        self._watermark = 0  # unix seconds; only ever grows
 
     def claim(self, key: str, exp: int, *, now: int) -> bool:
         """True for the first caller of `key`, False for every other, concurrent or later: the
-        check and the insertion happen under one lock. `exp` is the last second at which the
-        credential can still be presented; `now` only prunes what can no longer be."""
+        watermark, the check and the insertion are read and written under one lock. `exp` is the
+        last second at which the credential can still be presented."""
         with self._lock:
-            for old in [k for k, expiry in self._seen.items() if expiry < now]:
-                del self._seen[old]
-            if key in self._seen:
+            if now > self._watermark:
+                self._watermark = now
+                for old in [k for k, expiry in self._seen.items() if expiry < now]:
+                    del self._seen[old]
+            if exp < self._watermark or key in self._seen:
                 return False
             self._seen[key] = exp
             return True

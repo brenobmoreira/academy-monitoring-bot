@@ -21,6 +21,7 @@ from typing import Any
 import litellm
 from google.adk.models.lite_llm import LiteLlm, LiteLLMClient
 
+from agent.logs import describe
 from agent.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -103,7 +104,7 @@ class RetryingClient(LiteLLMClient):
                     log.warning(
                         "model %s unavailable (%s), attempt %d of %d",
                         current,
-                        type(err).__name__,
+                        describe(err),
                         attempt + 1,
                         self.retries + 1,
                     )

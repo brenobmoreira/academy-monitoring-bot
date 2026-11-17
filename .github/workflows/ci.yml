@@ -27,6 +27,7 @@ jobs:
             sheet:
               - 'apps/sheet/**'
               - 'apps/sheet4/**'
+              - 'apps/miniapp/**'
               - 'clients/**'
               - 'tools/**'
               - 'package.json'

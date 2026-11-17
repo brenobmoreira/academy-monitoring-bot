@@ -27,7 +27,11 @@
 
 
   --shadow: 0 0 0 1px var(--line);
+  --radius-sm: 12px;
+  --radius-md: 14px;
   --radius: 16px;
+  --radius-sheet: 26px;
+  --backdrop: rgba(28, 25, 23, 0.45);
 
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-num: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -61,6 +65,7 @@
   --alert: #f87171;
   --alert-ink: #1a0a02;
   --alert-soft: rgba(248, 113, 113, 0.12);
+  --backdrop: rgba(0, 0, 0, 0.6);
 
   color-scheme: dark;
 }
@@ -604,7 +609,7 @@ details.raw summary { min-height: 44px; display: flex; align-items: center; colo
 
 /* Bottom sheet ------------------------------------------------------------------------- */
 
-.sheet-backdrop { position: fixed; inset: 0; z-index: 20; background: rgba(10, 8, 30, 0.42); animation: backdrop-in 0.2s ease-out; }
+.sheet-backdrop { position: fixed; inset: 0; z-index: 20; background: var(--backdrop); animation: backdrop-in 0.2s ease-out; }
 @keyframes backdrop-in { from { opacity: 0; } }
 .sheet {
   position: fixed;
@@ -617,7 +622,9 @@ details.raw summary { min-height: 44px; display: flex; align-items: center; colo
   display: flex;
   flex-direction: column;
   padding: 8px var(--pad) calc(12px + var(--safe-bottom));
-  border-radius: 26px 26px 0 0;
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
   background: var(--surface);
   box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.2);
   animation: sheet-up 0.24s cubic-bezier(0.2, 0.9, 0.3, 1);
@@ -628,7 +635,14 @@ details.raw summary { min-height: 44px; display: flex; align-items: center; colo
 .sheet .results { overflow-y: auto; flex: 1; margin-top: 8px; }
 .sheet .result { border-bottom: 1px solid var(--line); border-radius: 0; min-height: 52px; }
 /* Meal totals use the same theme tokens as the plate, and wrap on narrow phones. */
-.meal-nutrition { margin: 12px 0 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; font-size: 14px; font-weight: 600; line-height: 1.6; font-variant-numeric: tabular-nums; }
+.meal-nutrition { margin: 12px 0 0; padding: 14px 16px; border: 0; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow); font-size: 14px; font-weight: 600; line-height: 1.6; font-variant-numeric: tabular-nums; }
+
+.sheet-col { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.mt-8 { margin-top: 8px; }
+.mt-12 { margin-top: 12px; }
+.mt-16 { margin-top: 16px; }
+.m-0 { margin: 0; }
+.p-16 { padding: 16px; }
 
 /* Voice -------------------------------------------------------------------------------- */
 

@@ -714,7 +714,7 @@
           h('div', {},
             stepper({ value: card.pain, step: 1, min: C.LIMITS.PAIN_MIN, max: C.LIMITS.PAIN_MAX, start: 0, label: 'dor de 0 a 10', integer: true,
               path: 'pain', say: 'Dor: 0 é nenhuma, 10 é parar na hora.', onChange: function (v) { card.pain = v; liveCard(i); } })),
-          h('p', { class: 'hint', style: 'margin:0', text: 'Vazio = não informado.' }))));
+          h('p', { class: 'hint m-0', text: 'Vazio = não informado.' }))));
     }
 
     if (card.showNote || !isBlank(card.note)) {
@@ -1000,7 +1000,7 @@
       }) : [h('li', { class: 'hint', text: options.length ? 'Nada com esse nome no catálogo.' : 'Todos os exercícios do catálogo já estão na lista.' })]);
     }
     fill();
-    openSheet('Adicionar exercício', h('div', { style: 'display:flex;flex-direction:column;min-height:0;flex:1' },
+    openSheet('Adicionar exercício', h('div', { class: 'sheet-col' },
       h('label', { class: 'search' }, icon('search'), input), list), input);
   }
 
@@ -1113,7 +1113,7 @@
       return h('div', {},
         h('label', { class: 'field-label' }, h('span', { text: 'Descrição' }), counter), ta, descErr,
         h('p', { class: 'sub-label', text: 'Quantidade (opcional)' }), dq,
-        h('div', { style: 'margin-top:8px' }, unitChips(c.dunit, function (u) { c.dunit = u; renderFood(); }, true)),
+        h('div', { class: 'mt-8' }, unitChips(c.dunit, function (u) { c.dunit = u; renderFood(); }, true)),
         h('p', { class: 'hint warn', text: 'Sem cálculo: o item entra no diário sem calorias nem macros.' }),
         h('button', {
           type: 'button', class: 'btn-primary',
@@ -1167,7 +1167,7 @@
     }
     var qty = qtyField(c.qty, 'Quantidade com vírgula vale: 82,5.', function (v) { c.qty = v; }, function () { return c.unit; });
     parts.push(h('p', { class: 'sub-label', text: 'Quantidade' }), qty,
-      h('div', { style: 'margin-top:8px' }, unitChips(c.unit, function (u) { c.unit = u; qty._refresh(); renderUnitsOnly(); })),
+      h('div', { class: 'mt-8' }, unitChips(c.unit, function (u) { c.unit = u; qty._refresh(); renderUnitsOnly(); })),
       h('p', { class: 'sub-label', text: 'Medição' }),
       h('div', { class: 'seg small', role: 'group', 'aria-label': 'Medição' }, C.MEASURES.map(function (m) {
         return h('button', {
@@ -1347,7 +1347,7 @@
         if (ex.pain !== undefined) lines.push('Dor: ' + ex.pain);
         if (ex.note) lines.push('Nota: ' + ex.note);
         return h('li', { class: 'review-item' }, h('b', { text: ex.name }), lines.map(function (l) { return h('span', { text: l }); }));
-      })) : h('p', { class: 'empty-plate', style: 'padding:16px', text: 'Sem exercícios: só marca a sessão como concluída.' });
+      })) : h('p', { class: 'empty-plate p-16', text: 'Sem exercícios: só marca a sessão como concluída.' });
     } else {
       facts = h('dl', { class: 'facts' },
         h('dt', { text: 'Data' }), h('dd', { text: dateLabel(args.date) }),
@@ -1383,7 +1383,7 @@
 
     els.review.replaceChildren(
       mascot('happy', null, C.pulsoSummary(pulsoContext())),
-      h('div', { class: 'view-head', style: 'margin-top:12px' },
+      h('div', { class: 'view-head mt-12' },
         h('h1', { class: 'view-title', text: 'Confira o envio' }),
         h('p', { class: 'view-sub', text: 'É exatamente isto que vai para o bot. A planilha confere de novo, e só a resposta do bot diz o que foi gravado.' })),
       facts, map || '', list, meter, raw);
@@ -1472,8 +1472,8 @@
         onclick: function () { closeSheet(); restoreSent(e); },
       }, h('span', { text: e.label }), h('span', { class: 'tag', text: 'enviado ' + C.shortDate(C.todayIn(S.catalog.tz, when)) + ' ' + time })));
     }));
-    openSheet('Restaurar último envio', h('div', { style: 'display:flex;flex-direction:column;min-height:0;flex:1' },
-      h('p', { class: 'hint', style: 'margin:0', text: 'Use se o bot respondeu que não gravou. O formulário volta como estava no envio; revise e envie de novo.' }), ul));
+    openSheet('Restaurar último envio', h('div', { class: 'sheet-col' },
+      h('p', { class: 'hint m-0', text: 'Use se o bot respondeu que não gravou. O formulário volta como estava no envio; revise e envie de novo.' }), ul));
   }
 
   function restoreSent(e) {
@@ -2100,7 +2100,7 @@
     els.dock.hidden = true;
     if (els.voicePanel) els.voicePanel.hidden = true;
     if (els.dockMic) els.dockMic.hidden = true;
-    els.view.replaceChildren(h('div', { class: 'empty-plan', style: 'margin-top:16px' }, mascot('alert', line, text)));
+    els.view.replaceChildren(h('div', { class: 'empty-plan mt-16' }, mascot('alert', line, text)));
     say('alert', line);
     if (tg && tg.MainButton) { try { tg.MainButton.hide(); } catch (e) { /* ignore */ } }
   }

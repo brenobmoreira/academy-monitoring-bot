@@ -48,9 +48,10 @@ from pydantic import (
 )
 
 from agent import buttons
+from agent.bot import WRITE_UNCERTAIN
 from agent.commands import Reply
 from agent.logs import describe
-from agent.sheet_client import request_id_scope
+from agent.sheet_client import request_id_scope, write_outcome
 from agent.summary import confirmation
 from agent.tools import OUTAGE_CODES
 
@@ -480,6 +481,11 @@ class PendingStore:
         with self._lock:
             self._items.pop(key, None)
 
+    def __len__(self) -> int:
+        with self._lock:
+            self._purge()
+            return len(self._items)
+
     def _purge(self) -> None:
         now = self._clock()
         for key in [k for k, (until, _) in self._items.items() if until <= now]:
@@ -487,15 +493,20 @@ class PendingStore:
 
 
 def _outage(response: dict[str, Any]) -> bool:
+    """The sheet was down and provably wrote nothing: the only failure that is tried again. A
+    write whose outcome is uncertain may have landed, so it is never an outage."""
+    if write_outcome(response) != "not_committed":
+        return False
     errors = response.get("errors")
-    return response.get("ok") is False and any(
+    return any(
         isinstance(e, dict) and str(e.get("code", "")) in OUTAGE_CODES
         for e in (errors if isinstance(errors, list) else [])
     )
 
 
 async def _write(sheet: MiniappSheet, pending: Pending) -> dict[str, Any]:
-    """The sheet call, up to 3 attempts while the sheet is unavailable, all with one request_id."""
+    """The sheet call, up to 3 attempts while the sheet is unavailable (proven: nothing written),
+    all with one request_id. An uncertain answer ends the attempts."""
     response: dict[str, Any] = {}
     for attempt in range(len(RETRY_DELAYS) + 1):
         if attempt:
@@ -521,7 +532,9 @@ async def _run(sheet: MiniappSheet, pending: Pending, store: PendingStore | None
     response = await _write(sheet, pending)
     if _outage(response):
         markup = retry_markup(store.put(pending)) if store is not None else None
-        return Reply(UNAVAILABLE, reply_markup=markup, failed=True, transient=True)
+        return Reply(
+            UNAVAILABLE, reply_markup=markup, failed=True, transient=True, write_outcome="not_committed"
+        )
     return reply_for(pending.op, response)
 
 
@@ -554,28 +567,36 @@ async def retry(sheet: MiniappSheet, key: str, store: PendingStore, chat_id: int
 
 
 def reply_for(op: str, response: dict[str, Any]) -> Reply:
-    if not response.get("ok"):
+    """The reply to a form write, carrying its outcome. `uncertain` gets WRITE_UNCERTAIN alone: no
+    retry button and no transient flag, because the write may be in the sheet."""
+    outcome = write_outcome(response)
+    if outcome == "uncertain":
+        return Reply(WRITE_UNCERTAIN, failed=True, write_outcome=outcome)
+    if outcome == "not_committed":
         errors = [e for e in (response.get("errors") or []) if isinstance(e, dict)]
         if any(str(e.get("code", "")) in OUTAGE_CODES for e in errors):
-            return Reply(UNAVAILABLE, failed=True, transient=True)
+            return Reply(UNAVAILABLE, failed=True, transient=True, write_outcome=outcome)
         if any(e.get("path") == "requestId" and e.get("code") == "conflict" for e in errors):
-            return Reply(ALREADY_SAVED, failed=True)
+            return Reply(ALREADY_SAVED, failed=True, write_outcome=outcome)
         lines = [NOTHING_SAVED]
         for e in errors:
             line = f"• {e.get('path') or '(raiz)'}: {e.get('message', '')}"
             if e.get("suggestions"):
                 line += f" Você quis dizer: {', '.join(str(s) for s in e['suggestions'])}"
             lines.append(line)
-        return Reply("\n".join(lines), failed=True)
+        return Reply("\n".join(lines), failed=True, write_outcome=outcome)
     result = response.get("result") or {}
     try:
         text = "\n".join(confirmation([(op, result)]))
     except (KeyError, TypeError, ValueError) as error:
         log.warning("could not build the confirmation of %s: %s", op, describe(error))
-        return Reply("✅ A planilha aceitou, mas não consegui montar o resumo. Confira com /hoje.")
+        return Reply(
+            "✅ A planilha aceitou, mas não consegui montar o resumo. Confira com /hoje.",
+            write_outcome=outcome,
+        )
     write_id = result.get("writeId")
     markup = buttons.keyboard([write_id]) if write_id else None
-    return Reply(text, html=True, reply_markup=markup)
+    return Reply(text, html=True, reply_markup=markup, write_outcome=outcome)
 
 
 # ---- bot → page -----------------------------------------------------------------------------------

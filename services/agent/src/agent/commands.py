@@ -22,6 +22,7 @@ import httpx
 
 from agent.format import bold, escape
 from agent.settings import Settings, parse_env_arg
+from agent.sheet_client import WriteOutcome
 from agent.summary import confirmation
 from agent.telegram import TelegramClient, configure_logging
 from agent.undo import undo_last
@@ -58,6 +59,9 @@ class Reply:
     reply_markup: dict[str, Any] | None = None
     failed: bool = False  # the sheet API refused or did not answer (see sheet_failure)
     transient: bool = False  # transient outage: release update_id so a retry can run
+    # The outcome of the write this update attempted (None: it attempted none). `uncertain` means
+    # the write may have landed: no retry is offered and the update must not run again.
+    write_outcome: WriteOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -367,7 +371,8 @@ async def app(ctx: Context, args: str) -> Reply:
 
 @command("desfazer", "Desfaz a última gravação na planilha (do bot ou do menu)")
 async def desfazer(ctx: Context, args: str) -> Reply:
-    return Reply(await undo_last(ctx.api()))
+    text, outcome = await undo_last(ctx.api())
+    return Reply(text, write_outcome=outcome)
 
 
 @command("help", "Exemplos de mensagem e esta lista de comandos")

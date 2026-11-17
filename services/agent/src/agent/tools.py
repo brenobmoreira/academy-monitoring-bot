@@ -11,8 +11,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import FunctionType
@@ -20,7 +20,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
-from agent.sheet_client import request_id_scope
+from agent.sheet_client import UNCERTAIN_CODE, WriteOutcome, request_id_scope, settle_write, write_outcome
 
 _current_update_key: ContextVar[str | None] = ContextVar("telegram_update_key", default=None)
 
@@ -156,8 +156,18 @@ class FoodItem(BaseModel):
 
 
 # Codes the sheet client (network, HTTP, bad body) and the API (uncaught exception) use when the
-# sheet itself failed, as opposed to rejecting the payload.
+# sheet itself failed, as opposed to rejecting the payload. "write_uncertain" is not one of them on
+# purpose: a write that may have landed is not a sheet that was down, so its request-id sequence
+# is not handed back for a retry and `sheet_failed` does not count it. ("internal" reaches this
+# set only from reads: on a write it is already "write_uncertain".)
 OUTAGE_CODES = frozenset({"unavailable", "internal"})
+
+# The fixed answer of every write tool after an uncertain write (see Journal.refusal).
+WRITES_STOPPED = (
+    "uma gravação anterior desta mensagem ficou incerta (pode ter entrado na planilha). Nada mais "
+    "será gravado nesta mensagem: não chame mais ferramentas de gravação e diga à pessoa para "
+    "conferir com /hoje antes de repetir."
+)
 
 
 RequestToken = tuple[str, int]
@@ -177,6 +187,44 @@ class Journal:
     # A write cancelled after it left (the message deadline): the sheet may or may not have
     # applied it, so the reply cannot say that nothing was saved.
     interrupted: bool = False
+    # The outcome of each mutating attempt that got an answer, in order (see sheet_client).
+    outcomes: list[WriteOutcome] = field(default_factory=list)
+    # Serialises the write tools of this message (see write_turn). An asyncio lock, because the
+    # tools are coroutines that ADK runs as tasks on the bot's event loop; RunConfig's
+    # tool_thread_pool_config, which would move them to threads with their own loops, is not set.
+    _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+
+    @asynccontextmanager
+    async def write_turn(self) -> AsyncIterator[dict[str, Any] | None]:
+        """One write at a time per message: a write tool holds this from the decision to write
+        until its result is recorded, so the next one decides knowing how this one ended. ADK
+        runs the tool calls of one model answer together (one asyncio task each, on this loop),
+        and without the turn two of them would both be sent before either could come back
+        uncertain. Yields the refusal to return instead of writing, or None. Reads do not wait."""
+        async with self._write_lock:
+            yield self.refusal()
+
+    def refusal(self) -> dict[str, Any] | None:
+        """What a write tool answers instead of calling the sheet once a write of this message
+        ended uncertain: that write may be in the sheet, so repeating it, or saving the same data
+        another way, could duplicate it. Under another request id the sheet would not notice.
+        None while no write is uncertain. Reads are never refused."""
+        if self.outcome != "uncertain":
+            return None
+        return {"ok": False, "errors": [{"path": "", "code": UNCERTAIN_CODE, "message": WRITES_STOPPED}]}
+
+    @property
+    def attempted(self) -> bool:
+        """Whether this message tried any write at all."""
+        return bool(self.outcomes) or self.interrupted
+
+    @property
+    def outcome(self) -> WriteOutcome:
+        """`uncertain` if any attempt was uncertain or interrupted; else `committed` if any write
+        is recorded; else `not_committed`."""
+        if self.interrupted or "uncertain" in self.outcomes:
+            return "uncertain"
+        return "committed" if self.writes else "not_committed"
 
     @contextmanager
     def writing(self) -> Iterator[None]:
@@ -209,7 +257,14 @@ class Journal:
         """For writes: journals the result on success, the error codes otherwise.
         If a retried write returns an already-recorded writeId, updates it in place instead of
         duplicating the confirmation entry; if the action was already undone by the user, leaves
-        `writes` untouched and informs the model."""
+        `writes` untouched and informs the model. An answer that does not prove whether the write
+        landed is recorded as `uncertain` and returned as the single "write_uncertain" error."""
+        response = settle_write(response)
+        outcome = write_outcome(response)
+        self.outcomes.append(outcome)
+        if outcome == "uncertain":
+            # Not an outage: the sequence number stays used, so nothing reuses this request id.
+            return self.check(response, op=op, token=token)
         if response.get("ok"):
             result = response["result"]
             if result.get("undone"):
@@ -295,10 +350,13 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         values = _plain(fields)
         for key in clear or []:
             values[key] = None
-        req_id, token = journal.request_id_for("diary.upsert", {"date": date, "fields": values})
-        with request_id_scope(req_id), journal.writing():
-            response = await sheet.upsert_diary(date, values)
-        return journal.record("diary.upsert", response, token)
+        async with journal.write_turn() as refusal:
+            if refusal is not None:
+                return refusal
+            req_id, token = journal.request_id_for("diary.upsert", {"date": date, "fields": values})
+            with request_id_scope(req_id), journal.writing():
+                response = await sheet.upsert_diary(date, values)
+            return journal.record("diary.upsert", response, token)
 
     async def save_workout(
         date: str, session: str, exercises: list[Exercise], complete: bool = False
@@ -319,10 +377,13 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         args: dict[str, Any] = {"date": date, "session": session, "exercises": plain_ex}
         if done is not None:
             args["complete"] = done
-        req_id, token = journal.request_id_for("workout.upsert", args)
-        with request_id_scope(req_id), journal.writing():
-            response = await sheet.upsert_workout(date, session, plain_ex, done)
-        return journal.record("workout.upsert", response, token)
+        async with journal.write_turn() as refusal:
+            if refusal is not None:
+                return refusal
+            req_id, token = journal.request_id_for("workout.upsert", args)
+            with request_id_scope(req_id), journal.writing():
+                response = await sheet.upsert_workout(date, session, plain_ex, done)
+            return journal.record("workout.upsert", response, token)
 
     async def save_food(date: str, meal: str, items: list[FoodItem]) -> dict[str, Any]:
         """Lança o que foi comido numa refeição na Alimentação. Cada item é um alimento do
@@ -335,10 +396,15 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
             items: itens da refeição.
         """
         plain_items = _plain(items)
-        req_id, token = journal.request_id_for("food.add", {"date": date, "meal": meal, "items": plain_items})
-        with request_id_scope(req_id), journal.writing():
-            response = await sheet.add_food(date, meal, plain_items)
-        return journal.record("food.add", response, token)
+        async with journal.write_turn() as refusal:
+            if refusal is not None:
+                return refusal
+            req_id, token = journal.request_id_for(
+                "food.add", {"date": date, "meal": meal, "items": plain_items}
+            )
+            with request_id_scope(req_id), journal.writing():
+                response = await sheet.add_food(date, meal, plain_items)
+            return journal.record("food.add", response, token)
 
     async def copy_food(date_from: str, date_to: str, meal: str | None = None) -> dict[str, Any]:
         """Copia uma refeição (ou todas as refeições do dia, se meal for omitido) de date_from para
@@ -352,10 +418,13 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         args: dict[str, Any] = {"from": date_from, "to": date_to}
         if meal is not None:
             args["meal"] = meal
-        req_id, token = journal.request_id_for("food.copy", args)
-        with request_id_scope(req_id), journal.writing():
-            response = await sheet.copy_food(date_from, date_to, meal)
-        return journal.record("food.copy", response, token)
+        async with journal.write_turn() as refusal:
+            if refusal is not None:
+                return refusal
+            req_id, token = journal.request_id_for("food.copy", args)
+            with request_id_scope(req_id), journal.writing():
+                response = await sheet.copy_food(date_from, date_to, meal)
+            return journal.record("food.copy", response, token)
 
     async def save_measures(
         date: str, fields: MeasureFields, clear: list[MeasureKey] | None = None
@@ -372,10 +441,13 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         values = _plain(fields)
         for key in clear or []:
             values[key] = None
-        req_id, token = journal.request_id_for("measures.upsert", {"date": date, "fields": values})
-        with request_id_scope(req_id), journal.writing():
-            response = await sheet.upsert_measures(date, values)
-        return journal.record("measures.upsert", response, token)
+        async with journal.write_turn() as refusal:
+            if refusal is not None:
+                return refusal
+            req_id, token = journal.request_id_for("measures.upsert", {"date": date, "fields": values})
+            with request_id_scope(req_id), journal.writing():
+                response = await sheet.upsert_measures(date, values)
+            return journal.record("measures.upsert", response, token)
 
     async def get_exercise_history(name: str, limit: int | None = None) -> dict[str, Any]:
         """Sessões anteriores de um exercício (só work sets), da mais recente para a mais antiga.

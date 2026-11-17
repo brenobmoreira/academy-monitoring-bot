@@ -4,9 +4,49 @@ updates:
     directory: /services/agent
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: google-adk
+        update-types: ["version-update:semver-major"]
+      - dependency-name: litellm
+        update-types: ["version-update:semver-major"]
+      - dependency-name: functions-framework
+        update-types: ["version-update:semver-major"]
     groups:
-      agent:
-        patterns: ["*"]
+      dev-tools:
+        patterns:
+          - ruff
+          - ty
+          - pytest*
+        update-types:
+          - minor
+          - patch
+      agent-core:
+        patterns:
+          - google-adk
+          - litellm
+          - functions-framework
+          - google-genai
+          - google-auth
+          - google-cloud-*
+        update-types:
+          - patch
+      other:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - ruff
+          - ty
+          - pytest*
+          - google-adk
+          - litellm
+          - functions-framework
+          - google-genai
+          - google-auth
+          - google-cloud-*
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: github-actions
     directory: /
     schedule:

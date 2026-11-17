@@ -368,6 +368,12 @@ async function bootApp(opts = {}) {
     ShapeCore: C,
     Telegram: tg ? { WebApp: tg } : undefined,
     addEventListener(type, fn) { (this._winListeners[type] = this._winListeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { this._winListeners[type] = (this._winListeners[type] || []).filter((f) => f !== fn); },
+    dispatchEvent(ev) {
+      const list = (this._winListeners[ev.type] || []).slice();
+      for (const fn of list) fn.call(this, ev);
+      return true;
+    },
     _winListeners: {},
   };
   Object.assign(ctx, opts.globals || {});
@@ -858,5 +864,75 @@ test('C6b-fix4: voice lock disables date navigation and tabs (click and keyboard
   p.doc.getElementById('dates').querySelectorAll('button')[1].click();
   assert.equal(p.doc.getElementById('dates').querySelectorAll('button')[1].getAttribute('aria-checked'), 'true');
 });
+
+test('C6b-fix5: real window pagehide stops tracks/upload and stale permission A settling before B never starts A', async () => {
+  const media = makeFakeMediaHarness();
+  let abortSeen = false;
+  const p = await bootApp({
+    catalog: makeVoiceCatalog(),
+    storage: storageWith({ [C.VOICE_CONSENT_KEY]: '1' }),
+    navigator: { mediaDevices: { getUserMedia: () => media.getUserMedia() } },
+    globals: { MediaRecorder: media.MediaRecorder },
+    fetch: async (url, init) => {
+      if (String(url).endsWith('/v1/auth/sessions')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ v: 1, session: 's1.fix5-tok', expires_at: 1700043200, scopes: ['voice'], ref: 'acct-a' }),
+        };
+      }
+      return new Promise((_, reject) => {
+        init.signal.addEventListener('abort', () => {
+          abortSeen = true;
+          const e = new Error('aborted');
+          e.name = 'AbortError';
+          reject(e);
+        });
+      });
+    },
+  });
+
+  // 1. Permission resolution ordering: A starts -> cancel -> B starts (still asking_permission) -> A resolves BEFORE B
+  const defA = media.deferPermission();
+  p.doc.getElementById('dock-mic').click();
+  p.button('Cancelar').click();
+  const defB = media.deferPermission();
+  p.doc.getElementById('dock-mic').click();
+  assert.equal(p.doc.getElementById('shape').getAttribute('data-state'), 'listening');
+  assert.ok(p.doc.getElementById('voice-panel').textContent.includes('Permita o microfone'));
+
+  defA.resolve();
+  await flushMicrotasks();
+  assert.equal(media.tracks.length, 1);
+  assert.equal(media.tracks[0].stopCalls, 1, 'stale stream A must stop immediately');
+  assert.equal(media.recorders.length, 0, 'stale stream A must not start MediaRecorder');
+  assert.ok(p.doc.getElementById('voice-panel').textContent.includes('Permita o microfone'));
+
+  defB.resolve();
+  await flushMicrotasks();
+  assert.equal(media.recorders.length, 1);
+  assert.equal(media.recorders[0].state, 'recording');
+  assert.equal(media.tracks[1].stopCalls, 0);
+
+  // 2. Real window pagehide event during listening stops recorder, stops tracks, hides panel, and unlocks form
+  p.ctx.dispatchEvent({ type: 'pagehide', persisted: false, target: p.ctx });
+  assert.equal(media.recorders[0].state, 'inactive');
+  assert.equal(media.tracks[1].stopCalls, 1);
+  assert.equal(p.doc.getElementById('voice-panel').hidden, true);
+  assert.equal(p.doc.getElementById('view').classList.contains('is-voice-locked'), false);
+
+  // 3. Real window pagehide event during sending aborts upload fetch and unlocks form
+  p.doc.getElementById('dock-mic').click();
+  await flushMicrotasks();
+  p.advanceMs(1000);
+  p.button('Parar').click();
+  await flushMicrotasks();
+  assert.equal(abortSeen, false);
+  p.ctx.dispatchEvent({ type: 'pagehide', persisted: false, target: p.ctx });
+  assert.equal(abortSeen, true);
+  assert.equal(p.doc.getElementById('voice-panel').hidden, true);
+  assert.equal(p.doc.getElementById('view').classList.contains('is-voice-locked'), false);
+});
+
 
 

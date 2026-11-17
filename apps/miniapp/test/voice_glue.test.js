@@ -725,6 +725,93 @@ test('C6b-2: stale permission from cancelled attempt 1 stops its tracks without 
   assert.equal(stream2.allStopped(), true);
 });
 
+test('C6b-fix5: stale permission from A resolving or rejecting while B is still asking_permission never starts or fails B', async () => {
+  const storage = memoryStorage({ [C.VOICE_CONSENT_KEY]: '1' });
+  const timers = makeFakeTimers();
+
+  // Case 1: A resolves while B is still in asking_permission -> A's tracks stop, no recorder starts, B stays asking_permission
+  {
+    const d1 = makeDeferred();
+    const d2 = makeDeferred();
+    const stream1 = makeFakeStream(2);
+    const stream2 = makeFakeStream(2);
+    const { FakeMediaRecorder, instances } = makeFakeRecorderClass();
+    let call = 0;
+
+    const ctrl = V.createVoiceController({
+      storage,
+      clock: () => 1000,
+      getUserMedia: () => (++call === 1 ? d1.promise : d2.promise),
+      MediaRecorder: FakeMediaRecorder,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+
+    ctrl.start(); // gen 1 (A)
+    ctrl.cancel(); // gen 2
+    ctrl.start(); // gen 3 (B)
+    assert.equal(ctrl.state().status, 'asking_permission');
+    assert.equal(ctrl.state().generation, 3);
+
+    // A resolves BEFORE B resolves (while B is still asking_permission)
+    d1.resolve(stream1);
+    await flushMicrotasks();
+
+    assert.equal(ctrl.state().status, 'asking_permission');
+    assert.equal(ctrl.state().generation, 3);
+    assert.equal(instances.length, 0, 'stale A resolution must never start MediaRecorder');
+    assert.equal(stream1.allStopped(), true, 'stale stream1 tracks must be stopped immediately');
+
+    // Now B resolves -> recorder starts cleanly with stream2
+    d2.resolve(stream2);
+    await flushMicrotasks();
+
+    assert.equal(ctrl.state().status, 'listening');
+    assert.equal(instances.length, 1);
+    assert.equal(instances[0].stream, stream2);
+    assert.equal(stream2.totalStopCalls(), 0);
+
+    ctrl.cancel();
+    assert.equal(stream2.allStopped(), true);
+  }
+
+  // Case 2: A rejects while B is still in asking_permission -> B stays asking_permission and succeeds when B resolves
+  {
+    const d1 = makeDeferred();
+    const d2 = makeDeferred();
+    const stream2 = makeFakeStream(1);
+    const { FakeMediaRecorder, instances } = makeFakeRecorderClass();
+    let call = 0;
+
+    const ctrl = V.createVoiceController({
+      storage,
+      clock: () => 1000,
+      getUserMedia: () => (++call === 1 ? d1.promise : d2.promise),
+      MediaRecorder: FakeMediaRecorder,
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+
+    ctrl.start(); // gen 1 (A)
+    ctrl.cancel(); // gen 2
+    ctrl.start(); // gen 3 (B)
+
+    d1.reject({ name: 'NotAllowedError' });
+    await flushMicrotasks();
+
+    assert.equal(ctrl.state().status, 'asking_permission');
+    assert.equal(ctrl.state().generation, 3);
+    assert.equal(ctrl.state().error, null);
+
+    d2.resolve(stream2);
+    await flushMicrotasks();
+    assert.equal(ctrl.state().status, 'listening');
+    assert.equal(instances.length, 1);
+    assert.equal(instances[0].stream, stream2);
+    ctrl.cancel();
+  }
+});
+
 test('C6b-2: every exit path (cancel, hide, collapse, errors, send, auto-stop) stops recorder and all tracks', async () => {
   const storage = memoryStorage({ [C.VOICE_CONSENT_KEY]: '1' });
 

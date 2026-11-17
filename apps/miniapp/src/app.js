@@ -83,14 +83,17 @@
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>',
     mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4M8 21h8"/>',
+    star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" fill="currentColor" stroke="none"/>',
   };
   function icon(name) {
     var span = document.createElement('span');
     span.className = 'ic';
     span.setAttribute('aria-hidden', 'true');
     // Constant markup only (never user text).
-    span.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' + ICONS[name] + '</svg>';
-    return span.firstChild;
+    span.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICONS[name] + '</svg>';
+    var svg = span.firstChild;
+    if (svg && svg.setAttribute) svg.setAttribute('aria-hidden', 'true');
+    return svg;
   }
 
   function haptic(kind) {
@@ -742,7 +745,7 @@
     }
 
     var ul = h('ul', { class: 'errors' });
-    errs.forEach(function (e) { ul.appendChild(h('li', { text: e.message.replace(card.name + ': ', '') })); });
+    errs.forEach(function (e) { ul.appendChild(h('li', { text: capFirst(e.message.replace(card.name + ': ', '')) })); });
     ul.hidden = !errs.length;
     el._errors = ul;
     body.appendChild(ul);
@@ -811,7 +814,7 @@
         var mine = errs.filter(function (e) { return e.card === i; });
         el.setAttribute('data-status', mine.length ? 'error' : C.cardIsEmpty(card) ? 'empty' : 'filled');
         if (el._errors) {
-          el._errors.replaceChildren.apply(el._errors, mine.map(function (e) { return h('li', { text: e.message.replace(card.name + ': ', '') }); }));
+          el._errors.replaceChildren.apply(el._errors, mine.map(function (e) { return h('li', { text: capFirst(e.message.replace(card.name + ': ', '')) }); }));
           el._errors.hidden = !mine.length;
         }
       });
@@ -1048,7 +1051,7 @@
     })) : h('div', { class: 'empty-plate' }, mascot('idle', 'Prato vazio', 'Busque um alimento, toque numa favorita ou descreva sem cálculo.'));
 
     var reset = h('div', { class: 'foot-actions' }, restoreButton('food'), f.items.length ? h('button', {
-      type: 'button', class: 'btn-text', text: 'Limpar refeição',
+      type: 'button', class: 'btn-text', text: 'Limpar prato',
       onclick: function () { confirmDialog('Tirar todos os itens do prato?', function () { f.items = []; f.id = C.newSubmissionId(); S.showErrors = false; renderFood(); changed(true); }); },
     }) : null);
 
@@ -1102,18 +1105,18 @@
       return h('div', {},
         h('div', { class: 'chip-wrap' }, S.catalog.fav.map(function (name) {
           return h('button', {
-            type: 'button', class: 'chip fav', text: name,
+            type: 'button', class: 'chip fav',
             onclick: function () { addItem({ kind: 'favorite', favorite: name, portions: '1' }); },
-          });
+          }, icon('star'), name);
         })),
-        h('p', { class: 'hint', text: 'Um toque põe 1 porção no prato; ajuste as porções na lista.' }));
+        h('p', { class: 'hint', text: 'Um toque põe 1 porção; ajuste as porções no prato.' }));
     }
 
     if (f.mode === 'description') {
       var counter = h('span', { class: 'counter', text: c.description.length + '/' + C.LIMITS.DESCRIPTION_MAX });
       var ta = h('textarea', {
         class: 'textarea', rows: '2', maxlength: String(C.LIMITS.DESCRIPTION_MAX), placeholder: 'Ex.: pastel de feira',
-        'aria-label': 'Descrição do item', 'data-error-path': 'description', 'data-say': 'Sem cálculo: entra no diário sem calorias nem macros.', value: c.description,
+        'aria-label': 'Descrição do item', 'data-error-path': 'description', 'data-say': 'Sem cálculo: entra na refeição sem calorias nem macros.', value: c.description,
         oninput: function () { c.description = ta.value; counter.textContent = ta.value.length + '/' + C.LIMITS.DESCRIPTION_MAX; descErr.check(); },
       });
       var descErr = formulaHint(ta, 'A descrição');
@@ -1122,7 +1125,7 @@
         h('label', { class: 'field-label' }, h('span', { text: 'Descrição' }), counter), ta, descErr,
         h('p', { class: 'sub-label', text: 'Quantidade (opcional)' }), dq,
         h('div', { class: 'mt-8' }, unitChips(c.dunit, function (u) { c.dunit = u; renderFood(); }, true)),
-        h('p', { class: 'hint warn', text: 'Sem cálculo: o item entra no diário sem calorias nem macros.' }),
+        h('p', { class: 'hint warn', text: 'Sem cálculo: o item entra na refeição sem calorias nem macros.' }),
         h('button', {
           type: 'button', class: 'btn-primary',
           onclick: function () {
@@ -1159,7 +1162,7 @@
       };
       fillResults();
       return h('div', {}, h('label', { class: 'search' }, icon('search'), input), results,
-        S.catalog.freeFoods ? h('button', { type: 'button', class: 'btn-text', text: 'Digitar nome da planilha', onclick: function () { c.manual = true; renderFood(); } }) : null);
+        S.catalog.freeFoods ? h('button', { type: 'button', class: 'btn-text', text: 'Digitar outro nome', onclick: function () { c.manual = true; renderFood(); } }) : null);
     }
 
     if (free) {
@@ -1406,7 +1409,7 @@
       facts = h('dl', { class: 'facts' },
         h('dt', { text: 'Data' }), h('dd', { text: dateLabel(args.date) }),
         h('dt', { text: 'Sessão' }), h('dd', { text: args.session }),
-        h('dt', { text: 'Status' }), h('dd', { text: args.complete ? 'concluída' : 'parcial' }));
+        h('dt', { text: 'Status' }), h('dd', { text: args.complete ? 'Concluída' : 'Parcial' }));
       list = args.exercises.length ? h('ul', { class: 'review-list' }, args.exercises.map(function (ex) {
         var lines = ex.work.map(function (s, j) { return 'Série ' + (j + 1) + ': ' + C.describeSet(s); });
         if (ex.warmup) lines.push('Aquecimento: ' + C.describeSet(ex.warmup));
@@ -1438,22 +1441,25 @@
       }
     }
 
+    var showMeter = !inTelegram || !p.ok || p.bytes > C.LIMITS.PAYLOAD_BYTES * 0.75;
     var pct = Math.min(100, Math.round(p.bytes / C.LIMITS.PAYLOAD_BYTES * 100));
-    var meter = h('div', { class: 'meter' + (p.ok ? '' : ' over') },
+    var meter = showMeter ? h('div', { class: 'meter' + (p.ok ? '' : ' over') },
       h('div', { class: 'meter-bar' }, h('i', { style: 'width:' + pct + '%' })),
-      h('p', { text: p.bytes + ' de ' + C.LIMITS.PAYLOAD_BYTES + ' bytes do limite do Telegram' }));
+      h('p', { text: p.bytes + ' de ' + C.LIMITS.PAYLOAD_BYTES + ' bytes do limite do Telegram' })) : null;
 
     var pretty = JSON.stringify(JSON.parse(p.json), null, 2);
     var raw = inTelegram
-      ? h('details', { class: 'raw' }, h('summary', { text: 'Ver o JSON' }), h('pre', { class: 'json', text: pretty }))
+      ? (!p.ok ? h('details', { class: 'raw' }, h('summary', { text: 'Ver o JSON' }), h('pre', { class: 'json', text: pretty })) : null)
       : h('div', {}, h('h2', { class: 'section-title', text: 'JSON que iria para o bot' }), h('pre', { class: 'json', id: 'json-out', text: pretty }));
 
-    els.review.replaceChildren(
+    var reviewNodes = [
       mascot('happy', null, C.pulsoSummary(pulsoContext())),
       h('div', { class: 'view-head mt-12' },
         h('h1', { class: 'view-title', text: 'Confira o envio' }),
-        h('p', { class: 'view-sub', text: 'É exatamente isto que vai para o bot. A planilha confere de novo, e só a resposta do bot diz o que foi gravado.' })),
-      facts, map || '', list, meter, raw);
+        h('p', { class: 'view-sub', text: 'Confira os dados abaixo antes de enviar.' })),
+      facts, map, list, meter, raw,
+    ].filter(function (node) { return !!node; });
+    els.review.replaceChildren.apply(els.review, reviewNodes);
 
     if (inTelegram) {
       setMain('Enviar ao bot', function () { send(p.json); });
@@ -2189,16 +2195,17 @@
   /** Plain-language reason for a catalog that could not be read. */
   function catalogProblem(err) {
     var m = String(err && err.message || err);
+    var detail = inTelegram ? '' : ' (' + m + ')';
     if (err && err.code === 'no_catalog') {
       return ['Abra de novo pelo /app.', 'Este botão não trouxe a sua ficha. Mande /app no chat do bot: ele envia botões novos de Treino e Refeição.'];
     }
     if (/TextDecoder|DecompressionStream|is not defined|not a function|not supported/i.test(m)) {
-      return ['Este Telegram está desatualizado.', 'O aplicativo não consegue abrir a ficha neste aparelho (' + m + '). Atualize o Telegram, ou registre pelo chat do bot como antes.'];
+      return ['Este Telegram está desatualizado.', 'O aplicativo não consegue abrir a ficha neste aparelho' + detail + '. Atualize o Telegram, ou registre pelo chat do bot como antes.'];
     }
     if (/inflate|base64|JSON|Unexpected|versão|inválid/i.test(m)) {
-      return ['A ficha deste link veio quebrada.', 'Não consegui ler a ficha (' + m + '). Mande /app no chat do bot para receber botões novos.'];
+      return ['A ficha deste link veio quebrada.', 'Não consegui ler a ficha' + detail + '. Mande /app no chat do bot para receber botões novos.'];
     }
-    return ['Não consegui abrir a ficha.', 'Algo deu errado ao abrir a ficha (' + m + '). Mande /app no chat do bot e tente de novo.'];
+    return ['Não consegui abrir a ficha.', 'Algo deu errado ao abrir a ficha' + detail + '. Mande /app no chat do bot e tente de novo.'];
   }
 
   function loadCatalog(hash) {

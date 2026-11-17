@@ -312,7 +312,7 @@ test('a draft keeps its id across reopening; a fresh or cleared draft gets a new
 
   const storage = storageWith(foodDraft(today(), { id: kept }));
   const r = await boot({ storage, view: 'food' });
-  button(r.doc.getElementById('view'), 'Limpar refeição').click();
+  button(r.doc.getElementById('view'), 'Limpar prato').click();
   r.timers.run(1000); // the draft is saved
   const saved = JSON.parse([...storage.map.entries()].find(([k]) => k.indexOf(':f:') > 0)[1]);
   assert.match(saved.id, ID);

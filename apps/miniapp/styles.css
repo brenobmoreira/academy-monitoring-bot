@@ -522,7 +522,7 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 }
 .btn-primary:disabled { opacity: 0.4; }
 .chip.fav { display: inline-flex; align-items: center; gap: 6px; }
-.chip.fav::before { content: "★"; color: var(--amber); }
+.chip.fav svg { width: 15px; height: 15px; flex: 0 0 auto; color: var(--amber); }
 
 .plate { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .plate-item {

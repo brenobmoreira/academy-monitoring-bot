@@ -106,6 +106,7 @@
   }
 
   function plural(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
+  function capFirst(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''; }
   function dateLabel(key) {
     var opt = S.dates.filter(function (d) { return d.key === key; })[0];
     return (opt ? opt.label + ', ' : '') + C.weekday(key) + ' ' + C.shortDate(key);
@@ -817,7 +818,14 @@
     } else {
       var ferrs = build().errors;
       document.querySelectorAll('.plate-item').forEach(function (li, i) {
-        li.classList.toggle('bad', ferrs.some(function (e) { return e.item === i; }));
+        var mine = ferrs.filter(function (e) { return e.item === i; });
+        var bad = mine.length > 0;
+        li.classList.toggle('bad', bad);
+        if (li._error) {
+          li._error.textContent = bad ? mine.map(function (e) { return capFirst(e.message.replace('Item ' + (i + 1) + ': ', '')); }).join(' · ') : '';
+          if (bad) li._error.setAttribute('role', 'alert'); else li._error.removeAttribute('role');
+          li._error.hidden = !bad;
+        }
       });
     }
   }
@@ -1036,7 +1044,7 @@
     var plateTitle = h('h2', { class: 'section-title' }, 'No prato', h('span', { class: 'count', text: f.items.length + '/' + C.LIMITS.MAX_FOOD_ITEMS }));
     var errs = S.showErrors ? build().errors : [];
     var plate = f.items.length ? h('ul', { class: 'plate' }, f.items.map(function (it, i) {
-      return plateItem(it, i, errs.some(function (e) { return e.item === i; }));
+      return plateItem(it, i, errs.filter(function (e) { return e.item === i; }));
     })) : h('div', { class: 'empty-plate' }, mascot('idle', 'Prato vazio', 'Busque um alimento, toque numa favorita ou descreva sem cálculo.'));
 
     var reset = h('div', { class: 'foot-actions' }, restoreButton('food'), f.items.length ? h('button', {
@@ -1195,6 +1203,29 @@
     }, 30);
   }
 
+  function clearComposerError(panel) {
+    if (!panel) return;
+    var prevErr = panel.querySelector('.composer-error');
+    if (prevErr && prevErr.parentNode) prevErr.parentNode.removeChild(prevErr);
+    if (panel._errTarget) {
+      var t = panel._errTarget;
+      if (!(t.getAttribute('data-error-path') === 'description' && C.formulaProblem(t.value))) {
+        t.classList.remove('is-bad');
+      }
+      if (panel._errHandler) {
+        t.removeEventListener('input', panel._errHandler);
+        t.removeEventListener('change', panel._errHandler);
+      }
+      panel._errTarget = null;
+    }
+    panel.classList.remove('is-bad');
+    if (panel._errHandler) {
+      panel.removeEventListener('input', panel._errHandler);
+      panel.removeEventListener('change', panel._errHandler);
+      panel._errHandler = null;
+    }
+  }
+
   function addItem(item) {
     if (S.food.items.length >= C.LIMITS.MAX_FOOD_ITEMS) {
       haptic('error');
@@ -1204,11 +1235,29 @@
     }
     var r = C.buildFoodItem(item, S.catalog);
     if (r.errors.length) {
+      var panel = els.view.querySelector('.panel');
+      clearComposerError(panel);
       haptic('error');
-      nudge(els.view.querySelector('.panel'));
+      nudge(panel);
       var error = C.pulsoError(r.errors);
+      var target = errorTarget(error, true);
+      if (target) target.classList.add('is-bad');
+      if (panel) {
+        var msg = h('p', { class: 'field-error composer-error', role: 'alert', text: capFirst(error.line) });
+        var body = panel.querySelector('.panel-body') || panel;
+        body.appendChild(msg);
+        var clear = function () { clearComposerError(panel); };
+        panel._errTarget = target;
+        panel._errHandler = clear;
+        panel.addEventListener('input', clear);
+        panel.addEventListener('change', clear);
+        if (target && target !== panel) {
+          target.addEventListener('input', clear);
+          target.addEventListener('change', clear);
+        }
+      }
       react(error);
-      glance(errorTarget(error, true));
+      glance(target);
       return false;
     }
     S.food.items.push(item);
@@ -1239,7 +1288,14 @@
     return Number.isFinite(n) ? C.formatBR(n) + (it.unit ? ' ' + it.unit : '') : '';
   }
 
-  function plateItem(it, i, bad) {
+  function plateItem(it, i, itemErrs) {
+    var bad = Array.isArray(itemErrs) ? itemErrs.length > 0 : !!itemErrs;
+    var errText = Array.isArray(itemErrs) && itemErrs.length
+      ? itemErrs.map(function (e) { return capFirst(e.message.replace('Item ' + (i + 1) + ': ', '')); }).join(' · ')
+      : '';
+    var errEl = h('span', { class: 'field-error plate-error', text: errText });
+    if (bad) errEl.setAttribute('role', 'alert');
+    errEl.hidden = !bad;
     var right = h('div', { class: 'plate-right' });
     if (itemQty(it)) right.appendChild(h('span', { class: 'plate-qty', text: itemQty(it) }));
     if (it.kind === 'favorite') {
@@ -1261,10 +1317,12 @@
         dropping(e.currentTarget.closest('.plate-item'), function () { S.food.items.splice(i, 1); haptic('light'); renderFood(); changed(true); });
       },
     }));
-    return h('li', { class: 'plate-item k-' + it.kind + (bad ? ' bad' : '') },
+    var li = h('li', { class: 'plate-item k-' + it.kind + (bad ? ' bad' : '') },
       h('span', { class: 'plate-bar', 'aria-hidden': 'true' }),
-      h('span', {}, h('span', { class: 'plate-name', text: itemName(it) }), h('span', { class: 'plate-meta', text: itemMeta(it) })),
+      h('span', {}, h('span', { class: 'plate-name', text: itemName(it) }), h('span', { class: 'plate-meta', text: itemMeta(it) }), errEl),
       right);
+    li._error = errEl;
+    return li;
   }
 
   /* review & send ---------------------------------------------------------------------------- */
@@ -1327,7 +1385,16 @@
     }, 320);
   }
 
+  var copyTimer = null;
+  function clearCopyTimer() {
+    if (copyTimer !== null) {
+      clearTimeout(copyTimer);
+      copyTimer = null;
+    }
+  }
+
   function renderReview(args, p, view) {
+    clearCopyTimer();
     els.view.hidden = true;
     els.tabBar.hidden = true;
     els.dates.hidden = true;
@@ -1413,6 +1480,7 @@
 
   function showForm() {
     var back = S.screen === 'review';
+    clearCopyTimer();
     endSend();
     S.screen = 'form';
     els.review.hidden = true;
@@ -1508,7 +1576,20 @@
   }
 
   function copyJson(json) {
-    var done = function () { haptic('success'); say('happy', 'JSON copiado. No Telegram ele iria para o bot, e só a resposta do bot confirma.'); };
+    var done = function () {
+      haptic('success');
+      say('happy', 'JSON copiado. No Telegram ele iria para o bot, e só a resposta do bot confirma.');
+      if (!inTelegram && S.screen === 'review' && !isVoiceActive() && els.dockPrimary) {
+        clearCopyTimer();
+        els.dockPrimary.textContent = 'JSON copiado';
+        copyTimer = setTimeout(function () {
+          copyTimer = null;
+          if (!inTelegram && S.screen === 'review' && !isVoiceActive() && els.dockPrimary) {
+            els.dockPrimary.textContent = 'Copiar JSON';
+          }
+        }, 1800);
+      }
+    };
     var fallback = function () {
       var pre = $('json-out');
       if (pre) { var range = document.createRange(); range.selectNodeContents(pre); var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); }

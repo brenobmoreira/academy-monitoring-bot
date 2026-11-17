@@ -16,7 +16,6 @@ updates:
       dev-tools:
         patterns:
           - ruff
-          - ty
           - pytest*
         update-types:
           - minor

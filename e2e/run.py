@@ -1,4 +1,4 @@
-"""Local end-to-end run: mocked Telegram webhook → Python agent → LLM → Apps Script JS → JSON trace.
+"""Local end-to-end run: mocked Telegram webhook → Python agent + voice ASGI → Apps Script JS → JSON trace.
 
     cd services/agent
     uv run python ../../e2e/run.py                      # scripted LLM + voice, no network at all
@@ -8,17 +8,19 @@
 
 What is real: the chosen HTTP entry point (Functions Framework or ASGI) with its secret check,
 `webhook.process` / `webhook.handle_update` with its process-wide state (`UpdateDeduplicator`,
-`VoiceConfirmations`, `TextSubmissions`, `MemoryBudget`), `Handler`, `Transcriber`, `Bot`/ADK
-runner, tools, the LiteLLM adapter, `SheetClient` over HTTP, and the sheet 4.0 Apps Script code
-(`apps/sheet4/src`) running in Node.
+`VoiceConfirmations`, `TextSubmissions`, `MemoryBudget`), `Handler`, `commands.app` (`VoiceLink` +
+`LinkCodes`), `build_voice_service` (`agent.voice_asgi`: CORS, `/healthz`, `/v1/auth/sessions`,
+`/v1/voice/transcriptions`), `Transcriber`, `Bot`/ADK runner, tools, the LiteLLM adapter,
+`SheetClient` over HTTP, and the sheet 4.0 Apps Script code (`apps/sheet4/src`) running in Node.
 
 What is mocked: the Telegram Bot API and file download endpoint (replies and callbacks are captured
 locally), the spreadsheet (in-memory fake built by `e2e/sheet_server.js` with a synthetic client),
 and — without `--real` — the providers behind LiteLLM (agent + audio transcription), which replay a
 fixed multi-stage script and assert the end-to-end contracts (`writeState: "none"` rejections and
-agent self-correction, chat voice confirmation + duplicate-tap guard, Mini App `t: "text"` voice
-submission + `TextSubmissions` idempotency, `POST /remind {"kind": "daily"}`, and exact final rows
-in `Diário`, `Registro de treino` and `Alimentação`).
+agent self-correction, chat voice confirmation + duplicate-tap guard, `/app` → `voice_asgi`
+cryptographic link-code exchange + single-use replay rejection + Ogg transcription + idempotent
+replay → Mini App `t: "text"` submission + `TextSubmissions` idempotency, `POST /remind {"kind":
+"daily"}`, and exact final rows in `Diário`, `Registro de treino` and `Alimentação`).
 
 `SHEET_SRC=legacy` serves the old `apps/sheet` code instead (manual `--real` use only; scripted
 assertions target sheet 4.0).
@@ -29,6 +31,7 @@ The trace is written to `e2e/out/run-<timestamp>.json`.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import contextlib
 import json
@@ -37,11 +40,13 @@ import re
 import subprocess
 import sys
 import time
+import zlib
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -51,33 +56,55 @@ from google.adk.models import BaseLlm, LlmRequest, LlmResponse
 from google.adk.models.lite_llm import LiteLLMClient
 from google.genai import types
 from litellm import ModelResponse
+from pydantic import SecretStr
 from starlette.testclient import TestClient
 from werkzeug.test import EnvironBuilder
 
 from agent import asgi, buttons, main, reminder, webhook
 from agent import handler as handler_module
+from agent.budget import MemoryBudget
 from agent.handler import Handler, UpdateDeduplicator
 from agent.llm import build_model
+from agent.miniapp import FOOD_BUTTON, WORKOUT_BUTTON
 from agent.settings import Settings
 from agent.text_submissions import DONE_REPLY, TextSubmissions
-from agent.transcribe import build_transcriber
+from agent.transcribe import MIN_BODY_BYTES, build_transcriber
+from agent.voice_api import HEALTHZ_PATH, SESSIONS_PATH, TRANSCRIPTIONS_PATH
+from agent.voice_asgi import build_voice_service
 from agent.voice_confirm import VOICE_ALREADY_SENT, VOICE_REGISTERING, VoiceConfirmations
+from agent.voice_settings import VoiceSettings
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "e2e" / "out"
 ENV_FILE = ROOT / "services" / "agent" / ".env"
-TZ = ZoneInfo("America/Sao_Paulo")
+DEFAULT_SETTINGS_YAML = ROOT / "services" / "agent" / "settings.yaml"
+TZ_NAME = "America/Sao_Paulo"
+TZ = ZoneInfo(TZ_NAME)
 CHAT_ID = 42
 SHEET_KEY = "local-sheet-key"
 WEBHOOK_SECRET = "local-webhook-secret"
 REMINDER_TOKEN = "local-reminder-token"
 TRANSCRIBE_KEY = "local-transcribe-key"
+MINIAPP_ORIGIN = "https://example.github.io"
+MINIAPP_URL = f"{MINIAPP_ORIGIN}/academy-monitoring-bot/"
+VOICE_API_URL = "https://voice.example.test"
+SYNTHETIC_APP_AUTH_SECRET = "e2e-synthetic-app-auth-secret-000000"
+SCRIPTED_LLM_MODEL = "gemini/gemini-3.8-flash"
+SCRIPTED_TRANSCRIBE_MODEL = "gemini/gemini-3.8-flash"
+SCRIPTED_VOICE_DAILY_TOKENS = 50_000
+SCRIPTED_VOICE_GLOBAL_DAILY_TOKENS = 500_000
+SCRIPTED_VOICE_MAX_SECONDS = 90
+SCRIPTED_APP_CODE_TTL_S = 900
+SCRIPTED_APP_SESSION_TTL_S = 43_200
 DEFAULT_MESSAGE = "peso 82,4 dormi 7h30. upper: supino inclinado 60x8 62,5x8 rir 2, puxada 50x10 50x9"
 VOICE_FILE_ID = "fake-voice-file-1"
 VOICE_FILE_PATH = "voice/e2e-note.oga"
 # Synthetic Ogg header + zero padding (>= transcribe.MIN_BODY_BYTES = 1024 bytes).
 FAKE_OGG = b"OggS" + b"\x00" * 2044
 VOICE_TRANSCRIPT = "bebi 2,5 litros de água"
+MINIAPP_TRANSCRIPTION_ID = "fedcba9876543210fedcba9876543210"
+MINIAPP_AUDIO_DURATION_MS = 4000
+MINIAPP_AUDIO_CONTENT_TYPE = "audio/ogg; codecs=opus"
 MINIAPP_SUBMISSION_ID = "0123456789abcdef0123456789abcdef"
 MINIAPP_VOICE_TEXT = "lanche 100g peito de frango cozido"
 
@@ -103,6 +130,19 @@ def take_steps(start: int) -> list[dict[str, Any]]:
     steps = timeline[start:]
     del timeline[start:]
     return steps
+
+
+def _stable_run_now(scripted: bool) -> datetime:
+    """Returns a timezone-aware `now` safe against midnight rollover across Node and Python."""
+    now = datetime.now(TZ)
+    if not scripted:
+        return now
+    seconds_since_midnight = now.hour * 3600 + now.minute * 60 + now.second + now.microsecond / 1_000_000
+    remaining = 86_400.0 - seconds_since_midnight
+    if remaining < 3.0:
+        time.sleep(remaining + 0.1)
+        now = datetime.now(TZ)
+    return now
 
 
 # ---- LLM & Transcription ------------------------------------------------------------------
@@ -151,7 +191,7 @@ def scripted_turns(today: str) -> list[ModelResponse]:
         # Stage 2b: confirmed chat voice note ("bebi 2,5 litros de água", keeping steps empty).
         call("save_diary", date=today, fields={"waterL": 2.5}),
         say("ok"),
-        # Stage 3a: Mini App voice text submission ("lanche 100g peito de frango cozido").
+        # Stage 3c: Mini App voice text submission ("lanche 100g peito de frango cozido").
         call("get_catalog"),
         call("save_food", date=today, meal="Lanche", items=snack),
         say("ok"),
@@ -169,6 +209,22 @@ def scripted_transcriptions() -> list[ModelResponse]:
                 "prompt_tokens": 614,
                 "completion_tokens": 12,
                 "prompt_tokens_details": {"audio_tokens": 160},
+            },
+        )
+    ]
+
+
+def scripted_voice_api_transcriptions() -> list[ModelResponse]:
+    """Scripted Gemini audio-native response for the standalone `fitness-voice` (`voice_asgi`) app."""
+    return [
+        ModelResponse(
+            choices=[
+                {"message": {"role": "assistant", "content": MINIAPP_VOICE_TEXT}, "finish_reason": "stop"}
+            ],
+            usage={
+                "prompt_tokens": 582,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {"audio_tokens": 128},
             },
         )
     ]
@@ -456,14 +512,153 @@ def assert_stage1_typed_and_writestate(
     ]
 
 
+def decode_miniapp_url(url: str) -> tuple[str, dict[str, Any]]:
+    assert url.startswith(f"{MINIAPP_URL}#"), f"Expected URL starting with {MINIAPP_URL}#, got {url!r}"
+    fragment = urlsplit(url).fragment
+    params = dict(parse_qsl(fragment, keep_blank_values=True))
+    assert "v" in params and "c" in params, f"Missing v or c in Mini App fragment: {fragment!r}"
+    blob = params["c"]
+    packed = base64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4))
+    catalog = json.loads(zlib.decompress(packed, -15).decode("utf-8"))
+    assert isinstance(catalog, dict), f"Decoded Mini App catalog is not a dict: {catalog!r}"
+    return params["v"], catalog
+
+
+async def exercise_voice_asgi(voice_app: Any, vc: str) -> dict[str, Any]:
+    assert FAKE_OGG.startswith(b"OggS") and len(FAKE_OGG) >= MIN_BODY_BYTES
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=voice_app),
+        base_url=VOICE_API_URL,
+    ) as client:
+        health = await client.get(HEALTHZ_PATH)
+        assert health.status_code == 200 and health.text == "ok", (
+            f"Expected /healthz -> (200, 'ok'), got {(health.status_code, health.text)!r}"
+        )
+
+        preflight = await client.options(
+            TRANSCRIPTIONS_PATH,
+            headers={
+                "Origin": MINIAPP_ORIGIN,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": (
+                    "Authorization, Content-Type, Idempotency-Key, X-Audio-Duration-Ms"
+                ),
+            },
+        )
+        allow_origin = preflight.headers.get("access-control-allow-origin")
+        assert preflight.status_code == 200 and allow_origin == MINIAPP_ORIGIN, (
+            f"Expected CORS preflight 200 for {MINIAPP_ORIGIN!r}, "
+            f"got {(preflight.status_code, allow_origin)!r}"
+        )
+
+        exchange_payload = {"v": 1, "kind": "tg_link", "credential": vc}
+        auth_resp = await client.post(
+            SESSIONS_PATH,
+            headers={"Origin": MINIAPP_ORIGIN},
+            json=exchange_payload,
+        )
+        assert auth_resp.status_code == 200, (
+            f"Expected /v1/auth/sessions -> 200, got {(auth_resp.status_code, auth_resp.text)!r}"
+        )
+        assert auth_resp.headers.get("access-control-allow-origin") == MINIAPP_ORIGIN
+        auth_json = auth_resp.json()
+        assert auth_json.get("v") == 1 and auth_json.get("scopes") == ["voice"], (
+            f"Unexpected session grant payload: {auth_json!r}"
+        )
+        token = auth_json.get("session")
+        assert isinstance(token, str) and token.startswith("s1."), f"Invalid Bearer session token: {token!r}"
+
+        replay_resp = await client.post(
+            SESSIONS_PATH,
+            headers={"Origin": MINIAPP_ORIGIN},
+            json=exchange_payload,
+        )
+        replay_json = replay_resp.json()
+        replay_code = (replay_json.get("error") or {}).get("code")
+        assert replay_resp.status_code == 401 and replay_code == "credential_used", (
+            f"Expected replayed vc -> (401, 'credential_used'), "
+            f"got {(replay_resp.status_code, replay_json)!r}"
+        )
+
+        tx_headers = {
+            "Origin": MINIAPP_ORIGIN,
+            "Authorization": f"Bearer {token}",
+            "Content-Type": MINIAPP_AUDIO_CONTENT_TYPE,
+            "Idempotency-Key": MINIAPP_TRANSCRIPTION_ID,
+            "X-Audio-Duration-Ms": str(MINIAPP_AUDIO_DURATION_MS),
+        }
+        tx_resp = await client.post(
+            TRANSCRIPTIONS_PATH,
+            headers=tx_headers,
+            content=FAKE_OGG,
+        )
+        assert tx_resp.status_code == 200, (
+            f"Expected /v1/voice/transcriptions -> 200, got {(tx_resp.status_code, tx_resp.text)!r}"
+        )
+        assert tx_resp.headers.get("access-control-allow-origin") == MINIAPP_ORIGIN
+        tx_json = tx_resp.json()
+        assert tx_json == {"v": 1, "id": MINIAPP_TRANSCRIPTION_ID, "text": MINIAPP_VOICE_TEXT}, (
+            f"Unexpected transcription response: {tx_json!r}"
+        )
+
+        # Idempotent replay with same Idempotency-Key + audio bytes returns cached 200 without re-running LLM.
+        tx_replay_resp = await client.post(
+            TRANSCRIPTIONS_PATH,
+            headers=tx_headers,
+            content=FAKE_OGG,
+        )
+        assert tx_replay_resp.status_code == 200 and tx_replay_resp.json() == tx_json, (
+            f"Expected idempotent transcription replay -> {tx_json!r}, "
+            f"got {(tx_replay_resp.status_code, tx_replay_resp.text)!r}"
+        )
+
+    return {
+        "healthz": {"path": HEALTHZ_PATH, "status": health.status_code, "body": health.text},
+        "cors_preflight": {
+            "path": TRANSCRIPTIONS_PATH,
+            "origin": MINIAPP_ORIGIN,
+            "status": preflight.status_code,
+            "allow_origin": allow_origin,
+        },
+        "session_exchange": {
+            "path": SESSIONS_PATH,
+            "kind": "tg_link",
+            "status": auth_resp.status_code,
+            "scopes": auth_json["scopes"],
+            "expires_at": auth_json["expires_at"],
+            "ref": auth_json["ref"],
+        },
+        "session_replay": {
+            "path": SESSIONS_PATH,
+            "status": replay_resp.status_code,
+            "error_code": replay_code,
+        },
+        "transcription": {
+            "path": TRANSCRIPTIONS_PATH,
+            "status": tx_resp.status_code,
+            "id": tx_json["id"],
+            "content_type": MINIAPP_AUDIO_CONTENT_TYPE,
+            "duration_ms": MINIAPP_AUDIO_DURATION_MS,
+            "audio_bytes": len(FAKE_OGG),
+            "text": tx_json["text"],
+            "idempotent_replay_status": tx_replay_resp.status_code,
+        },
+    }
+
+
 def run_scripted_voice_and_miniapp(
     post: Callable[[dict[str, str], dict[str, Any], str], tuple[str, int]],
     headers: dict[str, str],
     telegram_state: TelegramState,
     settings: Settings,
+    voice_transcribe_provider: ScriptedTranscribeClient,
+    run_now: datetime,
     today: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    now_unix = int(time.time())
+    now_unix = int(run_now.timestamp())
+
+    def clock() -> datetime:
+        return run_now
 
     # ---- Stage 2: Chat Voice (`C4b` + `C4c2` + `C4d`) --------------------------------------
     mark = len(timeline)
@@ -504,7 +699,7 @@ def run_scripted_voice_and_miniapp(
     budget = webhook._get_budget(
         settings.VOICE_DAILY_TOKENS, settings.VOICE_GLOBAL_DAILY_TOKENS, settings.TIMEZONE
     )
-    used_tokens = budget.used(f"telegram:{CHAT_ID}", datetime.now(TZ))
+    used_tokens = budget.used(f"telegram:{CHAT_ID}", run_now)
     assert used_tokens == (626, 626), f"Expected (626, 626) settled transcription tokens, got {used_tokens}"
 
     new_sent = telegram_state.sent_messages[sent_before_voice:]
@@ -615,34 +810,129 @@ def run_scripted_voice_and_miniapp(
         },
     }
 
-    # ---- Stage 3: Mini App Voice (`C7` — `web_app_data` `t:"text"` + `TextSubmissions`) ----
-    miniapp_payload = {
-        "v": 1,
-        "t": "text",
-        "id": MINIAPP_SUBMISSION_ID,
-        "src": "voice",
-        "text": MINIAPP_VOICE_TEXT,
-    }
-    raw_web_app_data = json.dumps(miniapp_payload, ensure_ascii=False)
+    # ---- Stage 3: Mini App `/app` → `voice_asgi` → `web_app_data` `t:"text"` (`C5`–`C7`) ----
+    assert settings.MINIAPP_URL == MINIAPP_URL
+    assert settings.VOICE_API_URL == VOICE_API_URL
+    assert settings.APP_AUTH_SECRET == SecretStr(SYNTHETIC_APP_AUTH_SECRET)
+    assert settings.TIMEZONE == TZ_NAME
+    assert settings.VOICE_DAILY_TOKENS == SCRIPTED_VOICE_DAILY_TOKENS
 
+    voice_settings_kwargs: dict[str, Any] = {
+        "_env_file": None,
+        "VOICE_API_ENABLED": True,
+        "TIMEZONE": settings.TIMEZONE,
+        "ALLOWED_CHAT_IDS": frozenset({CHAT_ID}),
+        "VOICE_ALLOWED_ORIGINS": (MINIAPP_ORIGIN,),
+        "APP_AUTH_SECRET": SecretStr(SYNTHETIC_APP_AUTH_SECRET),
+        "APP_CODE_TTL_S": settings.APP_CODE_TTL_S,
+        "APP_SESSION_TTL_S": settings.APP_SESSION_TTL_S,
+        "APP_SESSION_NOT_BEFORE": {},
+        "TRANSCRIBE_MODEL": settings.TRANSCRIBE_MODEL,
+        "TRANSCRIBE_API_KEY": SecretStr(TRANSCRIBE_KEY),
+        "TRANSCRIBE_FALLBACK_MODEL": None,
+        "TRANSCRIBE_API_BASE": None,
+        "VOICE_MAX_SECONDS": settings.VOICE_MAX_SECONDS,
+        "VOICE_DAILY_TOKENS": settings.VOICE_DAILY_TOKENS,
+        "VOICE_GLOBAL_DAILY_TOKENS": settings.VOICE_GLOBAL_DAILY_TOKENS,
+    }
+    voice_settings = VoiceSettings(**voice_settings_kwargs)
+    voice_budget = MemoryBudget(
+        principal_daily=voice_settings.VOICE_DAILY_TOKENS,
+        global_daily=voice_settings.VOICE_GLOBAL_DAILY_TOKENS,
+        timezone=voice_settings.TIMEZONE,
+    )
+    voice_transcriber = build_transcriber(
+        voice_settings, voice_budget, client=voice_transcribe_provider, clock=clock
+    )
+    voice_app = build_voice_service(voice_settings, transcriber=voice_transcriber, clock=clock)
+
+    # Stage 3a: `/app` on fitness-agent issues a signed one-time `vc` link code inside `web_app.url`.
     mark = len(timeline)
-    miniapp_update_1 = {
+    app_update = {
         "update_id": 1005,
         "message": {
             "message_id": 3,
             "date": now_unix,
             "chat": {"id": CHAT_ID, "type": "private"},
             "from": {"id": CHAT_ID, "is_bot": False, "first_name": "Local"},
-            "web_app_data": {"button_text": "🍽️ Refeição", "data": raw_web_app_data},
+            "text": "/app",
+        },
+    }
+    app_body, app_status = post(headers, app_update, "/")
+    app_steps = take_steps(mark)
+
+    assert (app_status, app_body) == (200, "ok"), f"Stage 3a /app failed: {(app_status, app_body)!r}"
+    assert [t for t in app_steps if t["kind"] == "llm"] == [], "/app must not call the agent LLM"
+    app_sheet = [t for t in app_steps if t["kind"] == "sheet_api"]
+    assert [s["request"]["op"] for s in app_sheet] == ["catalog"], (
+        f"Expected ['catalog'] on /app, got {[s['request']['op'] for s in app_sheet]}"
+    )
+    app_reply, app_keyboard = joined_send_messages(app_steps)
+    assert app_reply and app_keyboard is not None, f"Missing /app reply or keyboard: {app_reply!r}"
+    app_buttons = app_keyboard.get("keyboard", [[]])[0]
+    assert [b["text"] for b in app_buttons] == [WORKOUT_BUTTON, FOOD_BUTTON], (
+        f"Unexpected /app buttons: {app_buttons!r}"
+    )
+    workout_view, workout_catalog = decode_miniapp_url(app_buttons[0]["web_app"]["url"])
+    food_view, food_catalog = decode_miniapp_url(app_buttons[1]["web_app"]["url"])
+    assert (workout_view, food_view) == ("workout", "food")
+    vc = food_catalog.get("vc")
+    vx = food_catalog.get("vx")
+    assert food_catalog.get("vu") == VOICE_API_URL and workout_catalog.get("vu") == VOICE_API_URL, (
+        f"Expected vu=={VOICE_API_URL!r} in /app catalogs, "
+        f"got {(workout_catalog.get('vu'), food_catalog.get('vu'))!r}"
+    )
+    assert isinstance(vc, str) and vc.startswith("c1.") and workout_catalog.get("vc") == vc, (
+        f"Invalid or mismatched vc in /app catalogs: {(workout_catalog.get('vc'), vc)!r}"
+    )
+    assert isinstance(vx, int) and vx > now_unix and workout_catalog.get("vx") == vx, (
+        f"Invalid or expired vx in /app catalogs: {(workout_catalog.get('vx'), vx)!r}"
+    )
+
+    # Stage 3b: standalone `voice_asgi` verifies `/healthz`, CORS preflight, `vc` -> Bearer session,
+    # single-use replay rejection (`credential_used`), Ogg transcription, and idempotent replay.
+    mark = len(timeline)
+    voice_service_summary = asyncio.run(exercise_voice_asgi(voice_app, vc))
+    voice_service_steps = take_steps(mark)
+
+    assert len([t for t in voice_service_steps if t["kind"] == "transcribe_llm"]) == 1, (
+        f"Expected 1 transcribe_llm call in voice_asgi, got {voice_service_steps}"
+    )
+    voice_used_tokens = voice_budget.used(f"telegram:{CHAT_ID}", run_now)
+    assert voice_used_tokens == (592, 592), (
+        f"Expected (592, 592) settled tokens on fitness-voice budget, got {voice_used_tokens}"
+    )
+    transcribed_text = str(voice_service_summary["transcription"]["text"])
+    assert transcribed_text == MINIAPP_VOICE_TEXT
+
+    # Stage 3c: Mini App sends `transcribed_text` back to webhook via `web_app_data` `t:"text"`.
+    miniapp_payload = {
+        "v": 1,
+        "t": "text",
+        "id": MINIAPP_SUBMISSION_ID,
+        "src": "voice",
+        "text": transcribed_text,
+    }
+    raw_web_app_data = json.dumps(miniapp_payload, ensure_ascii=False)
+
+    mark = len(timeline)
+    miniapp_update_1 = {
+        "update_id": 1006,
+        "message": {
+            "message_id": 4,
+            "date": now_unix,
+            "chat": {"id": CHAT_ID, "type": "private"},
+            "from": {"id": CHAT_ID, "is_bot": False, "first_name": "Local"},
+            "web_app_data": {"button_text": FOOD_BUTTON, "data": raw_web_app_data},
         },
     }
     ma1_body, ma1_status = post(headers, miniapp_update_1, "/")
     ma1_steps = take_steps(mark)
 
-    assert (ma1_status, ma1_body) == (200, "ok"), f"Stage 3a Mini App text failed: {(ma1_status, ma1_body)!r}"
+    assert (ma1_status, ma1_body) == (200, "ok"), f"Stage 3c Mini App text failed: {(ma1_status, ma1_body)!r}"
     ma1_sheet = [t for t in ma1_steps if t["kind"] == "sheet_api"]
     assert [s["request"]["op"] for s in ma1_sheet] == ["catalog", "food.add"], (
-        f"Expected ['catalog', 'food.add'] in Stage 3a, got {[s['request']['op'] for s in ma1_sheet]}"
+        f"Expected ['catalog', 'food.add'] in Stage 3c, got {[s['request']['op'] for s in ma1_sheet]}"
     )
     food_write = ma1_sheet[1]
     assert food_write["response"].get("ok") is True, f"Expected ok=True on Mini App food.add: {food_write}"
@@ -653,26 +943,26 @@ def run_scripted_voice_and_miniapp(
     )
     ma1_reply, _ = joined_send_messages(ma1_steps)
     assert ma1_reply and "Lanche" in ma1_reply and "Peito de frango cozido" in ma1_reply, (
-        f"Unexpected Stage 3a Mini App reply: {ma1_reply!r}"
+        f"Unexpected Stage 3c Mini App reply: {ma1_reply!r}"
     )
 
-    # Stage 3b: new update_id, same submission_id + same text -> stopped by TextSubmissions.
+    # Stage 3d: new update_id, same submission_id + same text -> stopped by TextSubmissions.
     mark = len(timeline)
     miniapp_update_2 = {
-        "update_id": 1006,
+        "update_id": 1007,
         "message": {
-            "message_id": 4,
+            "message_id": 5,
             "date": now_unix,
             "chat": {"id": CHAT_ID, "type": "private"},
             "from": {"id": CHAT_ID, "is_bot": False, "first_name": "Local"},
-            "web_app_data": {"button_text": "🍽️ Refeição", "data": raw_web_app_data},
+            "web_app_data": {"button_text": FOOD_BUTTON, "data": raw_web_app_data},
         },
     }
     ma2_body, ma2_status = post(headers, miniapp_update_2, "/")
     ma2_steps = take_steps(mark)
 
     assert (ma2_status, ma2_body) == (200, "ok"), (
-        f"Stage 3b duplicate Mini App failed: {(ma2_status, ma2_body)!r}"
+        f"Stage 3d duplicate Mini App failed: {(ma2_status, ma2_body)!r}"
     )
     assert [t for t in ma2_steps if t["kind"] in ("llm", "transcribe_llm", "sheet_api")] == [], (
         f"Duplicate Mini App submission must make zero LLM/sheet calls, got {ma2_steps}"
@@ -681,6 +971,23 @@ def run_scripted_voice_and_miniapp(
     assert ma2_reply == DONE_REPLY, f"Expected DONE_REPLY {DONE_REPLY!r}, got {ma2_reply!r}"
 
     miniapp_trace = {
+        "app_command": {
+            "request": {"method": "POST", "headers": headers, "json": app_update},
+            "response": {"status": app_status, "body": app_body},
+            "reply_sent_to_telegram": app_reply.splitlines(),
+            "voice_link": {
+                "vu": VOICE_API_URL,
+                "vc_prefix": vc.split(".", 1)[0],
+                "vx": vx,
+                "buttons": [b["text"] for b in app_buttons],
+            },
+            "timeline": app_steps,
+        },
+        "voice_service": {
+            **voice_service_summary,
+            "settled_tokens": {"principal": voice_used_tokens[0], "global": voice_used_tokens[1]},
+            "timeline": voice_service_steps,
+        },
         "submission": {
             "request": {"method": "POST", "headers": headers, "json": miniapp_update_1},
             "response": {"status": ma1_status, "body": ma1_body},
@@ -706,10 +1013,14 @@ def assert_reminder_and_final_sheets(
     today: str,
     provider: ScriptedProvider,
     transcribe_provider: ScriptedTranscribeClient,
+    voice_transcribe_provider: ScriptedTranscribeClient,
 ) -> dict[str, int]:
     assert provider.script == [], f"Unconsumed scripted agent turns: {len(provider.script)}"
     assert transcribe_provider.script == [], (
-        f"Unconsumed scripted transcription turns: {len(transcribe_provider.script)}"
+        f"Unconsumed scripted chat transcription turns: {len(transcribe_provider.script)}"
+    )
+    assert voice_transcribe_provider.script == [], (
+        f"Unconsumed scripted voice_asgi transcription turns: {len(voice_transcribe_provider.script)}"
     )
     assert remind_status == 200 and remind_text == "sent 1", (
         f"Expected /remind daily -> (200, 'sent 1'), got {(remind_status, remind_text)!r}"
@@ -763,17 +1074,25 @@ def main_run() -> None:
     parser.add_argument("--message", default=DEFAULT_MESSAGE, help="text to send (scripted mode ignores it)")
     args = parser.parse_args()
     message = args.message if args.real else DEFAULT_MESSAGE
-    today = datetime.now(TZ).date().isoformat()
-    _reset_trace()
-    # Model settings come from settings.yaml and services/agent/.env like in the real agent; the
-    # Telegram and sheet values are replaced by local fakes below, so the run never reaches the
-    # real bot or spreadsheet.
-    load_dotenv(ENV_FILE)
+    run_now = _stable_run_now(scripted=not args.real)
+    today = run_now.date().isoformat()
 
+    def scripted_clock() -> datetime:
+        return run_now
+
+    _reset_trace()
+
+    orig_environ = os.environ.copy()
     orig_webhook_httpx = webhook.httpx
     orig_webhook_build_handler = webhook.build_handler
     orig_handler_build_model = handler_module.build_model
     orig_reminder_http_client = reminder.http_client
+    orig_reminder_deliver = reminder.deliver
+
+    # In `--real`, model settings come from settings.yaml and services/agent/.env like in the real
+    # agent; in scripted mode, explicit defaults below isolate the run from any local `.env`.
+    if args.real:
+        load_dotenv(ENV_FILE)
 
     proc, sheet_url = start_sheet_server()
     try:
@@ -787,17 +1106,41 @@ def main_run() -> None:
         )
         if not args.real:
             os.environ.update(
+                ENV_FILE=str(OUT / ".e2e-scripted-no-dotenv"),
+                SETTINGS_FILE=str(DEFAULT_SETTINGS_YAML),
+                TIMEZONE=TZ_NAME,
+                LLM_MODEL=SCRIPTED_LLM_MODEL,
+                LLM_API_KEY="",
+                LLM_API_BASE="",
+                LLM_FALLBACK_MODEL="",
+                LLM_FALLBACK_API_KEY="",
+                MAX_LLM_CALLS="8",
+                LLM_RETRIES="1",
+                MESSAGE_DEADLINE_S="90",
                 MEDIA_ENABLED="true",
-                TRANSCRIBE_MODEL="gemini/gemini-3.8-flash",
+                MEDIA_MAX_BYTES="5000000",
+                TRANSCRIBE_MODEL=SCRIPTED_TRANSCRIBE_MODEL,
                 TRANSCRIBE_API_KEY=TRANSCRIBE_KEY,
-                VOICE_API_URL="",
-                APP_AUTH_SECRET="",
+                TRANSCRIBE_API_BASE="",
+                TRANSCRIBE_FALLBACK_MODEL="",
+                TRANSCRIBE_FALLBACK_API_KEY="",
+                VOICE_MAX_SECONDS=str(SCRIPTED_VOICE_MAX_SECONDS),
+                VOICE_DAILY_TOKENS=str(SCRIPTED_VOICE_DAILY_TOKENS),
+                VOICE_GLOBAL_DAILY_TOKENS=str(SCRIPTED_VOICE_GLOBAL_DAILY_TOKENS),
+                MINIAPP_URL=MINIAPP_URL,
+                VOICE_API_URL=VOICE_API_URL,
+                APP_AUTH_SECRET=SYNTHETIC_APP_AUTH_SECRET,
+                APP_CODE_TTL_S=str(SCRIPTED_APP_CODE_TTL_S),
+                APP_SESSION_TTL_S=str(SCRIPTED_APP_SESSION_TTL_S),
+                APP_SESSION_NOT_BEFORE="",
             )
 
         webhook.get_settings.cache_clear()
         webhook._get_budget.cache_clear()
         webhook._DEDUPLICATOR = UpdateDeduplicator()
-        webhook._CONFIRMATIONS = VoiceConfirmations()
+        webhook._CONFIRMATIONS = (
+            VoiceConfirmations() if args.real else VoiceConfirmations(clock=scripted_clock)
+        )
         webhook._TEXT_SUBMISSIONS = TextSubmissions()
         settings = webhook.get_settings()
         if args.real:
@@ -806,6 +1149,9 @@ def main_run() -> None:
         telegram_state = TelegramState()
         provider = None if args.real else ScriptedProvider(scripted_turns(today))
         transcribe_provider = None if args.real else ScriptedTranscribeClient(scripted_transcriptions())
+        voice_transcribe_provider = (
+            None if args.real else ScriptedTranscribeClient(scripted_voice_api_transcriptions())
+        )
 
         def build_e2e_model(cfg: Settings) -> Any:
             inner = build_model(cfg, client=provider)
@@ -821,8 +1167,17 @@ def main_run() -> None:
                 )
                 assert kwargs.get("budget") is expected_budget
                 assert transcribe_provider is not None
-                kwargs["transcriber"] = build_transcriber(cfg, expected_budget, client=transcribe_provider)
+                kwargs["clock"] = scripted_clock
+                kwargs["transcriber"] = build_transcriber(
+                    cfg, expected_budget, client=transcribe_provider, clock=scripted_clock
+                )
             return orig_webhook_build_handler(cfg, http, **kwargs)
+
+        async def deliver_e2e_reminder(
+            cfg: Settings, kind: str, clock: Callable[[], datetime] | None = None
+        ) -> tuple[int, int]:
+            active_clock = clock if clock is not None else (None if args.real else scripted_clock)
+            return await orig_reminder_deliver(cfg, kind, clock=active_clock)
 
         webhook.httpx = _WebhookHttpx(telegram_state)  # ty: ignore[invalid-assignment]
         webhook.build_handler = build_e2e_handler  # ty: ignore[invalid-assignment]
@@ -830,13 +1185,14 @@ def main_run() -> None:
         reminder.http_client = lambda: httpx.AsyncClient(  # ty: ignore[invalid-assignment]
             transport=RoutingTransport(telegram_state)
         )
+        reminder.deliver = deliver_e2e_reminder  # ty: ignore[invalid-assignment]
 
         headers = {webhook.SECRET_HEADER: WEBHOOK_SECRET}
         update = {
             "update_id": 1001,
             "message": {
                 "message_id": 1,
-                "date": int(time.time()),
+                "date": int(run_now.timestamp()),
                 "chat": {"id": CHAT_ID, "type": "private"},
                 "from": {"id": CHAT_ID, "is_bot": False, "first_name": "Local"},
                 "text": message,
@@ -856,11 +1212,12 @@ def main_run() -> None:
             miniapp_trace: dict[str, Any] | None = None
             rejected_summary: list[dict[str, Any]] | None = None
             if not args.real:
+                assert voice_transcribe_provider is not None
                 rejected_summary = assert_stage1_typed_and_writestate(
                     status, body, stage1_steps, stage1_reply, stage1_keyboard
                 )
                 voice_trace, miniapp_trace = run_scripted_voice_and_miniapp(
-                    post, headers, telegram_state, settings, today
+                    post, headers, telegram_state, settings, voice_transcribe_provider, run_now, today
                 )
 
             elapsed = round(time.monotonic() - started, 2)
@@ -873,10 +1230,13 @@ def main_run() -> None:
 
         sheets = httpx.get(sheet_url + "__sheets").json()
     finally:
+        os.environ.clear()
+        os.environ.update(orig_environ)
         webhook.httpx = orig_webhook_httpx
         webhook.build_handler = orig_webhook_build_handler
         handler_module.build_model = orig_handler_build_model
         reminder.http_client = orig_reminder_http_client
+        reminder.deliver = orig_reminder_deliver
         proc.kill()
 
     reminded = [
@@ -888,13 +1248,25 @@ def main_run() -> None:
     assertions_trace: dict[str, Any] | None = None
     if not args.real:
         assert provider is not None and transcribe_provider is not None
+        assert voice_transcribe_provider is not None
         row_counts = assert_reminder_and_final_sheets(
-            remind_status, remind_text, reminded, sheets, today, provider, transcribe_provider
+            remind_status,
+            remind_text,
+            reminded,
+            sheets,
+            today,
+            provider,
+            transcribe_provider,
+            voice_transcribe_provider,
         )
         assertions_trace = {
             "write_state_rejections": rejected_summary,
             "voice_chat_confirmed": True,
             "voice_chat_duplicate_blocked": True,
+            "miniapp_app_voice_link_issued": True,
+            "miniapp_voice_service_health_and_cors": True,
+            "miniapp_voice_session_issued_and_replay_blocked": True,
+            "miniapp_voice_transcribed_and_idempotent": True,
             "miniapp_voice_saved": True,
             "miniapp_voice_duplicate_blocked": True,
             "daily_reminder_missing_steps": True,
@@ -940,10 +1312,12 @@ def main_run() -> None:
     all_steps = list(stage1_steps)
     if voice_trace is not None:
         for sub in voice_trace.values():
-            all_steps.extend(sub["timeline"])
+            if isinstance(sub, dict) and "timeline" in sub:
+                all_steps.extend(sub["timeline"])
     if miniapp_trace is not None:
         for sub in miniapp_trace.values():
-            all_steps.extend(sub["timeline"])
+            if isinstance(sub, dict) and "timeline" in sub:
+                all_steps.extend(sub["timeline"])
     kinds = [t["kind"] for t in all_steps]
 
     print(f"webhook → {status} {body} in {elapsed}s")
@@ -961,7 +1335,11 @@ def main_run() -> None:
             f"voice chat → Entendi [{voice_trace['voice_update']['vid']}] → vok saved Água L 2,5 "
             f"→ duplicate vok blocked ({voice_trace['duplicate_tap']['callback_toast']!r})"
         )
-        print(f"miniapp voice → web_app_data t='text' saved Lanche → duplicate id blocked ({DONE_REPLY!r})")
+        print(
+            "miniapp voice → /app vc → /v1/auth/sessions Bearer (replay 401 credential_used) "
+            "→ /v1/voice/transcriptions (+ idempotent replay) → web_app_data t='text' saved Lanche "
+            f"→ duplicate id blocked ({DONE_REPLY!r})"
+        )
     print(f"remind daily → {remind_status} {remind_text}: " + (" / ".join(reminded) or "(no message)"))
     print(f"trace: {path.relative_to(ROOT)}")
 

@@ -99,3 +99,31 @@ test('menu Sistema: the three actions; the dialog shows the proposal page', () =
   assert.deepEqual(out.open, []);
 });
 
+// ---- Accessibility (WCAG AA) -----------------------------------------------
+
+test('a11y: wizard.html declares lang="pt-BR" (WCAG 3.1.1 Language of Page)', () => {
+  const ctx = load({ fixture: 'zoio_3_0', now: NOW });
+  ctx.Actions.run('migrate');
+  const html = ctx.__dialogs[0].html;
+  assert.match(html, /<html[^>]+lang="pt-BR"/,
+    'wizard.html must have lang="pt-BR" on the <html> element');
+});
+
+test('a11y: #errors div has role="alert" so AT announce validation errors immediately (WCAG 4.1.3)', () => {
+  const ctx = load({ fixture: 'zoio_3_0', now: NOW });
+  ctx.Actions.run('migrate');
+  const html = ctx.__dialogs[0].html;
+  // matches either attribute-order variant
+  assert.match(html, /id="errors"[^>]*role="alert"|role="alert"[^>]*id="errors"/,
+    '#errors must carry role="alert" to surface validation errors to screen readers');
+});
+
+test('a11y: #out div has aria-live and role="status" so AT announce migration progress (WCAG 4.1.3)', () => {
+  const ctx = load({ fixture: 'zoio_3_0', now: NOW });
+  ctx.Actions.run('migrate');
+  const html = ctx.__dialogs[0].html;
+  assert.match(html, /id="out"[^>]*aria-live|aria-live[^>]*id="out"/,
+    '#out must carry aria-live to surface migration status to screen readers');
+  assert.match(html, /id="out"[^>]*role="status"|role="status"[^>]*id="out"/,
+    '#out must carry role="status" so screen readers treat it as a status region');
+});

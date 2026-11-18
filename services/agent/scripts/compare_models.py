@@ -777,7 +777,12 @@ def sent_config(model: str, level: str) -> dict[str, Any]:
     try:
         return dict(
             get_optional_params(
-                model=bare, custom_llm_provider=provider, temperature=0, max_tokens=MAX_TOKENS, **extra
+                model=bare,
+                custom_llm_provider=provider,
+                temperature=0,
+                max_tokens=MAX_TOKENS,
+                drop_params=True,
+                **extra,
             )
         )
     except Exception as err:

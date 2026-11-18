@@ -561,7 +561,7 @@ async def retry(sheet: MiniappSheet, key: str, store: PendingStore, chat_id: int
     if pending is None:
         return Reply(EXPIRED)
     reply = await _run(sheet, pending, None)
-    if not reply.transient:
+    if reply.write_outcome in ("committed", "uncertain") or not reply.transient:
         store.discard(key)
     return reply
 

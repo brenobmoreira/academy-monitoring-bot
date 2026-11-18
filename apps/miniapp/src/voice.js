@@ -785,15 +785,26 @@
       } else if (ef.type === 'request_mic') {
         requestMic(ef.generation);
       } else if (ef.type === 'start_recorder') {
-        if (ctx && ctx.grantedStream) activeStream = ctx.grantedStream;
+        if (ctx && ctx.grantedStream) {
+          activeStream = ctx.grantedStream;
+          if (typeof o.onStream === 'function') {
+            try { o.onStream(activeStream); } catch (e) { /* ignore */ }
+          }
+        }
         startRecorder(ef.generation);
       } else if (ef.type === 'stop_recorder') {
         stopRecorderOnly();
       } else if (ef.type === 'stop_tracks') {
         if (ctx && ctx.grantedStream) {
           stopStreamTracks(ctx.grantedStream);
+          if (typeof o.onStream === 'function') {
+            try { o.onStream(null); } catch (e) { /* ignore */ }
+          }
         } else {
           stopStreamTracks(activeStream);
+          if (typeof o.onStream === 'function') {
+            try { o.onStream(null); } catch (e) { /* ignore */ }
+          }
           activeStream = null;
         }
       } else if (ef.type === 'drop_blob') {

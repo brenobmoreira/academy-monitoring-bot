@@ -15,11 +15,12 @@ import re
 import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 
 import httpx
 
+from agent.auth import AuthError, LinkCodes, telegram_principal
 from agent.format import bold, escape
 from agent.settings import Settings, parse_env_arg
 from agent.sheet_client import WriteOutcome
@@ -66,6 +67,29 @@ class Reply:
     write_outcome: WriteOutcome | None = None
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+@dataclass(frozen=True)
+class VoiceLink:
+    """Voice service origin and one-time link-code issuer for `/app` (voice spec §7.1, §13 C7)."""
+
+    api_url: str
+    codes: LinkCodes
+    clock: Callable[[], datetime] = _utc_now
+
+    def issue_keys(self, chat_id: int) -> dict[str, Any] | None:
+        now = self.clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            now = now.replace(tzinfo=UTC)
+        try:
+            code, exp = self.codes.issue(telegram_principal(chat_id), now)
+        except AuthError:
+            return None
+        return {"vu": self.api_url, "vc": code, "vx": exp}
+
+
 @dataclass(frozen=True)
 class Context:
     """What a command may use: the sheet API and today's date in the configured TIMEZONE."""
@@ -74,6 +98,7 @@ class Context:
     today: date
     chat_id: int = 0
     miniapp_url: str = ""  # empty: the Mini App is not configured
+    voice: VoiceLink | None = None
 
     def api(self) -> CommandSheet:
         if self.sheet is None:
@@ -356,8 +381,9 @@ async def app(ctx: Context, args: str) -> Reply:
     response = await ctx.api().catalog()
     if not response.get("ok"):
         return sheet_failure(response)
+    voice_keys = ctx.voice.issue_keys(ctx.chat_id) if ctx.voice is not None else None
     try:
-        markup, dropped = miniapp.keyboard_markup(ctx.miniapp_url, response["result"])
+        markup, dropped = miniapp.keyboard_markup(ctx.miniapp_url, response["result"], voice_keys=voice_keys)
     except miniapp.CatalogTooLarge as err:
         return Reply(
             f"⚠ O catálogo ficou grande demais para o link do Mini App: {err.length} caracteres, "

@@ -10,7 +10,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
-from typing import Any, NamedTuple, Protocol, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -37,6 +37,7 @@ from agent.logs import describe
 from agent.settings import Settings
 from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient
+from agent.text_submissions import TextSubmissions, text_scope_key
 from agent.tools import update_key_scope
 from agent.transcribe import Audio, TranscribeError, Transcript, build_transcriber
 from agent.undo import undo_run
@@ -49,6 +50,9 @@ from agent.voice_confirm import (
     sha256_hex,
     voice_toast,
 )
+
+if TYPE_CHECKING:
+    from agent.commands import VoiceLink
 
 log = logging.getLogger(__name__)
 
@@ -262,6 +266,8 @@ class Handler:
         message_deadline_s: float | None = None,
         send_reserve_s: float = SEND_RESERVE_S,
         miniapp_url: str = "",
+        voice_link: VoiceLink | None = None,
+        text_submissions: TextSubmissions | None = None,
         pending: miniapp.PendingStore | None = None,
         confirmations: VoiceConfirmations | None = None,
         transcriber: VoiceTranscriber | None = None,
@@ -280,6 +286,10 @@ class Handler:
         self._message_deadline_s = message_deadline_s
         self._send_reserve_s = send_reserve_s
         self._miniapp_url = miniapp_url
+        self._voice_link = voice_link
+        self._text_submissions = (
+            text_submissions if text_submissions is not None else TextSubmissions(clock=self._clock)
+        )
         self._pending = pending if pending is not None else miniapp.PendingStore()
         self._confirmations = confirmations if confirmations is not None else VoiceConfirmations()
         self._transcriber = transcriber
@@ -392,22 +402,64 @@ class Handler:
         return await self._run_bot(text, message, update_id)
 
     async def _miniapp(self, web_app_data: Any, chat_id: int, update_id: int | None) -> Reply:
-        """The form of the Mini App: validated and written without the model or any download."""
+        """Mini App `web_app_data`: forms write to the sheet; `t: "text"` goes to the agent (§4.2)."""
         raw = web_app_data.get("data") if isinstance(web_app_data, dict) else None
+        raw_text = raw if isinstance(raw, str) else ""
         try:
-            if self._sheet is None:
-                raise RuntimeError("this handler has no sheet API")
-            sheet = cast(miniapp.MiniappSheet, self._sheet)
-            return await miniapp.handle(
-                sheet,
-                raw if isinstance(raw, str) else "",
-                chat_id,
-                self._clock().date(),
-                self._pending,
-            )
+            today = self._clock().date()
+            payload, problems = miniapp.parse_payload(raw_text, today)
+            if payload is None:
+                return Reply("\n".join([miniapp.NOTHING_SAVED, *(f"• {p}" for p in problems)]))
+            if not isinstance(payload, miniapp.TextPayload):
+                if self._sheet is None:
+                    raise RuntimeError("this handler has no sheet API")
+                sheet = cast(miniapp.MiniappSheet, self._sheet)
+                return await miniapp.handle(sheet, raw_text, chat_id, today, self._pending)
+            decision = self._text_submissions.begin(chat_id, payload.id, payload.text)
         except Exception as error:
             log.warning("mini app data failed on update %s: %s", update_id, describe(error))
             return Reply(FAILURE, failed=True, transient=True)
+        if not decision.proceed:
+            assert decision.reply is not None
+            return decision.reply
+        return await self._run_text_submission(payload, chat_id, update_id)
+
+    async def _run_text_submission(
+        self, payload: miniapp.TextPayload, chat_id: int, update_id: int | None
+    ) -> Reply:
+        try:
+            reply = await self._run_bot(
+                payload.text,
+                {"chat": {"id": chat_id}},
+                update_id,
+                scope_key=text_scope_key(chat_id, payload.id),
+                use_reply_context=False,
+                uncertain_on_error=True,
+            )
+        except BaseException:
+            self._text_submissions.finish(chat_id, payload.id, cut=True)
+            raise
+        deadline_at = MESSAGE_DEADLINE_AT.get()
+        cut = deadline_at is not None and asyncio.get_running_loop().time() >= deadline_at and reply.failed
+        self._text_submissions.finish(
+            chat_id,
+            payload.id,
+            outcome=reply.write_outcome,
+            failed=reply.failed,
+            transient=reply.transient,
+            cut=cut,
+        )
+        if cut:
+            no_writes = reply.write_outcome in (None, "not_committed")
+            return Reply(
+                miniapp.WRITE_UNCERTAIN if no_writes else reply.text,
+                html=False if no_writes else reply.html,
+                reply_markup=None if no_writes else reply.reply_markup,
+                failed=True,
+                transient=False,
+                write_outcome="uncertain",
+            )
+        return reply
 
     async def _run_bot(
         self,
@@ -418,6 +470,7 @@ class Handler:
         *,
         scope_key: str | None = None,
         use_reply_context: bool = True,
+        uncertain_on_error: bool = False,
     ) -> Reply:
         chat_id = message["chat"]["id"]
         typing = asyncio.create_task(self._keep_typing(chat_id, strict_int(update_id)))
@@ -444,6 +497,13 @@ class Handler:
             )
         except Exception as error:
             log.warning("bot failed on update %s: %s", update_id, describe(error))
+            if uncertain_on_error:
+                return Reply(
+                    miniapp.WRITE_UNCERTAIN,
+                    failed=True,
+                    transient=False,
+                    write_outcome="uncertain",
+                )
             return Reply(FAILURE, failed=True, transient=True)
         finally:
             typing.cancel()
@@ -578,6 +638,7 @@ class Handler:
             today=self._clock().date(),
             chat_id=chat_id,
             miniapp_url=self._miniapp_url,
+            voice=self._voice_link,
         )
         try:
             return await COMMANDS[name].run(ctx, args)
@@ -799,15 +860,36 @@ def build_handler(
     http: httpx.AsyncClient,
     *,
     deduplicator: UpdateDeduplicator | None = None,
+    voice_link: VoiceLink | None = None,
+    text_submissions: TextSubmissions | None = None,
+    clock: Callable[[], datetime] | None = None,
     confirmations: VoiceConfirmations | None = None,
     budget: Budget | None = None,
     transcriber: VoiceTranscriber | None = None,
 ) -> Handler:
+    resolved_voice_link = voice_link
+    if resolved_voice_link is None and settings.VOICE_API_URL and settings.APP_AUTH_SECRET is not None:
+        from agent.auth import AllowedChats, LinkCodes, TelegramDirectory, derive_keys
+        from agent.commands import VoiceLink
+
+        keys = derive_keys(settings.APP_AUTH_SECRET.get_secret_value())
+        codes = LinkCodes(
+            keys,
+            TelegramDirectory(keys, settings.ALLOWED_CHAT_IDS),
+            AllowedChats(settings.ALLOWED_CHAT_IDS),
+            ttl_s=settings.APP_CODE_TTL_S,
+        )
+        resolved_voice_link = (
+            VoiceLink(api_url=settings.VOICE_API_URL, codes=codes, clock=clock)
+            if clock is not None
+            else VoiceLink(api_url=settings.VOICE_API_URL, codes=codes)
+        )
     sheet = SheetClient(settings.SHEET_API_URL, settings.SHEET_API_KEY.get_secret_value(), http)
     bot = Bot(
         sheet,
         build_model(settings),
         timezone=settings.TIMEZONE,
+        clock=clock,
         max_llm_calls=settings.MAX_LLM_CALLS,
         deadline_s=settings.MESSAGE_DEADLINE_S,
     )
@@ -823,19 +905,27 @@ def build_handler(
                 timezone=settings.TIMEZONE,
             )
         )
-        resolved_transcriber = build_transcriber(settings, resolved_budget)
+        resolved_transcriber = build_transcriber(settings, resolved_budget, clock=clock)
+    resolved_confirmations = (
+        confirmations
+        if confirmations is not None
+        else (VoiceConfirmations(clock=clock) if clock is not None else None)
+    )
     return Handler(
         settings.ALLOWED_CHAT_IDS,
         bot,
         telegram,
         sheet=sheet,
         timezone=settings.TIMEZONE,
+        clock=clock,
         media_enabled=settings.MEDIA_ENABLED,
         media_max_bytes=settings.MEDIA_MAX_BYTES,
         message_deadline_s=settings.MESSAGE_DEADLINE_S,
         deduplicator=deduplicator,
         miniapp_url=settings.MINIAPP_URL,
-        confirmations=confirmations,
+        voice_link=resolved_voice_link,
+        text_submissions=text_submissions,
+        confirmations=resolved_confirmations,
         transcriber=resolved_transcriber,
         voice_max_seconds=settings.VOICE_MAX_SECONDS,
     )

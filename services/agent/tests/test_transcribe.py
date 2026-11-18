@@ -208,6 +208,7 @@ async def test_the_request_has_the_prompt_one_audio_part_and_fixed_parameters():
     assert len(request["messages"]) == 2
     assert request["temperature"] == 0
     assert request["max_tokens"] == 600
+    assert request["drop_params"] is True
     assert request["timeout"] == 15
     assert request["api_key"] == "primary-key-123"
     assert request["api_base"] == "https://proxy.example/v1"
@@ -735,3 +736,19 @@ def test_build_transcriber_assembles_from_settings():
     budget = RecordingBudget()
     t = build_transcriber(cfg(), budget, client=FakeLiteLLMClient([]))
     assert isinstance(t, Transcriber)
+
+
+def test_default_transcribe_model_kwargs_pass_litellm_param_validation():
+    budget = RecordingBudget()
+    settings = TranscribeSettings.model_construct(TRANSCRIBE_MODEL="gemini/gemini-3.8-flash")
+    transcriber = Transcriber(settings, budget, client=FakeLiteLLMClient([]))
+    _, kwargs = transcriber._request(ogg(), "ogg")
+    assert kwargs.get("drop_params") is True
+
+    params = litellm.utils.get_optional_params(
+        model="gemini-3.8-flash",
+        custom_llm_provider="gemini",
+        **{k: v for k, v in kwargs.items() if k in ("temperature", "max_tokens", "drop_params")},
+    )
+    assert isinstance(params, dict)
+    assert "temperature" not in params

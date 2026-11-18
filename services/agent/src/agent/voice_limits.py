@@ -13,7 +13,7 @@ import math
 import threading
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, TypeGuard, TypeVar
@@ -302,7 +302,7 @@ class ConcurrencyGate:
                 self._active -= 1
 
     @contextlib.asynccontextmanager
-    async def slot(self) -> AsyncIterator[None]:
+    async def slot(self) -> AsyncGenerator[None, None]:
         if not self._try_acquire():
             raise ConcurrencyLimitError(self._retry_after)
         try:

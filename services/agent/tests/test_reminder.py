@@ -240,7 +240,9 @@ async def test_process_is_404_without_a_configured_token(delivered, monkeypatch)
 
 def functions_framework_call(token, body):
     headers = {reminder.TOKEN_HEADER: token} if token is not None else {}
-    environ = EnvironBuilder(path="/remind", method="POST", headers=headers, json=body).get_environ()
+    environ = EnvironBuilder(
+        path="/remind", method="POST", headers=list(headers.items()), json=body
+    ).get_environ()
     return main.telegram_webhook(Request(environ))
 
 

@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Annotated, Any, ClassVar
+from typing import Annotated, Any, ClassVar, Self
 from urllib.parse import urlsplit
 
 import yaml
@@ -49,6 +50,7 @@ def _valid_https_url(value: str) -> bool:
         parts.scheme == "https"
         and parts.username is None
         and parts.password is None
+        and not parts.netloc.endswith(":")
         and _HOST.fullmatch(host.lower()) is not None
     )
 
@@ -57,10 +59,21 @@ class ConfigError(RuntimeError):
     pass
 
 
+def validation_problems(err: ValidationError) -> list[str]:
+    """`FIELD: what is wrong`, one per error, for a ConfigError or a log line: the field name and
+    pydantic's message, never the rejected input, the error context or anything below the field
+    (the keys of a mapping can be ids)."""
+    problems = err.errors(include_input=False, include_context=False, include_url=False)
+    return [
+        f"{problem['loc'][0] if problem['loc'] else 'settings'}: {problem['msg']}" for problem in problems
+    ]
+
+
 class TranscribeSettings(BaseModel):
     """Transcription and voice-budget settings (voice spec §3.1, §5.6), shared by the bot's Settings
-    and, later, the voice service's. The host class may define LLM_MODEL, LLM_API_KEY and
-    MEDIA_ENABLED; without them (the voice service) the key must be given explicitly."""
+    and the voice service's VoiceSettings. The host class may define LLM_MODEL, LLM_API_KEY,
+    MEDIA_ENABLED and VOICE_API_ENABLED; without LLM_* (the voice service) the key must be given
+    explicitly."""
 
     # Gemini through Google AI Studio or Vertex AI only: the audio-native providers (spec §3.1).
     TRANSCRIBE_MODEL: str = "gemini/gemini-3.8-flash"
@@ -146,8 +159,9 @@ class TranscribeSettings(BaseModel):
     def _transcribe_consistency(self) -> TranscribeSettings:
         if self.TRANSCRIBE_TIMEOUT_S > self.TRANSCRIBE_DEADLINE_S:
             raise ValueError("TRANSCRIBE_TIMEOUT_S must not be longer than TRANSCRIBE_DEADLINE_S")
+        enabled = getattr(self, "MEDIA_ENABLED", True) and getattr(self, "VOICE_API_ENABLED", True)
         if (
-            getattr(self, "MEDIA_ENABLED", True)
+            enabled
             and _provider(self.TRANSCRIBE_MODEL) == "gemini"
             and self.transcribe_api_key() is None
             and not _sdk_gemini_key_in_environment()
@@ -164,8 +178,8 @@ class TranscribeSettings(BaseModel):
                 and self.TRANSCRIBE_FALLBACK_API_KEY is None
             ):
                 raise ValueError(
-                    f"TRANSCRIBE_FALLBACK_MODEL {fallback} is not a "
-                    f"{_provider(self.TRANSCRIBE_MODEL)} model: set TRANSCRIBE_FALLBACK_API_KEY for it"
+                    "TRANSCRIBE_FALLBACK_MODEL has a different provider from "
+                    f"{_provider(self.TRANSCRIBE_MODEL)}: set TRANSCRIBE_FALLBACK_API_KEY for it"
                 )
             if self.TRANSCRIBE_API_BASE and self.transcribe_fallback_api_key() is None:
                 raise ValueError(
@@ -175,9 +189,53 @@ class TranscribeSettings(BaseModel):
         return self
 
 
-class Settings(BaseSettings, TranscribeSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+class LoadedSettings(BaseSettings):
+    """Shared settings loader (YAML + .env + environment, secret guard, log masking)."""
 
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+    SECRETS: ClassVar[frozenset[str]] = frozenset()
+
+    def secret_values(self) -> list[str]:
+        values = (getattr(self, name, None) for name in self.SECRETS)
+        return [v.get_secret_value() for v in values if isinstance(v, SecretStr)]
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        yaml_source = YamlConfigSettingsSource(settings_cls, yaml_file=settings_file())
+        return init_settings, env_settings, dotenv_settings, yaml_source
+
+    @classmethod
+    def load(cls, env_file: str | Path | None = None) -> Self:
+        """Builds the settings, turning missing or invalid values into one readable ConfigError."""
+        path = settings_file()
+        check_no_secrets(path, cls.SECRETS)
+        dotenv = Path(env_file or os.environ.get("ENV_FILE") or ".env")
+        try:
+            settings = cls(_env_file=dotenv)  # type: ignore[call-arg]
+        except ValidationError as err:
+            problems = validation_problems(err)
+            raise ConfigError(f"Invalid settings ({path}): " + "; ".join(problems)) from None
+        logs.register_secrets(settings.secret_values())
+        # Keys a provider SDK reads from the environment on its own, without LLM_API_KEY.
+        logs.register_secrets(os.environ.get(name) for name in PROVIDER_KEY_VARIABLES)
+        logs.install()
+        return settings
+
+
+class Settings(LoadedSettings, TranscribeSettings):
     SECRETS: ClassVar[frozenset[str]] = frozenset(
         {
             "TELEGRAM_BOT_TOKEN",
@@ -253,8 +311,11 @@ class Settings(BaseSettings, TranscribeSettings):
     @classmethod
     def _split_chat_ids(cls, value: Any) -> Any:
         if isinstance(value, str):
-            return frozenset(int(part) for part in value.split(",") if part.strip())
-        if isinstance(value, int):
+            try:
+                return frozenset(int(part) for part in value.split(",") if part.strip())
+            except ValueError:
+                raise ValueError("must be a comma-separated list of integers") from None
+        if type(value) is int:
             return frozenset({value})
         return value
 
@@ -297,39 +358,6 @@ class Settings(BaseSettings, TranscribeSettings):
             )
         return self
 
-    def secret_values(self) -> list[str]:
-        values = (getattr(self, name, None) for name in self.SECRETS)
-        return [v.get_secret_value() for v in values if isinstance(v, SecretStr)]
-
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        yaml_source = YamlConfigSettingsSource(settings_cls, yaml_file=settings_file())
-        return init_settings, env_settings, dotenv_settings, yaml_source
-
-    @classmethod
-    def load(cls, env_file: str | Path | None = None) -> Settings:
-        """Builds the settings, turning missing or invalid values into one readable ConfigError."""
-        path = settings_file()
-        check_no_secrets(path)
-        dotenv = Path(env_file or os.environ.get("ENV_FILE") or ".env")
-        try:
-            settings = cls(_env_file=dotenv)  # type: ignore[call-arg]
-        except ValidationError as err:
-            problems = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in err.errors()]
-            raise ConfigError(f"Invalid settings ({path}): " + "; ".join(problems)) from err
-        logs.register_secrets(settings.secret_values())
-        # Keys a provider SDK reads from the environment on its own, without LLM_API_KEY.
-        logs.register_secrets(os.environ.get(name) for name in PROVIDER_KEY_VARIABLES)
-        logs.install()
-        return settings
-
 
 PROVIDER_KEY_VARIABLES = (
     "GEMINI_API_KEY",
@@ -343,6 +371,7 @@ PROVIDER_KEY_VARIABLES = (
 
 
 TRANSCRIBE_PROVIDERS = frozenset({"gemini", "vertex_ai"})
+_ALL_YAML_SECRETS = Settings.SECRETS | frozenset({"APP_AUTH_SECRET"})
 
 
 def _sdk_gemini_key_in_environment() -> bool:
@@ -368,10 +397,16 @@ def parse_env_arg(argv: list[str] | None = None) -> str | None:
     return args.env_file
 
 
-def check_no_secrets(path: Path) -> None:
+def check_no_secrets(path: Path, extra_secrets: Iterable[str] = ()) -> None:
     if not path.is_file():
         return
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    leaked = sorted(k for k in data if str(k).upper() in Settings.SECRETS)
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as err:
+        raise ConfigError(f"Invalid YAML in {path}") from err
+    if not isinstance(data, dict):
+        raise ConfigError(f"Invalid settings ({path}): YAML root must be a mapping")
+    forbidden = _ALL_YAML_SECRETS | frozenset(s.upper() for s in extra_secrets)
+    leaked = sorted(str(k) for k in data if str(k).upper() in forbidden)
     if leaked:
         raise ConfigError(f"{path} must not contain secrets; move {', '.join(leaked)} to the environment")

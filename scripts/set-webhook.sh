@@ -15,7 +15,6 @@ set -euo pipefail
 
 cmd="${1:-info}"
 : "${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN}"
-api="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
 
 # Update kinds the bot handles: messages and inline-button taps. Same list as
 # agent.telegram.ALLOWED_UPDATES (polling); services/agent/tests/test_telegram.py checks it.
@@ -39,16 +38,28 @@ case "$cmd" in
   set)
     : "${AGENT_URL:?set AGENT_URL}"
     : "${TELEGRAM_WEBHOOK_SECRET:?set TELEGRAM_WEBHOOK_SECRET}"
-    curl -sS "${api}/setWebhook" \
+    curl -sS --fail-with-body --config - \
       --data-urlencode "url=${AGENT_URL}" \
-      --data-urlencode "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
       --data-urlencode "allowed_updates=${allowed_updates}" \
-      --data-urlencode "drop_pending_updates=true"
+      --data-urlencode "drop_pending_updates=true" <<EOF
+url = "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook"
+data-urlencode = "secret_token=${TELEGRAM_WEBHOOK_SECRET}"
+EOF
     echo
-    curl -sS "${api}/setMyCommands" --data-urlencode "commands=${commands}"
+    curl -sS --fail-with-body --config - --data-urlencode "commands=${commands}" <<EOF
+url = "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setMyCommands"
+EOF
     ;;
-  info)   curl -sS "${api}/getWebhookInfo" ;;
-  delete) curl -sS "${api}/deleteWebhook" ;;
+  info)
+    curl -sS --fail-with-body --config - <<EOF
+url = "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+EOF
+    ;;
+  delete)
+    curl -sS --fail-with-body --config - <<EOF
+url = "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook"
+EOF
+    ;;
   *) echo "usage: $0 {set|info|delete}" >&2; exit 2 ;;
 esac
 echo

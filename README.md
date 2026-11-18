@@ -14,36 +14,42 @@ repo.
 
 | Part | Language | What it does | Setup |
 |------|----------|--------------|-------|
-| [`services/agent`](services/agent) | Python 3.12, Google ADK, LiteLLM | Telegram webhook (Cloud Run function or uvicorn), LLM agent with sheet tools, confirmation replies | [README](services/agent/README.md) |
-| [`apps/sheet4`](apps/sheet4) | Apps Script (JS) | Sheet 4.0: validated JSON API over the spreadsheet, **Acompanhamento** menu, `Hoje`, `Painel`, `Semanas`, `Progressão`, 3.0 → 4.0 migration (`apps/sheet` is the legacy 3.0 script) | [setup](docs/setup/README.md) |
+| [`services/agent`](services/agent) | Python 3.12, Google ADK, LiteLLM | Telegram webhook (Cloud Run function or uvicorn), text and chat voice processing with confirmation, optional `voice_asgi` service, slash commands (`/hoje`, `/semana`, `/app`, etc.), LLM agent with sheet tools | [README](services/agent/README.md) |
+| [`apps/sheet4`](apps/sheet4) | Apps Script (JS) | Sheet 4.0: transactional engine with proven cell rollback (`writeState`), listener fault isolation, validated JSON API, **Acompanhamento** menu (`ui_hoje`, `wizard`, `Painel`, `Semanas`, `Progressão`), 3.0 → 4.0 migration (`apps/sheet` is legacy 3.0) | [setup](docs/setup/README.md) |
+| [`apps/miniapp`](apps/miniapp) | HTML5, CSS, vanilla JS | Telegram Mini App zero-build for workout, food logging, and voice input; opens via bot inline button or `/app` | [spec](docs/specs/2026-11-09-miniapp-design.md) |
+| [`docs`](docs/README.md) | Markdown | Monorepo documentation: architecture decisions (`docs/adr`), specifications (`docs/specs`), implementation plans (`docs/plans`), research spikes (`docs/research`), and setup guides (`docs/setup`) | [README](docs/README.md) |
 
 ## Architecture
 
 ```
-Telegram ──webhook──▶ Cloud Run function (Python, ADK agent + LiteLLM)
+Telegram ──webhook──▶ Cloud Run function or ASGI (Python, ADK agent + LiteLLM)
                          │ tools: get_catalog, save_diary, save_workout, save_food,
                          │        get_exercise_history, get_diary_history, get_phase, get_week
                          │        └──POST JSON──▶ Apps Script Web App (apps/sheet4) ──▶ Sheets
                          │             ◀── {ok, result} | {ok:false, errors[]}
                          └──▶ Telegram reply (+ buttons ✅ Ok · ↩️ Desfazer · ✏️ Corrigir)
-                       /hoje, /ficha, /exercicios, /semana, /fase, /desfazer: Sheet API only, no model call
+                       /hoje, /ficha, /progressao, /exercicios, /semana, /fase, /desfazer, /app: Sheet API only, no model call
 
+Telegram ──/app or button──▶ Mini App (apps/miniapp: zero-build forms for workout/food + voice)
 Sheet menu "Acompanhamento" ──▶ Hoje screen / Wizard ──▶ same validator ──▶ same domain modules ──▶ Sheets
 ```
 
 - **Topology**: one deploy per client. Each client has their own spreadsheet with a bound `apps/sheet4` Web App deployment and a dedicated agent deployment/configuration (`fitness-agent-<client>`, with its own `SHEET_API_URL`, `SHEET_API_KEY`, `ALLOWED_CHAT_IDS`, `TELEGRAM_BOT_TOKEN`).
-- **Agent**: never touches the sheet directly. When the API rejects a payload, the error list (path,
+- **Agent**: never touches the sheet directly. Handles text messages, chat voice audio (transcription and user confirmation), and slash commands. When the API rejects a payload, the error list (path,
   message, suggestions) goes back to the model, which fixes it and calls again. The reply echoes
   what the sheet says it wrote. Duplicate Telegram deliveries on the same instance are ignored in-memory
   (`UpdateDeduplicator`), and each write carries a deterministic `requestId` so HTTP retries and
   re-executions that emit the same tool arguments are idempotent in the sheet (complementing
   `catalog.recent`; if an older Web App deployment rejects `requestId`, the client falls back to
   sending the request without it).
-- **Sheet API**: accepts exact JSON only, checks names against the `Exercícios`, `Alimentos`,
+- **Sheet API**: transactional engine with proven cell rollback (`writeState`) and listener fault
+  isolation. Accepts exact JSON only, checks names against the `Exercícios`, `Alimentos`,
   `Refeições favoritas` and `Fichas` tabs, reports every error at once and writes nothing unless the
   whole request is valid.
+- **Mini App**: Telegram Mini App (`apps/miniapp`) zero-build client offering interactive workout
+  and nutrition logging with voice input, opened directly from Telegram chat via `/app` or inline keyboard.
 
-Design and decisions: [`docs/specs`](docs/specs), [`docs/adr`](docs/adr), [`docs/plans`](docs/plans).
+Design and decisions: [`docs/specs`](docs/specs), [`docs/adr`](docs/adr), [`docs/plans`](docs/plans), [`docs/research`](docs/research). Overview: [`docs/README.md`](docs/README.md).
 
 ## Security model
 
@@ -75,8 +81,9 @@ make e2e          # whole stack locally with the scripted provider (e2e/)
 Or directly:
 
 ```bash
-npm test                                   # Apps Script, Node runner with in-memory fakes
-cd services/agent && uv run pytest         # agent, fake sheet API and scripted LLM
+npm test                                   # Apps Script test suite (Node runner with in-memory fakes)
+npm run check                              # Apps Script syntax check (--check across apps)
+cd services/agent && uv run pytest         # Python agent test suite (fake sheet API and scripted LLM)
 ```
 
 Neither suite needs network or a Google account.

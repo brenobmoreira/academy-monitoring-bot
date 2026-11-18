@@ -8,6 +8,7 @@ import logging
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 from zoneinfo import ZoneInfo
@@ -15,7 +16,20 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from agent import buttons, miniapp
-from agent.bot import MEDIA_UNREADABLE, MESSAGE_DEADLINE_AT, Answer, Bot, Media
+from agent.bot import (
+    MEDIA_DISABLED,
+    MEDIA_UNREADABLE,  # noqa: F401 - re-exported for callers/tests
+    MESSAGE_DEADLINE_AT,
+    VOICE_BUDGET,
+    VOICE_EMPTY,
+    VOICE_FAILED,
+    VOICE_FORMAT,
+    VOICE_TOO_LONG,
+    Answer,
+    Bot,
+    Media,
+)
+from agent.budget import Budget, MemoryBudget
 from agent.commands import COMMANDS, CommandSheet, Context, Reply, parse_command
 from agent.format import escape, split
 from agent.llm import build_model
@@ -25,6 +39,7 @@ from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient
 from agent.text_submissions import TextSubmissions, text_scope_key
 from agent.tools import update_key_scope
+from agent.transcribe import Audio, TranscribeError, Transcript, build_transcriber
 from agent.undo import undo_run
 from agent.voice_confirm import (
     VOICE_CANCEL_OK,
@@ -32,6 +47,7 @@ from agent.voice_confirm import (
     TerminalOutcome,
     VoiceAction,
     VoiceConfirmations,
+    sha256_hex,
     voice_toast,
 )
 
@@ -43,6 +59,7 @@ log = logging.getLogger(__name__)
 FAILURE = "⚠ Não consegui processar agora. Confira a planilha antes de reenviar."
 TYPING_EVERY = 4.0  # seconds; Telegram clears the "typing…" status after about 5 s
 MEDIA_MAX_BYTES = 5_000_000
+VOICE_MAX_SECONDS = 90
 # Seconds left after MESSAGE_DEADLINE_S to send the reply, then at most CUT_NOTICE_S to say an
 # update was cut: with the default 90 s, an update ends within 115 s, below Cloud Run's 120 s.
 SEND_RESERVE_S = 20.0
@@ -102,6 +119,12 @@ class Replier(Protocol):
     ) -> Answer: ...
 
 
+class VoiceTranscriber(Protocol):
+    async def transcribe(
+        self, audio: Audio, *, principal_key: str, deadline_s: float | None = None
+    ) -> Transcript: ...
+
+
 class Sender(Protocol):
     async def send_message(
         self,
@@ -132,6 +155,7 @@ class MediaRef(NamedTuple):
     file_id: str
     size: int | None  # as Telegram reports it; may be absent
     mime_type: str
+    duration: int | None = None  # seconds from Telegram for voice/audio; None for photos or absent
 
     def fits(self, max_bytes: int) -> bool:
         return self.size is None or self.size <= max_bytes
@@ -141,19 +165,29 @@ class TooLarge(Exception):
     pass
 
 
+def _audio_ref(message: dict[str, Any]) -> MediaRef | None:
+    for key, default_mime in (("voice", "audio/ogg"), ("audio", "audio/mpeg")):
+        item = message.get(key)
+        if isinstance(item, dict) and isinstance(item.get("file_id"), str):
+            mime = item.get("mime_type")
+            return MediaRef(
+                item["file_id"],
+                _size(item),
+                mime if isinstance(mime, str) and mime else default_mime,
+                _duration(item),
+            )
+    return None
+
+
 def media_ref(message: dict[str, Any], max_bytes: int) -> MediaRef | None:
     """The file to read from a voice, audio or photo message; None for any other message.
 
     Telegram sends each photo in several sizes (always JPEG): the largest that fits `max_bytes`
     is taken, or the smallest when none does (so the caller sees it is too large).
     """
-    for key, default_mime in (("voice", "audio/ogg"), ("audio", "audio/mpeg")):
-        item = message.get(key)
-        if isinstance(item, dict) and isinstance(item.get("file_id"), str):
-            mime = item.get("mime_type")
-            return MediaRef(
-                item["file_id"], _size(item), mime if isinstance(mime, str) and mime else default_mime
-            )
+    audio = _audio_ref(message)
+    if audio is not None:
+        return audio
     sizes = message.get("photo")
     photos = [
         MediaRef(p["file_id"], _size(p), "image/jpeg")
@@ -176,6 +210,11 @@ def strict_int(raw: Any) -> int | None:
 
 def _size(item: dict[str, Any]) -> int | None:
     return strict_int(item.get("file_size"))
+
+
+def _duration(item: dict[str, Any]) -> int | None:
+    seconds = strict_int(item.get("duration"))
+    return seconds if seconds is not None and seconds >= 0 else None
 
 
 def _message_fault(message: Any, where: str) -> str | None:
@@ -231,6 +270,8 @@ class Handler:
         text_submissions: TextSubmissions | None = None,
         pending: miniapp.PendingStore | None = None,
         confirmations: VoiceConfirmations | None = None,
+        transcriber: VoiceTranscriber | None = None,
+        voice_max_seconds: int = VOICE_MAX_SECONDS,
     ) -> None:
         self._allowed = allowed_chat_ids
         self._bot = bot
@@ -251,6 +292,8 @@ class Handler:
         )
         self._pending = pending if pending is not None else miniapp.PendingStore()
         self._confirmations = confirmations if confirmations is not None else VoiceConfirmations()
+        self._transcriber = transcriber
+        self._voice_max_seconds = voice_max_seconds
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         """Never raises: a webhook that errors makes Telegram resend the same update. A malformed
@@ -345,16 +388,18 @@ class Handler:
         if isinstance(form, dict) and isinstance(form.get("data"), str):
             reply = await self._miniapp(form, chat_id, update_id)
         elif not isinstance(text, str) or not text.strip():
-            reply = await self._media(message, chat_id, update_id)
-            if reply is None:
-                return True
+            return await self._media(message, chat_id, update_id)
         else:
-            parsed = parse_command(text)
-            if parsed is not None:
-                reply = await self._command(*parsed, chat_id=chat_id, update_id=update_id)
-            else:
-                reply = await self._run_bot(text, message, update_id)
+            reply = await self._run_typed_text(text, message, chat_id, update_id)
         return await self._deliver(chat_id, reply, update_id)
+
+    async def _run_typed_text(
+        self, text: str, message: dict[str, Any], chat_id: int, update_id: int | None
+    ) -> Reply:
+        parsed = parse_command(text)
+        if parsed is not None:
+            return await self._command(*parsed, chat_id=chat_id, update_id=update_id)
+        return await self._run_bot(text, message, update_id)
 
     async def _miniapp(self, web_app_data: Any, chat_id: int, update_id: int | None) -> Reply:
         """Mini App `web_app_data`: forms write to the sheet; `t: "text"` goes to the agent (§4.2)."""
@@ -455,28 +500,111 @@ class Handler:
             with contextlib.suppress(asyncio.CancelledError):
                 await typing
 
-    async def _media(self, message: dict[str, Any], chat_id: int, update_id: Any) -> Reply | None:
-        """Voice, audio and photo messages (caption optional); None for anything else (stickers,
+    async def _media(self, message: dict[str, Any], chat_id: int, update_id: int | None) -> bool:
+        """Voice, audio and photo messages (caption optional); ignored for anything else (stickers,
         documents, service messages), which gets no reply."""
-        ref = media_ref(message, self._media_max_bytes)
+        audio_ref = _audio_ref(message)
+        is_audio = audio_ref is not None
+        ref = audio_ref if is_audio else media_ref(message, self._media_max_bytes)
         if ref is None:
-            return None
+            return True
+        raw_caption = message.get("caption")
+        caption = raw_caption if isinstance(raw_caption, str) else ""
         if not self._media_enabled:
-            return Reply(MEDIA_UNREADABLE)
+            reply = await self._disabled_media(caption, message, chat_id, update_id)
+            return await self._deliver(chat_id, reply, update_id)
+        if is_audio and ref.duration is not None and ref.duration > self._voice_max_seconds:
+            return await self._deliver(chat_id, Reply(VOICE_TOO_LONG), update_id)
         if not ref.fits(self._media_max_bytes):
-            return Reply(too_large(self._media_max_bytes))
-        caption = message.get("caption")
-        caption = caption if isinstance(caption, str) else ""
+            return await self._deliver(chat_id, Reply(too_large(self._media_max_bytes)), update_id)
         try:
             deadline_at = MESSAGE_DEADLINE_AT.get()
             async with asyncio.timeout_at(deadline_at):
                 data = await self._download(ref)
         except TooLarge:
-            return Reply(too_large(self._media_max_bytes))
+            return await self._deliver(chat_id, Reply(too_large(self._media_max_bytes)), update_id)
         except Exception as error:
             log.warning("could not download the file of update %s: %s", update_id, describe(error))
-            return Reply(DOWNLOAD_FAILED, failed=True, transient=True)
-        return await self._run_bot(caption, message, update_id, media=[Media(ref.mime_type, data)])
+            return await self._deliver(
+                chat_id, Reply(DOWNLOAD_FAILED, failed=True, transient=True), update_id
+            )
+        if not is_audio:
+            reply = await self._run_bot(caption, message, update_id, media=[Media(ref.mime_type, data)])
+            return await self._deliver(chat_id, reply, update_id)
+        return await self._voice_message(ref, data, caption, message, chat_id, update_id)
+
+    async def _disabled_media(
+        self, caption: str, message: dict[str, Any], chat_id: int, update_id: int | None
+    ) -> Reply:
+        if not caption.strip():
+            return Reply(MEDIA_DISABLED)
+        reply = await self._run_typed_text(caption, message, chat_id, update_id)
+        notice = escape(MEDIA_DISABLED) if reply.html else MEDIA_DISABLED
+        combined = f"{reply.text}\n\n{notice}" if reply.text else notice
+        return replace(reply, text=combined)
+
+    async def _voice_message(
+        self,
+        ref: MediaRef,
+        data: bytes,
+        caption: str,
+        message: dict[str, Any],
+        chat_id: int,
+        update_id: int | None,
+    ) -> bool:
+        """Transcribes `data` and sends the plain-text `🎙️ Entendi:` confirmation (§4.1)."""
+        result = await self._transcribe_audio(ref, data, chat_id, update_id)
+        if isinstance(result, Reply):
+            return await self._deliver(chat_id, result, update_id)
+        clean_caption = caption.strip()
+        body = f"{clean_caption}\n{result.text}" if clean_caption else result.text
+        vid = self._confirmations.create(chat_id, sha256_hex(body))
+        try:
+            sent = await self._telegram.send_message(
+                chat_id,
+                buttons.entendi_text(body),
+                html=False,
+                reply_markup=buttons.voice_keyboard(vid),
+                reply_to=strict_int(message.get("message_id")),
+            )
+        except Exception as error:
+            self._confirmations.discard(vid)
+            log.warning("could not send the reply of update %s: %s", update_id, describe(error))
+            return False
+        except BaseException:
+            self._confirmations.discard(vid)
+            raise
+        sent_mid = strict_int(sent.get("message_id")) if isinstance(sent, dict) else None
+        if sent_mid is not None:
+            self._confirmations.set_message_id(vid, sent_mid)
+        return True
+
+    async def _transcribe_audio(
+        self, ref: MediaRef, data: bytes, chat_id: int, update_id: int | None
+    ) -> Transcript | Reply:
+        if self._transcriber is None:
+            return _voice_error_reply("disabled")
+        typing = asyncio.create_task(self._keep_typing(chat_id, strict_int(update_id)))
+        await asyncio.sleep(0)
+        try:
+            # MESSAGE_DEADLINE_AT already stops before SEND_RESERVE_S (hard_limit = deadline_at + reserve).
+            deadline_at = MESSAGE_DEADLINE_AT.get()
+            deadline_s = None if deadline_at is None else deadline_at - asyncio.get_running_loop().time()
+            return await self._transcriber.transcribe(
+                Audio(ref.mime_type, data, trusted_seconds=ref.duration),
+                principal_key=f"telegram:{chat_id}",
+                deadline_s=deadline_s,
+            )
+        except TranscribeError as error:
+            log.warning("voice transcription failed on update %s: %s", update_id, describe(error))
+            return _voice_error_reply(error.code)
+        except Exception as error:
+            log.warning("voice transcription failed on update %s: %s", update_id, describe(error))
+            return Reply(VOICE_FAILED, failed=True, transient=True)
+        finally:
+            typing.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await typing
 
     async def _download(self, ref: MediaRef) -> bytes:
         file = await self._telegram.get_file(ref.file_id)
@@ -686,6 +814,20 @@ class Handler:
             await self._telegram.send_message(chat_id, chunk, html=True, reply_markup=markup, reply_to=quote)
 
 
+def _voice_error_reply(code: str) -> Reply:
+    if code == "disabled":
+        return Reply(MEDIA_DISABLED)
+    if code == "unsupported_format":
+        return Reply(VOICE_FORMAT)
+    if code == "too_long":
+        return Reply(VOICE_TOO_LONG)
+    if code == "no_speech":
+        return Reply(VOICE_EMPTY)
+    if code == "budget_exhausted":
+        return Reply(VOICE_BUDGET)
+    return Reply(VOICE_FAILED, failed=True, transient=True)
+
+
 def replied_text(message: dict[str, Any]) -> str | None:
     """The text of the bot message this one replies to (swipe-reply or ✏️ Corrigir), the only
     context the agent gets from earlier messages besides the sheet's recent writes. A reply to
@@ -712,6 +854,8 @@ def build_handler(
     text_submissions: TextSubmissions | None = None,
     clock: Callable[[], datetime] | None = None,
     confirmations: VoiceConfirmations | None = None,
+    budget: Budget | None = None,
+    transcriber: VoiceTranscriber | None = None,
 ) -> Handler:
     resolved_voice_link = voice_link
     if resolved_voice_link is None and settings.VOICE_API_URL and settings.APP_AUTH_SECRET is not None:
@@ -739,6 +883,18 @@ def build_handler(
         deadline_s=settings.MESSAGE_DEADLINE_S,
     )
     telegram = TelegramClient(settings.TELEGRAM_BOT_TOKEN.get_secret_value(), http)
+    resolved_transcriber = transcriber
+    if resolved_transcriber is None and settings.MEDIA_ENABLED:
+        resolved_budget = (
+            budget
+            if budget is not None
+            else MemoryBudget(
+                principal_daily=settings.VOICE_DAILY_TOKENS,
+                global_daily=settings.VOICE_GLOBAL_DAILY_TOKENS,
+                timezone=settings.TIMEZONE,
+            )
+        )
+        resolved_transcriber = build_transcriber(settings, resolved_budget)
     return Handler(
         settings.ALLOWED_CHAT_IDS,
         bot,
@@ -754,4 +910,6 @@ def build_handler(
         voice_link=resolved_voice_link,
         text_submissions=text_submissions,
         confirmations=confirmations,
+        transcriber=resolved_transcriber,
+        voice_max_seconds=settings.VOICE_MAX_SECONDS,
     )

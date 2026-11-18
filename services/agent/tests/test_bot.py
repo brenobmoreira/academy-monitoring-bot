@@ -305,11 +305,29 @@ async def test_model_text_is_escaped_for_html(sheet):
     assert (await b.reply("oi")).text == "Use &lt;b&gt;kg&lt;/b&gt; &amp; reps"
 
 
-def test_instruction_covers_audio_and_photos_and_forbids_guessing_digits():
+def test_instruction_covers_photos_only_and_forbids_guessing_digits():
+    from agent.bot import (
+        MEDIA_DISABLED,
+        VOICE_BUDGET,
+        VOICE_EMPTY,
+        VOICE_FAILED,
+        VOICE_FORMAT,
+        VOICE_TOO_LONG,
+    )
+
     text = instruction(NOW)
-    assert "transcreva" in text
+    assert "Foto:" in text
+    assert "Áudio e foto:" not in text
+    assert "transcreva" not in text
+    assert "inaudível" not in text
     assert "balança" in text
     assert "Nunca adivinhe um dígito" in text
+    assert MEDIA_DISABLED == "Este bot está sem leitura de áudio e foto; envie em texto."
+    assert VOICE_FAILED == "⚠ Não consegui transcrever o áudio agora. Tente de novo ou envie em texto."
+    assert VOICE_EMPTY == "Não ouvi nada no áudio. Tente de novo, mais perto do microfone."
+    assert VOICE_FORMAT == "Não leio esse formato de áudio; grave pelo 🎤 do Telegram ou envie em texto."
+    assert VOICE_BUDGET == "Hoje já transcrevi o máximo de áudios. Envie em texto."
+    assert VOICE_TOO_LONG == "O áudio passou de 1min30. Envie um mais curto ou em partes."
 
 
 async def test_media_goes_to_the_model_as_inline_data_next_to_the_caption():

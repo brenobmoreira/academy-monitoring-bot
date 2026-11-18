@@ -232,9 +232,15 @@ async def test_exercicios_groups_catalogue_names_and_filters_ignoring_accents():
 
 
 async def test_help_and_start_list_the_menu_commands():
+    from agent.commands import VOICE_HELP
+
+    assert VOICE_HELP == (
+        "🎙️ Pode mandar áudio: eu transcrevo, você confirma, e o áudio não é guardado por mim."
+    )
     for name in ("help", "start"):
         text, calls = await run(name)
         assert calls == []
+        assert VOICE_HELP in text
         assert "/hoje — " in text and "/exercicios — " in text and "/start" not in text
 
 

@@ -123,9 +123,28 @@
   if (Avatar) Avatar.mount(els.shape, els.say);
   if (Avatar && Avatar.intro) Avatar.intro('Abrindo sua ficha'); // lands in the header on the first say()
 
+  function syncForm(extra) {
+    if (!Avatar || !Avatar.setForm) return;
+    var ctx = {
+      view: S.view,
+      screen: sending ? 'sent' : S.screen,
+      dozing: !!(Avatar.dozing && Avatar.dozing()),
+      intro: !S.catalog,
+    };
+    if (extra) Object.keys(extra).forEach(function (k) { ctx[k] = extra[k]; });
+    var nextForm = Avatar.formFor ? Avatar.formFor(ctx)
+      : (ctx.dozing ? 'descanso' : (ctx.screen === 'review' || ctx.screen === 'sent') ? 'revisao'
+        : ctx.intro ? 'base' : ctx.view === 'workout' ? 'treino' : ctx.view === 'food' ? 'refeicao'
+          : ctx.view === 'water' ? 'agua' : 'base');
+    Avatar.setForm(nextForm);
+  }
+  syncForm({ intro: true });
+
   function say(mood, text) {
     if (!Avatar) { if (text) els.say.textContent = text; return; }
+    var wasDozing = Avatar.dozing && Avatar.dozing();
     if (Avatar.setDozing) Avatar.setDozing(false);
+    if (wasDozing) syncForm();
     Avatar.setMood(mood);
     Avatar.say(text);
     els.say.scrollTop = 0;
@@ -159,11 +178,15 @@
   function wake() {
     var wasDozing = Avatar && Avatar.dozing && Avatar.dozing();
     if (Avatar && Avatar.setDozing) Avatar.setDozing(false);
-    if (wasDozing && gazeTarget && Avatar.glance) Avatar.glance(gazeTarget);
+    if (wasDozing) {
+      syncForm();
+      if (gazeTarget && Avatar.glance) Avatar.glance(gazeTarget);
+    }
     clearTimeout(idleTimer);
     idleTimer = setTimeout(function rest() {
       if (C.pulsoDozing(C.PULSO_IDLE_MS, !S.catalog || sending || reviewTimer !== null || S.sheetOpen || isVoiceActive())) {
         if (Avatar && Avatar.setDozing) Avatar.setDozing(true);
+        syncForm();
       } else idleTimer = setTimeout(rest, C.PULSO_IDLE_MS);
     }, C.PULSO_IDLE_MS);
   }
@@ -182,9 +205,11 @@
   if (window.addEventListener) window.addEventListener('resize', function () { if (gazeTarget) glance(gazeTarget); });
   wake();
 
-  /** A large Shape for empty, error and success states (its own, independent mood). */
-  function mascot(mood, title, text) {
-    var box = Avatar ? Avatar.create(mood) : h('div', { class: 'shape' });
+  /** A large Shape for empty, error and success states (its own, independent mood and form). */
+  function mascot(mood, title, text, formName) {
+    var f = formName || 'base';
+    var box = Avatar ? Avatar.create(mood, f) : h('div', { class: 'shape' });
+    if (box && box.setAttribute && !box.getAttribute('data-form')) box.setAttribute('data-form', f);
     return h('div', { class: 'mascot-scene' }, box, h('p', {}, title ? h('b', { text: title }) : null, text));
   }
 
@@ -255,6 +280,7 @@
   /** Mood from the current state: focused while typing, alert on errors shown, happy when ready. */
   function updateMood() {
     if (!S.catalog) return;
+    syncForm();
     syncProgress();
     if (S.screen === 'review') {
       say('happy', 'Revise e envie. A planilha confere, e o bot confirma o que gravou.');
@@ -603,7 +629,7 @@
     cardEls = [];
     if (!list.length) {
       cardsBox.appendChild(h('div', { class: 'empty-plan' }, mascot('idle', w.session ? 'Ficha vazia nesta sessão' : 'Nenhuma sessão na ficha',
-        w.session ? 'Adicione exercícios do catálogo logo abaixo.' : 'Cadastre a ficha na planilha e mande /app de novo.')));
+        w.session ? 'Adicione exercícios do catálogo logo abaixo.' : 'Cadastre a ficha na planilha e mande /app de novo.', 'base')));
     }
     list.forEach(function (card, i) {
       var el = renderCard(card, i);
@@ -1048,7 +1074,7 @@
     var errs = S.showErrors ? build().errors : [];
     var plate = f.items.length ? h('ul', { class: 'plate' }, f.items.map(function (it, i) {
       return plateItem(it, i, errs.filter(function (e) { return e.item === i; }));
-    })) : h('div', { class: 'empty-plate' }, mascot('idle', 'Prato vazio', 'Busque um alimento, toque numa favorita ou descreva sem cálculo.'));
+    })) : h('div', { class: 'empty-plate' }, mascot('idle', 'Prato vazio', 'Busque um alimento, toque numa favorita ou descreva sem cálculo.', 'base'));
 
     var reset = h('div', { class: 'foot-actions' }, restoreButton('food'), f.items.length ? h('button', {
       type: 'button', class: 'btn-text', text: 'Limpar prato',
@@ -1453,7 +1479,7 @@
       : h('div', {}, h('h2', { class: 'section-title', text: 'JSON que iria para o bot' }), h('pre', { class: 'json', id: 'json-out', text: pretty }));
 
     var reviewNodes = [
-      mascot('happy', null, C.pulsoSummary(pulsoContext())),
+      mascot('happy', null, C.pulsoSummary(pulsoContext()), 'revisao'),
       h('div', { class: 'view-head mt-12' },
         h('h1', { class: 'view-title', text: 'Confira o envio' }),
         h('p', { class: 'view-sub', text: 'Confira os dados abaixo antes de enviar.' })),
@@ -1482,6 +1508,7 @@
     clearTimeout(sendTimer);
     sendTimer = null;
     if (lift) { lift.cancel(); lift = null; }
+    if (S.catalog) syncForm();
   }
 
   function showForm() {
@@ -1506,6 +1533,7 @@
     var p = r.args ? C.serializePayload(S.view, r.args, currentId()) : null;
     if (!p || !p.ok || p.json !== json) { showForm(); goReview(); return; }
     sending = true;
+    syncForm();
     var again = mainHandler;
     setMainActive(false); // off before sendData; back only if it fails
     recordAndClearSent(S.view, p.json);
@@ -1514,7 +1542,7 @@
     try {
       tg.sendData(p.json); // Telegram closes the app; the bot's reply is the confirmation.
       var scene = els.review.querySelector('.mascot-scene');
-      if (scene) els.review.replaceChild(mascot('happy', 'Envio solicitado', C.pulsoSummary(pulsoContext())), scene);
+      if (scene) els.review.replaceChild(mascot('happy', 'Envio solicitado', C.pulsoSummary(pulsoContext()), 'revisao'), scene);
       // If it does not close, stop waiting: nothing is known about delivery, so say only that.
       sendTimer = setTimeout(function () {
         endSend();
@@ -1676,22 +1704,35 @@
     })();
   }
 
+  function hasRichState(state) {
+    return !!(Avatar && Array.isArray(Avatar.STATES) && Avatar.STATES.indexOf(state) >= 0);
+  }
+
   function clearVoiceMascot(resetState) {
     if (!els.shape) return;
-    els.shape.classList.remove('voice-listening', 'voice-thinking', 'voice-alert');
-    if (resetState) els.shape.setAttribute('data-state', 'idle');
+    els.shape.classList.remove('voice-listening', 'voice-thinking', 'voice-alert', 'voice-understood', 'voice-oops');
+    if (resetState) {
+      if (Avatar && Avatar.setMood) Avatar.setMood('idle');
+      else els.shape.setAttribute('data-state', 'idle');
+    }
   }
 
   function setVoiceMascot(mascotState, line) {
-    var avatarMood = mascotState === 'listening' ? 'focused' : mascotState;
+    var fallbackMood = mascotState === 'listening' ? 'focused'
+      : mascotState === 'understood' ? 'happy'
+      : mascotState === 'oops' ? 'alert'
+      : mascotState;
+    var avatarMood = hasRichState(mascotState) ? mascotState : fallbackMood;
     say(avatarMood, line);
     clearVoiceMascot();
     if (!els.shape) return;
     if (mascotState) {
-      els.shape.setAttribute('data-state', mascotState);
+      if (Avatar && Avatar.setMood && hasRichState(mascotState)) Avatar.setMood(mascotState);
+      else els.shape.setAttribute('data-state', mascotState);
       if (mascotState === 'listening') els.shape.classList.add('voice-listening');
       else if (mascotState === 'thinking') els.shape.classList.add('voice-thinking');
-      else if (mascotState === 'alert') els.shape.classList.add('voice-alert');
+      else if (mascotState === 'alert' || mascotState === 'oops') els.shape.classList.add('voice-alert');
+      else if (mascotState === 'understood') els.shape.classList.add('voice-understood');
     }
   }
 
@@ -2022,7 +2063,7 @@
       setMain('Fechar app', closeMiniApp);
       setSecondary('Voltar', closePlanB);
     } else if (voiceUiBlocked) {
-      setVoiceMascot('alert', voiceUiBlocked.message);
+      setVoiceMascot(hasRichState('oops') ? 'oops' : 'alert', voiceUiBlocked.message);
       hideMain();
       setSecondary(null);
     } else if (voicePreviewResult) {
@@ -2041,16 +2082,23 @@
       } else if (st.mascot === 'thinking') {
         setVoiceMascot('thinking', 'Entendendo o áudio');
       } else if (st.mascot === 'alert') {
-        setVoiceMascot('alert', st.error ? st.error.message : 'Não consegui gravar.');
+        setVoiceMascot(hasRichState('oops') ? 'oops' : 'alert', st.error ? st.error.message : 'Não consegui gravar.');
       } else if (st.status === 'consent') {
         clearVoiceMascot();
         say('idle', 'Antes de gravar, confira o aviso de privacidade.');
-      } else if (st.status === 'transcribed') {
-        clearVoiceMascot();
-        say('happy', 'Confira o texto antes de enviar.');
+      } else if (st.status === 'transcribed' || st.status === 'confirming') {
+        if (st.textError) {
+          clearVoiceMascot();
+          say('alert', st.textError);
+        } else if (hasRichState('understood')) {
+          setVoiceMascot('understood', 'Confira o texto antes de enviar.');
+        } else {
+          clearVoiceMascot();
+          say('happy', 'Confira o texto antes de enviar.');
+        }
       }
 
-      if (st.status === 'transcribed') {
+      if (st.status === 'transcribed' || st.status === 'confirming') {
         setMain('Enviar', function () { voiceCtrl.send(); });
         setSecondary('Cancelar', function () { voiceCtrl.cancel(); });
       } else {
@@ -2187,7 +2235,8 @@
     els.dock.hidden = true;
     if (els.voicePanel) els.voicePanel.hidden = true;
     if (els.dockMic) els.dockMic.hidden = true;
-    els.view.replaceChildren(h('div', { class: 'empty-plan mt-16' }, mascot('alert', line, text)));
+    syncForm({ intro: true });
+    els.view.replaceChildren(h('div', { class: 'empty-plan mt-16' }, mascot('alert', line, text, 'base')));
     say('alert', line);
     if (tg && tg.MainButton) { try { tg.MainButton.hide(); } catch (e) { /* ignore */ } }
   }

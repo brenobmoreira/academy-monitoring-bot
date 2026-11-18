@@ -12,6 +12,7 @@ const crypto = require('node:crypto');
 const { storageWith, today, SAMPLE, C } = require('./app_harness');
 
 const MINIAPP_DIR = path.join(__dirname, '..');
+const AVATAR_JS = fs.readFileSync(path.join(MINIAPP_DIR, 'src', 'avatar.js'), 'utf8');
 const VOICE_JS = fs.readFileSync(path.join(MINIAPP_DIR, 'src', 'voice.js'), 'utf8');
 const VOICE_STUB_JS = fs.readFileSync(path.join(MINIAPP_DIR, 'dev', 'voice-stub.js'), 'utf8');
 const APP_JS = fs.readFileSync(path.join(MINIAPP_DIR, 'src', 'app.js'), 'utf8');
@@ -379,6 +380,9 @@ async function bootApp(opts = {}) {
   Object.assign(ctx, opts.globals || {});
   ctx.window = ctx;
   vm.createContext(ctx);
+  if (opts.loadAvatar) {
+    vm.runInContext(AVATAR_JS, ctx, { filename: 'avatar.js' });
+  }
   vm.runInContext(VOICE_JS, ctx, { filename: 'voice.js' });
   if (opts.loadStub !== false) {
     vm.runInContext(VOICE_STUB_JS, ctx, { filename: 'voice-stub.js' });
@@ -932,4 +936,87 @@ test('C6b-fix5: real window pagehide stops tracks/upload and stale permission A 
   assert.equal(abortSeen, true);
   assert.equal(p.doc.getElementById('voice-panel').hidden, true);
   assert.equal(p.doc.getElementById('view').classList.contains('is-voice-locked'), false);
+});
+
+test('Muscle voice integration: ShapeAvatar enters listening, thinking, understood on transcribed, and oops on voice error', async () => {
+  const media = makeFakeMediaHarness();
+  let failTranscribe = false;
+  const p = await bootApp({
+    loadAvatar: true,
+    catalog: makeVoiceCatalog(),
+    storage: storageWith({ [C.VOICE_CONSENT_KEY]: '1' }),
+    navigator: { mediaDevices: { getUserMedia: () => media.getUserMedia() } },
+    globals: { MediaRecorder: media.MediaRecorder },
+    fetch: async (url) => {
+      if (String(url).endsWith('/v1/auth/sessions')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ v: 1, session: 's1.muscle-tok', expires_at: 1700043200, scopes: ['voice'], ref: 'acct-a' }),
+        };
+      }
+      if (failTranscribe) {
+        return {
+          ok: false,
+          status: 502,
+          json: async () => ({ v: 1, error: { code: 'provider_error', message: 'Falha ao transcrever.', retry: true } }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ v: 1, id: 'b'.repeat(32), text: 'agachamento 100 kg por 5' }),
+      };
+    },
+  });
+
+  const shape = p.doc.getElementById('shape');
+  assert.equal(p.ctx.ShapeAvatar.form(), 'treino');
+
+  // 1) Start recording -> listening
+  p.doc.getElementById('dock-mic').click();
+  await flushMicrotasks();
+  assert.equal(shape.getAttribute('data-state'), 'listening');
+  assert.equal(p.ctx.ShapeAvatar.mood(), 'listening');
+  assert.equal(shape.classList.contains('voice-listening'), true);
+
+  // 2) Stop -> sending -> thinking
+  p.advanceMs(1500);
+  p.button('Parar').click();
+  assert.equal(shape.getAttribute('data-state'), 'thinking');
+  assert.equal(p.ctx.ShapeAvatar.mood(), 'thinking');
+  assert.equal(shape.classList.contains('voice-thinking'), true);
+
+  // 3) Transcription arrives -> confirming state enters native 'understood'
+  await flushMicrotasks();
+  assert.equal(shape.getAttribute('data-state'), 'understood');
+  assert.equal(p.ctx.ShapeAvatar.mood(), 'understood');
+  assert.equal(shape.classList.contains('voice-understood'), true);
+
+  // Empty text error switches to alert, then editing valid text restores understood
+  const ta = p.doc.getElementById('voice-textarea');
+  ta.value = '   ';
+  ta.dispatchEvent({ type: 'input', target: ta, bubbles: true });
+  p.pressMain();
+  assert.equal(shape.getAttribute('data-state'), 'alert');
+  ta.value = 'agachamento 102,5 kg por 5';
+  ta.dispatchEvent({ type: 'input', target: ta, bubbles: true });
+  assert.equal(shape.getAttribute('data-state'), 'understood');
+
+  // 4) Rerecord with failing backend -> native 'oops'
+  failTranscribe = true;
+  p.button('Regravar').click();
+  await flushMicrotasks();
+  assert.equal(shape.getAttribute('data-state'), 'listening');
+  p.advanceMs(1500);
+  p.button('Parar').click();
+  await flushMicrotasks();
+  assert.equal(shape.getAttribute('data-state'), 'oops');
+  assert.equal(p.ctx.ShapeAvatar.mood(), 'oops');
+  assert.equal(shape.classList.contains('voice-alert'), true);
+
+  // Cancel returns cleanly to form mood and active tab form
+  p.button('Cancelar').click();
+  assert.equal(shape.classList.contains('voice-alert'), false);
+  assert.equal(p.ctx.ShapeAvatar.form(), 'treino');
 });

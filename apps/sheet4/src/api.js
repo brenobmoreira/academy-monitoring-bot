@@ -3,7 +3,7 @@
  * (doPost, the Web App); tests and other scripts call SheetApi.run in-process.
  *
  * Request:  {"key": "<SHEET_API_KEY>", "op": "<operation>", "args": {...}}
- * Response: {"ok": true, "result": {...}} | {"ok": false, "errors": [{path, code, message, suggestions?}]}
+ * Response: {"ok": true, "result": {...}} | {"ok": false, "writeState": "none"|"unknown", "errors": [{path, code, message, suggestions?}]}
  *
  * Apps Script cannot set HTTP status codes, so the outcome is always in the body. The key is
  * checked against the Script Property SHEET_API_KEY (Config.sheetApiKey()). Arguments are
@@ -21,8 +21,9 @@
  * Error codes: unauthorized, invalid_json, wrong_type, unknown_field, unknown_op, required, empty,
  * too_long, out_of_range, invalid_date, date_in_future, invalid_range, not_in_catalog, duplicate,
  * conflict, incomplete_food, invalid_unit, rejected (the domain refused a valid-looking request;
- * the message says why), nothing_to_undo, not_found, already_undone, not_latest, unavailable
- * (lock busy), internal (unexpected exception).
+ * the message says why), rollback_failed (a partial write or undo could not be proven restored),
+ * nothing_to_undo, not_found, already_undone, not_latest, unavailable (lock busy), internal
+ * (unexpected exception).
  */
 function doPost(e) {
   const text = e && e.postData ? e.postData.contents : '';
@@ -134,21 +135,21 @@ const SheetApi = {
     try {
       request = JSON.parse(text);
     } catch (err) {
-      return SheetApi.fail_('body', 'invalid_json', 'corpo não é JSON válido');
+      return SheetApi.fail_('body', 'invalid_json', 'corpo não é JSON válido', 'none');
     }
     if (request === null || typeof request !== 'object' || Array.isArray(request)) {
-      return SheetApi.fail_('body', 'wrong_type', 'esperado objeto JSON {key, op, args}');
+      return SheetApi.fail_('body', 'wrong_type', 'esperado objeto JSON {key, op, args}', 'none');
     }
     let expected;
     try {
       expected = Config.sheetApiKey();
     } catch (err) {
-      return SheetApi.fail_('key', 'internal', err.message);
+      return SheetApi.fail_('key', 'internal', err.message, 'unknown');
     }
-    if (typeof request.key !== 'string' || request.key !== expected) return SheetApi.fail_('key', 'unauthorized', 'chave inválida');
+    if (typeof request.key !== 'string' || request.key !== expected) return SheetApi.fail_('key', 'unauthorized', 'chave inválida', 'none');
     const unknown = Object.keys(request).filter((k) => !SheetApi.ENVELOPE.includes(k));
     if (unknown.length) {
-      return { ok: false, errors: unknown.map((k) => ({ path: k, code: 'unknown_field', message: `campo desconhecido; aceitos: ${SheetApi.ENVELOPE.join(', ')}` })) };
+      return { ok: false, writeState: 'none', errors: unknown.map((k) => ({ path: k, code: 'unknown_field', message: `campo desconhecido; aceitos: ${SheetApi.ENVELOPE.join(', ')}` })) };
     }
     return SheetApi.run(request.op, request.args === undefined ? {} : request.args, request.requestId);
   },
@@ -160,22 +161,35 @@ const SheetApi = {
    */
   run(op, args, requestId) {
     const spec = typeof op === 'string' && Object.prototype.hasOwnProperty.call(SheetApi.OPS, op) ? SheetApi.OPS[op] : null;
-    if (!spec) return SheetApi.fail_('op', 'unknown_op', `operação desconhecida ${JSON.stringify(op)}; aceitas: ${Object.keys(SheetApi.OPS).join(', ')}`);
+    if (!spec) return SheetApi.fail_('op', 'unknown_op', `operação desconhecida ${JSON.stringify(op)}; aceitas: ${Object.keys(SheetApi.OPS).join(', ')}`, 'none');
+    let phase = 'pre_write';
     const exec = () => {
       const reqCheck = SheetApi.validateRequestId_(requestId);
       const checked = spec.validate(args);
       const errors = reqCheck.errors.concat(checked.errors);
-      if (errors.length) return { ok: false, errors };
+      if (errors.length) return { ok: false, writeState: 'none', errors };
       const value = checked.value;
       const reqId = reqCheck.value;
-      if (!spec.write || spec.logged === false) return { ok: true, result: spec.run(value) };
+      if (!spec.write) return { ok: true, result: spec.run(value) };
+      if (spec.logged === false) {
+        if (op === 'write.undo') {
+          Undo.lastApplyState_ = 'not_started';
+          phase = 'undo';
+        } else {
+          phase = 'writing';
+        }
+        const unlogged = spec.run(value);
+        phase = 'committed';
+        return { ok: true, result: unlogged };
+      }
       const sig = reqId ? SheetApi.signature_(op, value) : null;
       if (reqId) {
         const existing = SheetApi.findByRequestId_(reqId);
         if (existing) {
           if (existing.meta.op !== op || (existing.meta.sig && existing.meta.sig !== sig)) {
-            return SheetApi.fail_('requestId', 'conflict', `requestId "${reqId}" já utilizado em outra gravação (${existing.id})`);
+            return SheetApi.fail_('requestId', 'conflict', `requestId "${reqId}" já utilizado em outra gravação (${existing.id})`, 'none');
           }
+          phase = 'committed';
           return { ok: true, result: SheetApi.deduplicatedResult_(op, value, existing) };
         }
       }
@@ -185,18 +199,21 @@ const SheetApi = {
         meta.sig = sig;
       }
       let writeId = null;
+      ChangeLog.lastRunState_ = 'not_started';
+      phase = 'action';
       const result = ChangeLog.run(SheetApi.label_(meta), () => {
         const r = spec.run(value);
         if (ChangeLog.changeCount() > 0) writeId = ChangeLog.active().id;
         return r;
       });
+      phase = 'committed';
       if (writeId) result.writeId = writeId;
       return { ok: true, result };
     };
     try {
       return spec.write ? Core.withLock(exec) : exec();
     } catch (err) {
-      return SheetApi.error_(err, args);
+      return SheetApi.error_(err, args, SheetApi.writeStateFor_(err, phase));
     } finally {
       Tabs.invalidate();
       Config.invalidate();
@@ -453,26 +470,51 @@ const SheetApi = {
     return out;
   },
 
-  /** An exception as {ok: false, errors}. */
-  error_(err, args) {
+  /** Computes writeState ('none' | 'unknown') for an exception caught in SheetApi.run. */
+  writeStateFor_(err, phase) {
+    if (err && err.writeState === 'unknown') return 'unknown';
+    if (err && err.code === 'rollback_failed') return 'unknown';
+    if (err && Array.isArray(err.apiErrors) && err.apiErrors.some((e) => e.code === 'rollback_failed' || e.code === 'internal')) {
+      return 'unknown';
+    }
+    if (phase === 'committed' || phase === 'writing') return 'unknown';
+    const isInternal = !(err && (err.apiErrors || err.name === 'Error'));
+    if (phase === 'undo') {
+      if (Undo.lastApplyState_ !== 'not_started') return 'unknown';
+      return isInternal ? 'unknown' : 'none';
+    }
+    if (phase === 'action') {
+      if (ChangeLog.lastRunState_ === 'rolled_back') return 'none';
+      if (ChangeLog.lastRunState_ === 'not_started') return isInternal ? 'unknown' : 'none';
+      return 'unknown';
+    }
+    return isInternal ? 'unknown' : 'none';
+  },
+
+  /** An exception as {ok: false, writeState, errors}. */
+  error_(err, args, writeState) {
+    const state = writeState === 'none' ? 'none' : 'unknown';
     if (err && err.apiErrors) {
       const hasId = args && typeof args === 'object' && args.writeId !== undefined;
       return {
         ok: false,
+        writeState: state,
         errors: err.apiErrors.map((e) => Object.assign({}, e, {
           path: e.path === 'rows' ? 'args.exercises' : e.path === 'args' && hasId ? 'args.writeId' : e.path,
         })),
       };
     }
     const message = err && err.message ? err.message : String(err);
-    if (/^Outra alteração está em andamento/.test(message)) return SheetApi.fail_('', 'unavailable', message);
-    if (err && err.name === 'Error') return SheetApi.fail_('args', 'rejected', message);
+    if (err && err.code === 'rollback_failed') return SheetApi.fail_('', 'rollback_failed', message, 'unknown');
+    if (/^Outra alteração está em andamento/.test(message)) return SheetApi.fail_('', 'unavailable', message, state);
+    if (err && err.name === 'Error') return SheetApi.fail_('args', 'rejected', message, state);
     console.error(err);
-    return SheetApi.fail_('', 'internal', message);
+    return SheetApi.fail_('', 'internal', message, state);
   },
 
-  fail_(path, code, message) {
-    return { ok: false, errors: [{ path, code, message }] };
+  fail_(path, code, message, writeState) {
+    const state = writeState === 'none' ? 'none' : 'unknown';
+    return { ok: false, writeState: state, errors: [{ path, code, message }] };
   },
 
   /* Action labels (Log "Ação"): readable text + the op summary as JSON ------------------------- */
@@ -972,6 +1014,8 @@ const SheetApi = {
   undo_(v) {
     const r = v.writeId === undefined ? Undo.last() : Undo.action(v.writeId);
     const p = SheetApi.parseLabel_(r.action);
-    return { writeId: r.actionId, undone: Object.assign({ action: p.text, changes: r.changes }, SheetApi.publicMeta_(p.meta)) };
+    const out = { writeId: r.actionId, undone: Object.assign({ action: p.text, changes: r.changes }, SheetApi.publicMeta_(p.meta)) };
+    if (Array.isArray(r.warnings) && r.warnings.length) out.warnings = r.warnings.slice();
+    return out;
   },
 };

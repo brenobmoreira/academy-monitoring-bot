@@ -81,6 +81,8 @@ const ChangeLog = {
   current_: null,
   /** Changes tracked in the current action, for rollback on error. */
   pending_: [],
+  /** Outcome of the latest outermost ChangeLog.run call (read by SheetApi for writeState). */
+  lastRunState_: 'idle',
 
   active() {
     return ChangeLog.current_ ? { id: ChangeLog.current_.id, label: ChangeLog.current_.label } : null;
@@ -89,6 +91,13 @@ const ChangeLog = {
   /** Changes recorded so far by the running action (0 when none runs). */
   changeCount() {
     return ChangeLog.current_ ? ChangeLog.pending_.length : 0;
+  },
+
+  /** Attaches a non-duplicate warning code to an action result object. */
+  warn_(result, code) {
+    if (!result || typeof result !== 'object') return;
+    const prev = Array.isArray(result.warnings) ? result.warnings : [];
+    if (!prev.includes(code)) result.warnings = prev.concat([code]);
   },
 
   /**
@@ -113,8 +122,9 @@ const ChangeLog = {
 
   /**
    * Runs fn as one undoable action. Nested calls join the outer action. When fn throws, the
-   * changes it made are reverted (newest first), their Log rows marked undone, and the error
-   * rethrown.
+   * changes it made are reverted (newest first), verified against `before`, their Log rows marked
+   * undone, and the error rethrown (or `rollback_failed` thrown if any change is not proven
+   * restored).
    * opts.id = the id to give a new action, chosen (and saved) by the caller before it starts, so
    *   a run stopped midway can be found in the Log; it must not be in the Log yet.
    * opts.join = the id of an earlier action this run continues (a staged migration spread over
@@ -123,6 +133,7 @@ const ChangeLog = {
    */
   run(label, fn, opts) {
     if (ChangeLog.current_) return fn();
+    ChangeLog.lastRunState_ = 'not_started';
     const o = opts || {};
     ChangeLog.GUARDS.forEach((g) => g(label, o));
     if (o.join && Undo.pending().map((a) => a.id)[0] !== o.join) {
@@ -133,20 +144,35 @@ const ChangeLog = {
     }
     ChangeLog.current_ = { id: o.join || o.id || ChangeLog.newId_(), label };
     ChangeLog.pending_ = [];
+    ChangeLog.lastRunState_ = 'running';
     let result;
     let tabs;
     try {
       result = fn();
       tabs = ChangeLog.touched_();
+      ChangeLog.lastRunState_ = 'committed';
     } catch (err) {
-      ChangeLog.rollback_();
+      try {
+        ChangeLog.rollback_();
+        ChangeLog.lastRunState_ = 'rolled_back';
+      } catch (rbErr) {
+        ChangeLog.lastRunState_ = 'rollback_failed';
+        throw rbErr;
+      }
       throw err;
     } finally {
       ChangeLog.current_ = null;
       ChangeLog.pending_ = [];
     }
     // After the action closes, so listeners' own writes (derived tabs) are not part of it.
-    if (tabs.length) Core.emit('action.committed', { label, tabs });
+    if (tabs.length) {
+      try {
+        Core.emit('action.committed', { label, tabs });
+      } catch (err) {
+        console.error(err);
+        ChangeLog.warn_(result, 'derived_refresh_failed');
+      }
+    }
     return result;
   },
 
@@ -240,19 +266,51 @@ const ChangeLog = {
 
   rollback_() {
     const pending = ChangeLog.pending_.slice().reverse();
-    // A change is tracked just before its write; skip one whose write never happened.
+    let allProven = true;
+    const failedDeletes = [];
     pending.forEach((p) => {
-      try { if (Undo.applied_(p.change)) Undo.revert_(p.change); } catch (err) { console.error(err); }
+      const c = p.change;
+      let proven = false;
+      const shiftedByFailedDelete = c && c.kind !== 'cells' && c.kind !== 'structure' && c.row !== null && c.row !== undefined
+        && failedDeletes.some((d) => d.tab === c.tab && d.row <= c.row);
+      if (!shiftedByFailedDelete) {
+        let restoreThrew = false;
+        try {
+          Undo.restore_(c);
+        } catch (err) {
+          restoreThrew = true;
+          console.error(err);
+        }
+        if (!restoreThrew) {
+          try {
+            proven = Undo.restored_(c) === true;
+          } catch (err) {
+            proven = false;
+            console.error(err);
+          }
+        }
+      }
+      p.restored = proven;
+      if (!proven) {
+        allProven = false;
+        if (c && c.kind === 'delete') failedDeletes.push(c);
+      }
     });
     const now = new Date();
-    const cleanAction = ChangeLog.current_ ? Undo.cleanLabel_(ChangeLog.current_.label) : null;
+    const cleanAction = allProven && ChangeLog.current_ ? Undo.cleanLabel_(ChangeLog.current_.label) : null;
     pending.forEach((p) => {
+      if (!p.restored) return;
       try {
         const patch = { undone: now };
         if (cleanAction) patch.action = cleanAction;
         Tabs.update('log', p.logRow, patch);
-      } catch (err) { console.error(err); }
+      } catch (err) {
+        console.error(err);
+      }
     });
+    if (!allProven) {
+      throw Undo.rollbackError_('Não foi possível reverter toda a alteração após um erro; confira a planilha.');
+    }
   },
 
   /**
@@ -321,6 +379,9 @@ const ChangeLog = {
 };
 
 const Undo = {
+  /** Stage of the latest Undo.last / Undo.action call (read by SheetApi for writeState). */
+  lastApplyState_: 'idle',
+
   /** Strips trailing API metadata JSON (` {"op":...}`) from a Log action label for user-facing messages. */
   cleanLabel_(label) {
     const s = String(label === null || label === undefined ? '' : label);
@@ -333,6 +394,7 @@ const Undo = {
    * @returns {{actionId: string, action: string, changes: number}}
    */
   last() {
+    Undo.lastApplyState_ = 'not_started';
     const act = Undo.pending()[0];
     if (!act) throw Undo.error_('nothing_to_undo', 'Nada para desfazer.');
     return Undo.apply_(act);
@@ -343,6 +405,7 @@ const Undo = {
    * later actions depend on it).
    */
   action(actionId) {
+    Undo.lastApplyState_ = 'not_started';
     const pending = Undo.pending();
     const act = ChangeLog.actions().find((a) => a.id === actionId);
     if (!act) throw Undo.error_('not_found', `Ação ${actionId} não encontrada no Log.`);
@@ -357,6 +420,7 @@ const Undo = {
   },
 
   apply_(act) {
+    Undo.lastApplyState_ = 'not_started';
     const result = Core.withLock(() => {
       const changes = act.changes.filter((c) => !c.undone);
       const conflicts = [];
@@ -375,14 +439,54 @@ const Undo = {
       if (conflicts.length) {
         throw Undo.error_('conflict', `Não foi possível desfazer "${Undo.cleanLabel_(act.label)}": ${conflicts.join('; ')}. Nada foi alterado; corrija direto na planilha.`);
       }
-      changes.slice().reverse().forEach((c) => Undo.revert_(c));
+      Undo.lastApplyState_ = 'reverting';
+      let allProven = true;
+      const reverted = [];
+      changes.slice().reverse().forEach((c) => {
+        let ok = false;
+        try {
+          const sheet = c.kind === 'append' ? SpreadsheetApp.getActive().getSheetByName(c.tab) : null;
+          const deletedMidSheet = Boolean(sheet && c.row < sheet.getLastRow());
+          const prevLastRow = deletedMidSheet ? sheet.getLastRow() : 0;
+          const insCols = c.kind === 'structure' && c.after && c.after.op === 'insertColumns' ? c.after : null;
+          const structSheet = insCols && insCols.sheet ? SpreadsheetApp.getActive().getSheetByName(insCols.sheet) : null;
+          const prevMaxCols = structSheet ? structSheet.getMaxColumns() : 0;
+          Undo.revert_(c);
+          if (deletedMidSheet) ok = sheet.getLastRow() === prevLastRow - 1;
+          else if (insCols) ok = Boolean(structSheet) && structSheet.getMaxColumns() === prevMaxCols - insCols.count;
+          else ok = Undo.restored_(c) === true;
+        } catch (err) {
+          ok = false;
+          console.error(err);
+        }
+        if (ok) reverted.push(c);
+        else allProven = false;
+      });
       const now = new Date();
-      changes.forEach((c) => Tabs.update('log', c.logRow, { undone: now }));
+      reverted.slice().reverse().forEach((c) => {
+        try {
+          Tabs.update('log', c.logRow, { undone: now });
+        } catch (err) {
+          allProven = false;
+          console.error(err);
+        }
+      });
       Tabs.invalidate();
       if (typeof Config !== 'undefined') Config.invalidate();
+      if (!allProven) {
+        throw Undo.rollbackError_(`Não foi possível desfazer toda a alteração "${Undo.cleanLabel_(act.label)}"; confira a planilha.`);
+      }
       return { actionId: act.id, action: act.label, changes: changes.length, tabs: changes.map((c) => c.tab) };
     });
-    if (!Undo.quiet_(act.label)) Core.emit('action.committed', { label: act.label, tabs: result.tabs.filter((t, i, all) => all.indexOf(t) === i), undo: true });
+    Undo.lastApplyState_ = 'committed';
+    if (!Undo.quiet_(act.label)) {
+      try {
+        Core.emit('action.committed', { label: act.label, tabs: result.tabs.filter((t, i, all) => all.indexOf(t) === i), undo: true });
+      } catch (err) {
+        console.error(err);
+        ChangeLog.warn_(result, 'derived_refresh_failed');
+      }
+    }
     return result;
   },
 
@@ -440,13 +544,154 @@ const Undo = {
       : `linha ${c.row} de "${c.tab}" mudou (${bad.map((x) => x.name).join(', ')})`;
   },
 
-  /** True when the sheet shows the change as done (used by rollback). */
+  /** True when the sheet shows the change as full `after`. */
   applied_(c) {
     if (c.kind !== 'delete') return !Undo.conflict_(c);
     const sheet = SpreadsheetApp.getActive().getSheetByName(c.tab);
     if (!sheet) return false;
     const still = Undo.locate_(sheet, c, c.before || {}).every((x) => x.col && Undo.same_(Undo.cellValue_(x.range), x.value));
     return !still;
+  },
+
+  /**
+   * Restores every cell (or row / structure) of change c that differs from `before` during
+   * rollback, even when c was only partially applied. Unknown change kinds are left untouched so
+   * `Undo.restored_` rejects them.
+   */
+  restore_(c) {
+    if (!c || typeof c !== 'object') return;
+    if (c.kind === 'structure') {
+      Undo.restoreStructure_(c.after || {});
+      Tabs.invalidate();
+      return;
+    }
+    if (c.kind !== 'update' && c.kind !== 'append' && c.kind !== 'delete' && c.kind !== 'cells') return;
+    const sheet = SpreadsheetApp.getActive().getSheetByName(c.tab);
+    if (!sheet) throw new Error(`Aba "${c.tab}" não encontrada`);
+    if (c.kind === 'append') {
+      if (!Number.isInteger(c.row) || c.row < 1) throw new Error(`Linha inválida em "${c.tab}"`);
+      const width = Undo.rowWidth_(sheet, c, c.after || {});
+      const range = sheet.getRange(c.row, 1, 1, width);
+      const values = range.getValues()[0];
+      const formulas = range.getFormulas()[0];
+      const dirty = values.some((v, i) => Boolean(formulas[i]) || !Tabs.sameCell(v, ''));
+      if (dirty) range.clearContent();
+      Tabs.invalidate(c.tab);
+      return;
+    }
+    if (!c.before || typeof c.before !== 'object') {
+      throw new Error(`Snapshot anterior ausente em "${c.tab}"`);
+    }
+    if (c.kind === 'delete') {
+      if (!Number.isInteger(c.row) || c.row < 1) throw new Error(`Linha inválida em "${c.tab}"`);
+      const cells = Undo.locate_(sheet, c, c.before);
+      cells.forEach((x) => {
+        if (!x.col) throw new Error(`Coluna "${x.name}" não encontrada em "${c.tab}"`);
+        if (Tabs.isSnapFormula(x.value) && x.value.legacy) {
+          throw new Error(`"${c.tab}" (${x.name}) usa formato antigo de fórmula`);
+        }
+      });
+      let cellErr = null;
+      if (!Undo.rowMatchesSnapshot_(sheet, c.row, cells)) {
+        if (c.row > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), c.row - sheet.getMaxRows());
+        else if (c.row <= sheet.getLastRow()) sheet.insertRowBefore(c.row);
+        const width = Math.max(sheet.getLastColumn(), ...cells.map((x) => x.col || 0), 1);
+        const byCol = {};
+        cells.forEach((x) => { byCol[x.col] = x.value; });
+        for (let col = 1; col <= width; col++) {
+          const target = Object.prototype.hasOwnProperty.call(byCol, col) ? byCol[col] : '';
+          try {
+            const range = sheet.getRange(c.row, col);
+            if (!Undo.same_(Undo.cellValue_(range), target)) Undo.setCell_(range, target);
+          } catch (err) {
+            if (!cellErr) cellErr = err;
+            else console.error(err);
+          }
+        }
+      }
+      Tabs.invalidate(c.tab);
+      if (cellErr) throw cellErr;
+      return;
+    }
+    // 'update' or 'cells'
+    if (c.kind === 'update' && (!Number.isInteger(c.row) || c.row < 1)) {
+      throw new Error(`Linha inválida em "${c.tab}"`);
+    }
+    const cells = Undo.locate_(sheet, c, c.before);
+    let cellErr = null;
+    cells.forEach((x) => {
+      try {
+        if (!x.col || !x.range) throw new Error(`Coluna "${x.name}" não encontrada em "${c.tab}"`);
+        if (Tabs.isSnapFormula(x.value) && x.value.legacy) {
+          throw new Error(`"${c.tab}" (${x.name}) usa formato antigo de fórmula`);
+        }
+        if (!Undo.same_(Undo.cellValue_(x.range), x.value)) Undo.setCell_(x.range, x.value);
+      } catch (err) {
+        if (!cellErr) cellErr = err;
+        else console.error(err);
+      }
+    });
+    Tabs.invalidate(c.tab);
+    if (cellErr) throw cellErr;
+  },
+
+  /**
+   * Re-reads the sheet and verifies that every cell (or row / structure) of change c equals
+   * `before` exactly. Returns false for unknown change kinds or missing snapshots/columns.
+   */
+  restored_(c) {
+    if (!c || typeof c !== 'object') return false;
+    if (c.kind === 'structure') return Undo.structureRestored_(c.after || {});
+    if (c.kind !== 'update' && c.kind !== 'append' && c.kind !== 'delete' && c.kind !== 'cells') return false;
+    const sheet = SpreadsheetApp.getActive().getSheetByName(c.tab);
+    if (!sheet) return false;
+    if (c.kind === 'append') {
+      if (!Number.isInteger(c.row) || c.row < 1) return false;
+      if (c.before !== null && c.before !== undefined) return false;
+      const width = Undo.rowWidth_(sheet, c, c.after || {});
+      const range = sheet.getRange(c.row, 1, 1, width);
+      const values = range.getValues()[0];
+      const formulas = range.getFormulas()[0];
+      return values.every((v, i) => !formulas[i] && Tabs.sameCell(v, ''));
+    }
+    if (!c.before || typeof c.before !== 'object') return false;
+    if (c.kind === 'delete') {
+      if (!Number.isInteger(c.row) || c.row < 1 || c.row > sheet.getMaxRows()) return false;
+      const cells = Undo.locate_(sheet, c, c.before);
+      if (cells.some((x) => !x.col || (Tabs.isSnapFormula(x.value) && x.value.legacy))) return false;
+      return Undo.rowMatchesSnapshot_(sheet, c.row, cells);
+    }
+    if (c.kind === 'update' && (!Number.isInteger(c.row) || c.row < 1)) return false;
+    if (c.after && typeof c.after === 'object') {
+      const missingBefore = Object.keys(c.after).some((k) => !Object.prototype.hasOwnProperty.call(c.before, k));
+      if (missingBefore) return false;
+    }
+    const cells = Undo.locate_(sheet, c, c.before);
+    if (!cells.length && Object.keys(c.after || {}).length > 0) return false;
+    return cells.every((x) => Boolean(x.col && x.range)
+      && !(Tabs.isSnapFormula(x.value) && x.value.legacy)
+      && Undo.same_(Undo.cellValue_(x.range), x.value));
+  },
+
+  rowWidth_(sheet, c, snapshot) {
+    const cols = Undo.locate_(sheet, c, snapshot || {}).map((x) => x.col || 0);
+    return Math.max(sheet.getLastColumn(), ...cols, 1);
+  },
+
+  rowMatchesSnapshot_(sheet, row, cells) {
+    if (row > sheet.getMaxRows()) return false;
+    const width = Math.max(sheet.getLastColumn(), ...cells.map((x) => x.col || 0), 1);
+    const range = sheet.getRange(row, 1, 1, width);
+    const values = range.getValues()[0];
+    const formulas = range.getFormulas()[0];
+    const byCol = {};
+    cells.forEach((x) => { if (x.col) byCol[x.col] = x.value; });
+    for (let col = 1; col <= width; col++) {
+      const target = Object.prototype.hasOwnProperty.call(byCol, col) ? byCol[col] : '';
+      const actual = Tabs.snapCell(formulas[col - 1], values[col - 1]);
+      if (!Undo.same_(actual, target)) return false;
+    }
+    return true;
   },
 
   /** Restores one change (no conflict check, no logging). */
@@ -497,6 +742,54 @@ const Undo = {
       case 'insertColumns': ss.getSheetByName(s.sheet).deleteColumns(s.after + 1, s.count); break;
       case 'namedRange': ss.removeNamedRange(s.name); break;
       default: throw new Error(`Unknown structure op: ${s.op}`);
+    }
+  },
+
+  restoreStructure_(s) {
+    const ss = SpreadsheetApp.getActive();
+    switch (s.op) {
+      case 'renameSheet': {
+        if (ss.getSheetByName(s.from) && !ss.getSheetByName(s.to)) return;
+        const sh = ss.getSheetByName(s.to);
+        if (!sh) throw new Error(`Aba "${s.to}" não encontrada`);
+        sh.setName(s.from);
+        break;
+      }
+      case 'insertSheet': {
+        const sh = ss.getSheetByName(s.name);
+        if (sh) ss.deleteSheet(sh);
+        break;
+      }
+      case 'insertColumns': {
+        const sh = ss.getSheetByName(s.sheet);
+        if (!sh) throw new Error(`Aba "${s.sheet}" não encontrada`);
+        if (sh.getMaxColumns() >= s.after + s.count) sh.deleteColumns(s.after + 1, s.count);
+        break;
+      }
+      case 'namedRange':
+        if (ss.getRangeByName(s.name)) ss.removeNamedRange(s.name);
+        break;
+      default:
+        throw new Error(`Unknown structure op: ${s.op}`);
+    }
+  },
+
+  structureRestored_(s) {
+    if (!s || typeof s !== 'object') return false;
+    const ss = SpreadsheetApp.getActive();
+    switch (s.op) {
+      case 'renameSheet':
+        return Boolean(s.from && ss.getSheetByName(s.from)) && Boolean(!s.to || !ss.getSheetByName(s.to));
+      case 'insertSheet':
+        return Boolean(s.name) && !ss.getSheetByName(s.name);
+      case 'insertColumns': {
+        const sh = s.sheet ? ss.getSheetByName(s.sheet) : null;
+        return Boolean(sh) && sh.getMaxColumns() === s.after;
+      }
+      case 'namedRange':
+        return Boolean(s.name) && !ss.getRangeByName(s.name);
+      default:
+        return false;
     }
   },
 
@@ -569,6 +862,14 @@ const Undo = {
   error_(code, message) {
     const err = new Error(message);
     err.apiErrors = [{ path: 'args', code, message }];
+    return err;
+  },
+
+  /** Error thrown when rollback or undo cannot prove every change was restored. */
+  rollbackError_(message) {
+    const err = new Error(message);
+    err.code = 'rollback_failed';
+    err.writeState = 'unknown';
     return err;
   },
 };

@@ -31,6 +31,7 @@ from agent.weekly import week_bounds, week_summary
 
 log = logging.getLogger(__name__)
 
+VOICE_HELP = "🎙️ Pode mandar áudio: eu transcrevo, você confirma, e o áudio não é guardado por mim."
 EXAMPLES = (
     "Me conte o dia em texto livre, por exemplo:\n"
     "• peso 82,4, cintura 84, dormi 7h30, 8k passos, 60 min de luta\n"
@@ -39,6 +40,7 @@ EXAMPLES = (
     "• ontem fome 3 cansaço 4, dieta completa\n"
     "• como foi meu supino inclinado nas últimas semanas?\n"
     "Eu gravo na planilha e confirmo o que foi gravado.\n"
+    f"{VOICE_HELP}\n"
     "Prefere um formulário? Envie /app para abrir os de treino e refeição."
 )
 SHEET_DOWN = "⚠ A planilha não respondeu. Tente de novo em alguns minutos."

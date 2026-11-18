@@ -705,3 +705,417 @@ test('api writes: description, meal, item note and workout note starting with = 
     assert.equal(rng.getFormulas().flat().filter((f) => /1\+1/.test(f)).length, 0, `no stray formula in ${s.getName()}`);
   });
 });
+
+/* S1: listener fault-isolation, proven rollback and writeState (spec §4.3.2 & §4.3.6) ----------- */
+
+test('S1 listener fault-isolation: action.committed listener error keeps ok: true with derived_refresh_failed warning on write and undo', () => {
+  const ctx = setup();
+  const loggedErrors = [];
+  const origErr = ctx.console.error;
+  ctx.console.error = (...a) => { loggedErrors.push(a); origErr(...a); };
+  ctx.Core.on('action.committed', () => {
+    throw new Error('painel refresh boom');
+  });
+
+  const w = ctx.http({ key: KEY, op: 'diary.upsert', args: { date: '2026-10-20', fields: { weightKg: 81.5, sleepH: 7.5 } } });
+  assert.equal(w.ok, true);
+  assert.equal(w.writeState, undefined);
+  assert.deepEqual(w.result.warnings, ['derived_refresh_failed']);
+  assert.equal(ctx.Days.get('2026-10-20').weightKg, 81.5);
+  assert.equal(loggedErrors.length, 1);
+
+  // Existing warnings array on a domain result is preserved alongside derived_refresh_failed
+  const origDiaryUpsert = ctx.SheetApi.diaryUpsert_.bind(ctx.SheetApi);
+  ctx.SheetApi.diaryUpsert_ = (v) => Object.assign(origDiaryUpsert(v), { warnings: ['custom_notice'] });
+  const w2 = ok(ctx.api('diary.upsert', { date: '2026-10-20', fields: { steps: 9000 } }));
+  assert.deepEqual(w2.warnings, ['custom_notice', 'derived_refresh_failed']);
+  ctx.SheetApi.diaryUpsert_ = origDiaryUpsert;
+
+  // write.undo also isolates listener failure and surfaces warnings
+  const u = ctx.http({ key: KEY, op: 'write.undo', args: { writeId: w2.writeId } });
+  assert.equal(u.ok, true);
+  assert.deepEqual(u.result.warnings, ['derived_refresh_failed']);
+  assert.equal(ctx.Days.get('2026-10-20').steps, null);
+  assert.equal(loggedErrors.length, 3);
+});
+
+test('S1 partial update, restored: second setValue throw restores first cell, proves re-read == before, and answers writeState: "none"', () => {
+  const ctx = setup();
+  ok(ctx.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 82.0, notes: 'intacto' } }));
+  const diarySheet = ctx.Tabs.sheet('diary');
+  const origGetRange = diarySheet.getRange.bind(diarySheet);
+  const sleepCol = ctx.Tabs.headerMap('diary').sleepH;
+  let sleepCalls = 0;
+  diarySheet.getRange = (r, c, ...rest) => {
+    const rng = origGetRange(r, c, ...rest);
+    if (rest.length === 0 && r === 6 && c === sleepCol) {
+      const realSet = rng.setValue.bind(rng);
+      rng.setValue = (v) => {
+        sleepCalls++;
+        if (sleepCalls === 1) throw new Error('falha na 2a célula');
+        return realSet(v);
+      };
+    }
+    return rng;
+  };
+
+  const res = ctx.http({ key: KEY, op: 'diary.upsert', args: { date: '2026-10-19', fields: { weightKg: 84.3, sleepH: 8 } } });
+  diarySheet.getRange = origGetRange;
+  assert.equal(res.ok, false);
+  assert.equal(res.writeState, 'none');
+  assert.deepEqual(codes(res), ['args:rejected']);
+  const dayRow = ctx.Days.get('2026-10-19');
+  assert.equal(dayRow.weightKg, 82.0, 'first cell restored to before');
+  assert.equal(dayRow.sleepH, null, 'second cell untouched');
+  assert.equal(dayRow.notes, 'intacto', 'other columns intact');
+});
+
+test('S1 partial update, not proven: restore failure, re-read failure, or re-read mismatch answers rollback_failed with writeState: "unknown"', () => {
+  // 1. Restoring write fails
+  {
+    const ctx = setup();
+    ok(ctx.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 82.0 } }));
+    const diarySheet = ctx.Tabs.sheet('diary');
+    const origGetRange = diarySheet.getRange.bind(diarySheet);
+    const weightCol = ctx.Tabs.headerMap('diary').weightKg;
+    const sleepCol = ctx.Tabs.headerMap('diary').sleepH;
+    let weightSets = 0;
+    diarySheet.getRange = (r, c, ...rest) => {
+      const rng = origGetRange(r, c, ...rest);
+      if (rest.length === 0 && r === 6 && c === weightCol) {
+        const realSet = rng.setValue.bind(rng);
+        rng.setValue = (v) => {
+          weightSets++;
+          if (weightSets === 2) throw new Error('falha ao restaurar 1a célula');
+          return realSet(v);
+        };
+      }
+      if (rest.length === 0 && r === 6 && c === sleepCol) {
+        rng.setValue = () => { throw new Error('falha na 2a célula'); };
+      }
+      return rng;
+    };
+    const res = ctx.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 85.0, sleepH: 7 } });
+    assert.equal(res.ok, false);
+    assert.equal(res.writeState, 'unknown');
+    assert.deepEqual(codes(res), [':rollback_failed']);
+  }
+
+  // 2. Re-read throws after restoring write
+  {
+    const ctx = setup();
+    ok(ctx.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 82.0 } }));
+    const diarySheet = ctx.Tabs.sheet('diary');
+    const origGetRange = diarySheet.getRange.bind(diarySheet);
+    const weightCol = ctx.Tabs.headerMap('diary').weightKg;
+    const sleepCol = ctx.Tabs.headerMap('diary').sleepH;
+    let sets = 0;
+    let restored = false;
+    diarySheet.getRange = (r, c, ...rest) => {
+      const rng = origGetRange(r, c, ...rest);
+      if (rest.length === 0 && r === 6 && c === weightCol) {
+        const realSet = rng.setValue.bind(rng);
+        rng.setValue = (v) => {
+          sets++;
+          const out = realSet(v);
+          if (sets === 2) restored = true;
+          return out;
+        };
+        const realFormulas = rng.getFormulas.bind(rng);
+        rng.getFormulas = () => {
+          if (restored) throw new Error('falha ao reler célula');
+          return realFormulas();
+        };
+      }
+      if (rest.length === 0 && r === 6 && c === sleepCol) {
+        rng.setValue = () => { throw new Error('falha na 2a célula'); };
+      }
+      return rng;
+    };
+    const res = ctx.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 85.0, sleepH: 7 } });
+    assert.equal(res.ok, false);
+    assert.equal(res.writeState, 'unknown');
+    assert.deepEqual(codes(res), [':rollback_failed']);
+  }
+
+  // 3. Re-read differs from `before` (restoring setValue silently drops the write)
+  {
+    const ctx = setup();
+    ok(ctx.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 82.0 } }));
+    const diarySheet = ctx.Tabs.sheet('diary');
+    const origGetRange = diarySheet.getRange.bind(diarySheet);
+    const weightCol = ctx.Tabs.headerMap('diary').weightKg;
+    const sleepCol = ctx.Tabs.headerMap('diary').sleepH;
+    let weightSets = 0;
+    diarySheet.getRange = (r, c, ...rest) => {
+      const rng = origGetRange(r, c, ...rest);
+      if (rest.length === 0 && r === 6 && c === weightCol) {
+        const realSet = rng.setValue.bind(rng);
+        rng.setValue = (v) => {
+          weightSets++;
+          if (weightSets === 2) return rng; // silent no-op: cell stays 85.0 != 82.0
+          return realSet(v);
+        };
+      }
+      if (rest.length === 0 && r === 6 && c === sleepCol) {
+        rng.setValue = () => { throw new Error('falha na 2a célula'); };
+      }
+      return rng;
+    };
+    const res = ctx.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 85.0, sleepH: 7 } });
+    assert.equal(res.ok, false);
+    assert.equal(res.writeState, 'unknown');
+    assert.deepEqual(codes(res), [':rollback_failed']);
+  }
+});
+
+test('S1 skipped change and failed reverts in Undo or rollback_ answer rollback_failed with writeState: "unknown"', () => {
+  // 1. A change that Undo.applied_ considers false (partial update) and whose restoration is skipped, leaving a cell != before
+  {
+    const ctx = setup();
+    ok(ctx.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 82.0 } }));
+    const diarySheet = ctx.Tabs.sheet('diary');
+    const origGetRange = diarySheet.getRange.bind(diarySheet);
+    const sleepCol = ctx.Tabs.headerMap('diary').sleepH;
+    diarySheet.getRange = (r, c, ...rest) => {
+      const rng = origGetRange(r, c, ...rest);
+      if (rest.length === 0 && r === 6 && c === sleepCol) {
+        rng.setValue = () => { throw new Error('falha parcial'); };
+      }
+      return rng;
+    };
+    ctx.Undo.restore_ = () => {}; // simulates skipping restoration without throwing
+    const res = ctx.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 86.0, sleepH: 7 } });
+    assert.equal(res.ok, false);
+    assert.equal(res.writeState, 'unknown');
+    assert.notEqual(res.writeState, 'none');
+    assert.deepEqual(codes(res), [':rollback_failed']);
+  }
+
+  // 2. Failed revert on append during rollback_ (clearContent throws)
+  {
+    const ctx = setup({
+      tabs: {
+        favorites: [{ name: 'Lanche quebrado', version: 'v1' }],
+        ingredients: [{ favorite: 'Lanche quebrado', food: 'Inexistente', qty: 50, unit: 'g', version: 'v1', check: 'Calculado' }],
+      },
+    });
+    const foodSheet = ctx.Tabs.sheet('food');
+    const origGetRange = foodSheet.getRange.bind(foodSheet);
+    foodSheet.getRange = (...a) => {
+      const rng = origGetRange(...a);
+      rng.clearContent = () => { throw new Error('clearContent falhou'); };
+      return rng;
+    };
+    const res = ctx.api('food.add', {
+      date: '2026-10-20',
+      meal: 'Lanche',
+      items: [{ food: 'Arroz branco cozido', qty: 100 }, { favorite: 'Lanche quebrado' }],
+    });
+    assert.equal(res.ok, false);
+    assert.equal(res.writeState, 'unknown');
+    assert.deepEqual(codes(res), [':rollback_failed']);
+  }
+
+  // 3. Failed revert during write.undo -> rollback_failed and writeState: "unknown"
+  {
+    const ctx = setup();
+    const w = ok(ctx.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: 81.2 } }));
+    const diarySheet = ctx.Tabs.sheet('diary');
+    const origGetRange = diarySheet.getRange.bind(diarySheet);
+    diarySheet.getRange = (...a) => {
+      const rng = origGetRange(...a);
+      rng.clearContent = () => { throw new Error('falha no undo'); };
+      return rng;
+    };
+    const u = ctx.api('write.undo', { writeId: w.writeId });
+    assert.equal(u.ok, false);
+    assert.equal(u.writeState, 'unknown');
+    assert.deepEqual(codes(u), [':rollback_failed']);
+  }
+});
+
+test('S1 clean domain refusals (rejected / invalid) answer writeState: "none", while internal outside an action or post-commit failure answers "unknown"', () => {
+  // 1. Domain `rejected` with 0 tracked changes (workout complete with empty exercises on empty day)
+  const ctx = setup({
+    tabs: {
+      favorites: [{ name: 'Lanche órfão', version: 'v1' }],
+      ingredients: [{ favorite: 'Lanche órfão', food: 'Item removido', qty: 50, unit: 'g', version: 'v1', check: 'Calculado' }],
+    },
+  });
+  const emptyComplete = ctx.api('workout.upsert', { date: '2026-10-20', session: 'Upper', complete: true, exercises: [] });
+  assert.equal(emptyComplete.ok, false);
+  assert.equal(emptyComplete.writeState, 'none');
+  assert.deepEqual(codes(emptyComplete), ['args:rejected']);
+
+  // 2. Domain `rejected` with tracked changes proven restored (first food item + diary totals rolled back)
+  const rolledBack = ctx.api('food.add', {
+    date: '2026-10-20',
+    meal: 'Lanche',
+    items: [{ food: 'Arroz branco cozido', qty: 100 }, { favorite: 'Lanche órfão' }],
+  });
+  assert.equal(rolledBack.ok, false);
+  assert.equal(rolledBack.writeState, 'none');
+  assert.deepEqual(codes(rolledBack), ['args:rejected']);
+  assert.equal(ctx.Tabs.read('food').length, 0);
+  assert.equal(ctx.Days.get('2026-10-20'), null);
+
+  // 3. Domain `invalid` (err.apiErrors) both without tracked changes and with tracked changes proven restored
+  const origSave = ctx.Sessions.savePartial.bind(ctx.Sessions);
+  ctx.Sessions.savePartial = () => {
+    const err = new Error('Regra de domínio violada.');
+    err.apiErrors = [{ path: 'rows', code: 'invalid', message: 'Regra de domínio violada.' }];
+    throw err;
+  };
+  const invalidZero = ctx.api('workout.upsert', { date: '2026-10-20', session: 'Upper', exercises: UPPER });
+  assert.equal(invalidZero.ok, false);
+  assert.equal(invalidZero.writeState, 'none');
+  assert.deepEqual(codes(invalidZero), ['args.exercises:invalid']);
+
+  ctx.Sessions.savePartial = () => {
+    ctx.Tabs.append('diary', { date: '2026-10-20', weightKg: 80 });
+    const err = new Error('Regra de domínio após escrita.');
+    err.apiErrors = [{ path: 'rows', code: 'invalid', message: 'Regra de domínio após escrita.' }];
+    throw err;
+  };
+  const invalidRolledBack = ctx.api('workout.upsert', { date: '2026-10-20', session: 'Upper', exercises: UPPER });
+  ctx.Sessions.savePartial = origSave;
+  assert.equal(invalidRolledBack.ok, false);
+  assert.equal(invalidRolledBack.writeState, 'none');
+  assert.deepEqual(codes(invalidRolledBack), ['args.exercises:invalid']);
+  assert.equal(ctx.Days.get('2026-10-20'), null);
+
+  // 4. Migration guard in ChangeLog.GUARDS refuses before ChangeLog.run starts -> writeState: "none"
+  ctx.ChangeLog.GUARDS.push(() => { throw new Error('Migração em aberto.'); });
+  const guarded = ctx.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: 80 } });
+  ctx.ChangeLog.GUARDS.pop();
+  assert.equal(guarded.ok, false);
+  assert.equal(guarded.writeState, 'none');
+  assert.deepEqual(codes(guarded), ['args:rejected']);
+
+  // 5. `internal` outside an action (missing SHEET_API_KEY in doPost, or TypeError outside ChangeLog.run) -> writeState: "unknown"
+  const ctxNoKey = setup();
+  ctxNoKey.PropertiesService.getScriptProperties().deleteProperty('SHEET_API_KEY');
+  const missingKey = ctxNoKey.http({ key: '', op: 'diary.upsert', args: { date: '2026-10-20', fields: { weightKg: 80 } } });
+  assert.equal(missingKey.ok, false);
+  assert.equal(missingKey.writeState, 'unknown');
+  assert.deepEqual(codes(missingKey), ['key:internal']);
+
+  const origCatalog = ctx.SheetApi.catalog_.bind(ctx.SheetApi);
+  ctx.SheetApi.catalog_ = () => { throw new TypeError('unexpected null deref'); };
+  const internalOutside = ctx.api('catalog', {});
+  ctx.SheetApi.catalog_ = origCatalog;
+  assert.equal(internalOutside.ok, false);
+  assert.equal(internalOutside.writeState, 'unknown');
+  assert.deepEqual(codes(internalOutside), [':internal']);
+
+  // 6. Unlogged write (`foods.seed`) throwing during execution -> writeState: "unknown"
+  const origSeed = ctx.SheetApi.foodsSeed_.bind(ctx.SheetApi);
+  ctx.SheetApi.foodsSeed_ = () => { throw new Error('falha sem ChangeLog'); };
+  const unloggedErr = ctx.api('foods.seed', {
+    foods: [{ name: 'Item Novo', baseUnit: 'g', baseQty: 100, kcal: 100, protein: 10, carbs: 10, fat: 2, fiber: 1 }],
+  });
+  ctx.SheetApi.foodsSeed_ = origSeed;
+  assert.equal(unloggedErr.ok, false);
+  assert.equal(unloggedErr.writeState, 'unknown');
+
+  // 7. Post-commit exception (after ChangeLog.run already committed) -> writeState: "unknown"
+  const origDiary = ctx.SheetApi.diaryUpsert_.bind(ctx.SheetApi);
+  ctx.SheetApi.diaryUpsert_ = (v) => {
+    origDiary(v);
+    return null; // causes `result.writeId = writeId` after ChangeLog.run commits to throw TypeError
+  };
+  const postCommit = ctx.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 81 } });
+  ctx.SheetApi.diaryUpsert_ = origDiary;
+  assert.equal(postCommit.ok, false);
+  assert.equal(postCommit.writeState, 'unknown');
+});
+
+test('S1 PRE_WRITE_CODES: every single code in spec §4.3.2 answers ok: false with writeState: "none"', () => {
+  const EXPECTED_PRE_WRITE_CODES = [
+    'invalid_json',
+    'unauthorized',
+    'unknown_op',
+    'wrong_type',
+    'unknown_field',
+    'empty',
+    'too_long',
+    'required',
+    'out_of_range',
+    'invalid_date',
+    'date_in_future',
+    'invalid_range',
+    'not_in_catalog',
+    'incomplete_food',
+    'duplicate',
+    'invalid_unit',
+    'conflict',
+    'nothing_to_undo',
+    'not_found',
+    'already_undone',
+    'not_latest',
+    'unavailable',
+  ];
+
+  const ctx = setup();
+  // Prepare state for undo / conflict cases on a separate context so pre-write checks stay isolated
+  const ctxUndo = setup();
+  const firstWrite = ok(ctxUndo.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 80 } }, 'req-used'));
+  const secondWrite = ok(ctxUndo.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: 81 } }));
+  const alreadyUndoneWrite = ok(ctxUndo.api('diary.upsert', { date: '2026-10-18', fields: { weightKg: 79 } }));
+  ok(ctxUndo.api('write.undo', { writeId: alreadyUndoneWrite.writeId }));
+
+  const ctxUndoConflict = setup();
+  const conflictTarget = ok(ctxUndoConflict.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: 82 } }));
+  ctxUndoConflict.Tabs.sheet('diary').getRange(6, ctxUndoConflict.Tabs.headerMap('diary').weightKg).setValue(90);
+
+  const ctxBusy = setup();
+  ctxBusy.__lockBusy = true;
+
+  const cases = [
+    ['invalid_json', () => ctx.http('{bad json')],
+    ['unauthorized', () => ctx.http({ key: 'wrong', op: 'diary.upsert', args: {} })],
+    ['unknown_op', () => ctx.http({ key: KEY, op: 'nope.op', args: {} })],
+    ['wrong_type', () => ctx.http([1, 2, 3])],
+    ['wrong_type', () => ctx.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: '80' } })],
+    ['unknown_field', () => ctx.http({ key: KEY, op: 'catalog', stray: true })],
+    ['unknown_field', () => ctx.api('diary.upsert', { date: '2026-10-20', fields: { nope: 1 } })],
+    ['empty', () => ctx.api('diary.upsert', { date: '2026-10-20', fields: {} })],
+    ['too_long', () => ctx.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: 80 } }, 'r'.repeat(121))],
+    ['required', () => ctx.api('diary.upsert', { date: '2026-10-20' })],
+    ['out_of_range', () => ctx.api('diary.upsert', { date: '2026-10-20', fields: { sleepH: 30 } })],
+    ['invalid_date', () => ctx.api('diary.upsert', { date: '2026-02-30', fields: { weightKg: 80 } })],
+    ['date_in_future', () => ctx.api('diary.upsert', { date: '2026-10-25', fields: { weightKg: 80 } })],
+    ['invalid_range', () => ctx.api('food.copy', { from: '2026-10-20', to: '2026-10-20' })],
+    ['not_in_catalog', () => ctx.api('food.add', { date: '2026-10-20', meal: 'Almoço', items: [{ food: 'Comida inexistente', qty: 100 }] })],
+    ['incomplete_food', () => ctx.api('food.add', { date: '2026-10-20', meal: 'Almoço', items: [{ food: 'Granola sem cadastro completo', qty: 50 }] })],
+    ['duplicate', () => ctx.api('workout.upsert', {
+      date: '2026-10-20',
+      session: 'Upper',
+      exercises: [
+        { name: 'Supino inclinado', work: [{ kg: 60, reps: 8 }] },
+        { name: 'Supino inclinado', work: [{ kg: 60, reps: 8 }] },
+      ],
+    })],
+    ['invalid_unit', () => ctx.api('food.add', { date: '2026-10-20', meal: 'Almoço', items: [{ food: 'Arroz branco cozido', qty: 1, unit: 'litro' }] })],
+    ['conflict', () => ctx.api('food.add', { date: '2026-10-20', meal: 'Almoço', items: [{ food: 'Arroz branco cozido', description: 'ambos' }] })],
+    ['conflict', () => ctxUndo.api('diary.upsert', { date: '2026-10-19', fields: { weightKg: 99 } }, 'req-used')],
+    ['conflict', () => ctxUndoConflict.api('write.undo', { writeId: conflictTarget.writeId })],
+    ['nothing_to_undo', () => ctx.api('write.undo', {})],
+    ['not_found', () => ctxUndo.api('write.undo', { writeId: 'inexistente' })],
+    ['already_undone', () => ctxUndo.api('write.undo', { writeId: alreadyUndoneWrite.writeId })],
+    ['not_latest', () => ctxUndo.api('write.undo', { writeId: firstWrite.writeId })],
+    ['unavailable', () => ctxBusy.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: 80 } })],
+  ];
+
+  assert.ok(secondWrite.writeId);
+  const seen = new Set();
+  for (const [expectedCode, runCase] of cases) {
+    const r = runCase();
+    assert.equal(r.ok, false, `expected ok: false for ${expectedCode}`);
+    assert.equal(r.writeState, 'none', `expected writeState: "none" for ${expectedCode}, got ${JSON.stringify(r)}`);
+    assert.ok(r.errors.some((e) => e.code === expectedCode), `expected code ${expectedCode} in ${JSON.stringify(r.errors)}`);
+    seen.add(expectedCode);
+  }
+  assert.deepEqual([...seen].sort(), [...EXPECTED_PRE_WRITE_CODES].sort());
+});

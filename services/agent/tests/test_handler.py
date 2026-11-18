@@ -5,21 +5,42 @@ import pytest
 
 from agent import handler as handler_module
 from agent.bot import (
-    MEDIA_UNREADABLE,
+    MEDIA_DISABLED,
+    MEDIA_UNREADABLE,  # noqa: F401
     MODEL_FAILED,
     MODEL_FAILED_NOTHING_WRITTEN,
     SHEET_FAILED,
+    VOICE_BUDGET,
+    VOICE_EMPTY,
+    VOICE_FAILED,
+    VOICE_FORMAT,
+    VOICE_TOO_LONG,
     Answer,
     Media,
 )
-from agent.buttons import FIX_PLACEHOLDER, FIX_PROMPT, keyboard
+from agent.buttons import FIX_PLACEHOLDER, FIX_PROMPT, entendi_text, keyboard, voice_keyboard
 from agent.commands import Reply, help_text
 from agent.handler import CUT, DOWNLOAD_FAILED, FAILURE, Handler, UpdateDeduplicator, media_ref, too_large
+from agent.transcribe import Audio, TranscribeError, Transcript
 from agent.undo import ALREADY, SHEET_DOWN
+from agent.voice_confirm import VoiceConfirmations, sha256_hex
 
 from .fakes import FakeSheet, FakeTelegram, file, media_update
 
 pytestmark = pytest.mark.unit
+
+
+class FakeTranscriber:
+    def __init__(self, text="peso 82,4", error=None):
+        self.calls: list[tuple[Audio, str, float | None]] = []
+        self._text = text
+        self._error = error
+
+    async def transcribe(self, audio: Audio, *, principal_key: str, deadline_s: float | None = None):
+        self.calls.append((audio, principal_key, deadline_s))
+        if self._error is not None:
+            raise self._error
+        return Transcript(self._text, "gemini/gemini-3.8-flash", None, False)
 
 
 class FakeBot:
@@ -94,10 +115,26 @@ def voice_update():
 
 async def test_the_message_deadline_counts_from_receipt_and_the_download_uses_part_of_it():
     tg = SlowDownloadTelegram(0.2, files={"v1": ({"file_path": "voice/1.oga", "file_size": 10}, b"ogg")})
+    transcriber = FakeTranscriber("peso 82")
     bot = DeadlineBot()
-    await Handler({42}, bot, tg, message_deadline_s=1.0).handle_update(voice_update())
-    assert bot.left is not None and bot.left < 0.85
+    await Handler({42}, bot, tg, transcriber=transcriber, message_deadline_s=1.0).handle_update(
+        voice_update()
+    )
+    assert bot.texts == []
+    [(_, principal_key, left)] = transcriber.calls
+    assert principal_key == "telegram:42"
+    assert left is not None and 0 < left < 0.85
     assert tg.sent
+
+    # Photos still share the same message deadline directly with Bot.reply.
+    photo_tg = SlowDownloadTelegram(
+        0.2, files={"p1": ({"file_path": "photos/1.jpg", "file_size": 10}, b"jpg")}
+    )
+    photo_bot = DeadlineBot()
+    await Handler({42}, photo_bot, photo_tg, message_deadline_s=1.0).handle_update(
+        media_update(photo=[{"file_id": "p1", "width": 90, "height": 90, "file_size": 10}])
+    )
+    assert photo_bot.left is not None and 0 < photo_bot.left < 0.85
 
 
 async def test_a_download_that_outlives_the_deadline_gets_the_download_failure_reply():
@@ -512,22 +549,63 @@ PHOTO_SIZES = [
 ]
 
 
-async def test_a_voice_message_is_downloaded_and_goes_to_the_bot_as_ogg_audio():
-    bot, tg = FakeBot("<b>24/09</b> · Peso kg 82"), FakeTelegram(files=file("v1", b"OggS...", "voice/f.oga"))
-    await Handler({42}, bot, tg).handle_update(media_update(voice=VOICE))
+async def test_a_voice_message_is_transcribed_and_answered_with_entendi_never_reaching_bot():
+    bot = FakeBot("<b>24/09</b> · Peso kg 82")
+    tg = FakeTelegram(files=file("v1", b"OggS...", "voice/f.oga"))
+    confirmations = VoiceConfirmations()
+    transcriber = FakeTranscriber("peso 82,4")
+    msg = media_update(message_id=14, voice=VOICE)
+    await Handler({42}, bot, tg, confirmations=confirmations, transcriber=transcriber).handle_update(msg)
+
     assert tg.fetched == [("getFile", "v1"), ("download", "voice/f.oga")]
-    assert bot.texts == [("", "42")]
-    assert bot.media == [[Media("audio/ogg", b"OggS...")]]
-    assert tg.sent == [(42, "<b>24/09</b> · Peso kg 82")]
+    assert bot.texts == []
+    assert bot.media == []
+    [(audio, principal_key, _)] = transcriber.calls
+    assert audio == Audio("audio/ogg", b"OggS...", trusted_seconds=3)
+    assert principal_key == "telegram:42"
+    assert tg.sent == [(42, entendi_text("peso 82,4"))]
     assert tg.actions[0] == (42, "typing")
+    markup = tg.options[-1]["reply_markup"]
+    vid = markup["inline_keyboard"][0][0]["callback_data"].partition(":")[2]
+    assert tg.options[-1] == {"html": False, "reply_markup": voice_keyboard(vid), "reply_to": 14}
+    entry = confirmations.get(vid)
+    assert entry is not None
+    assert (entry.chat_id, entry.message_id, entry.state, entry.text_sha256) == (
+        42,
+        1,
+        "pending",
+        sha256_hex("peso 82,4"),
+    )
 
 
-async def test_an_audio_file_keeps_its_mime_type_and_the_caption_goes_along():
-    audio = {"file_id": "a1", "mime_type": "audio/mp4", "file_size": 100}
+async def test_an_audio_file_keeps_its_mime_type_and_combines_caption_with_transcript():
+    audio = {"file_id": "a1", "mime_type": "audio/mp4", "file_size": 100, "duration": 18}
     bot, tg = FakeBot(), FakeTelegram(files=file("a1", b"m4a"))
-    await Handler({42}, bot, tg).handle_update(media_update(audio=audio, caption="treino de hoje"))
-    assert bot.texts == [("treino de hoje", "42")]
-    assert bot.media == [[Media("audio/mp4", b"m4a")]]
+    confirmations = VoiceConfirmations()
+    transcriber = FakeTranscriber("supino 80 por 8")
+    await Handler({42}, bot, tg, confirmations=confirmations, transcriber=transcriber).handle_update(
+        media_update(message_id=22, audio=audio, caption="treino de hoje")
+    )
+
+    assert bot.texts == []
+    assert bot.media == []
+    [(sent_audio, _, _)] = transcriber.calls
+    assert sent_audio == Audio("audio/mp4", b"m4a", trusted_seconds=18)
+    expected_body = "treino de hoje\nsupino 80 por 8"
+    assert tg.sent == [(42, entendi_text(expected_body))]
+    vid = tg.options[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].partition(":")[2]
+    entry = confirmations.get(vid)
+    assert entry is not None and entry.text_sha256 == sha256_hex(expected_body)
+
+
+async def test_an_audio_message_with_non_audio_mime_still_uses_transcriber_never_bot():
+    audio = {"file_id": "a1", "mime_type": "image/jpeg", "file_size": 100, "duration": 5}
+    bot, tg = FakeBot(), FakeTelegram(files=file("a1", b"not-a-photo"))
+    transcriber = FakeTranscriber(error=TranscribeError("unsupported_format"))
+    await Handler({42}, bot, tg, transcriber=transcriber).handle_update(media_update(audio=audio))
+    assert bot.texts == [] and bot.media == []
+    assert len(transcriber.calls) == 1
+    assert tg.sent == [(42, VOICE_FORMAT)]
 
 
 async def test_a_photo_sends_the_largest_size_that_fits_as_jpeg():
@@ -550,6 +628,31 @@ def test_photo_size_selection():
     too_big = media_ref({"photo": PHOTO_SIZES}, 1_000)
     assert too_big is not None and too_big.file_id == "p-small" and not too_big.fits(1_000)
     assert media_ref({"sticker": {"file_id": "s"}}, 1_000) is None
+
+
+async def test_voice_and_audio_over_duration_limit_are_refused_before_getfile():
+    bot, tg = FakeBot(), FakeTelegram(files=file("v1", b"OggS"))
+    transcriber = FakeTranscriber("peso 82")
+    handler = Handler({42}, bot, tg, transcriber=transcriber, voice_max_seconds=90)
+    await handler.handle_update(
+        {"update_id": 10, "message": {"chat": {"id": 42}, "voice": {**VOICE, "duration": 91}}}
+    )
+    await handler.handle_update(
+        {"update_id": 11, "message": {"chat": {"id": 42}, "audio": {"file_id": "v1", "duration": 91}}}
+    )
+    assert tg.fetched == []
+    assert transcriber.calls == []
+    assert bot.texts == []
+    assert tg.sent == [(42, VOICE_TOO_LONG), (42, VOICE_TOO_LONG)]
+
+    # Exact boundary (90 s) and missing duration are allowed to proceed.
+    await handler.handle_update(
+        {"update_id": 12, "message": {"chat": {"id": 42}, "voice": {**VOICE, "duration": 90}}}
+    )
+    await handler.handle_update(
+        {"update_id": 13, "message": {"chat": {"id": 42}, "audio": {"file_id": "v1"}}}
+    )
+    assert len(transcriber.calls) == 2
 
 
 async def test_a_file_over_the_limit_is_refused_without_downloading():
@@ -577,10 +680,96 @@ async def test_a_download_larger_than_telegram_announced_is_refused():
 
 async def test_media_disabled_answers_with_the_text_hint_without_downloading():
     bot, tg = FakeBot(), FakeTelegram()
-    await Handler({42}, bot, tg, media_enabled=False).handle_update(media_update(voice=VOICE))
+    await Handler({42}, bot, tg, media_enabled=False).handle_update(
+        {"update_id": 20, "message": {"chat": {"id": 42}, "voice": VOICE}}
+    )
+    await Handler({42}, bot, tg, media_enabled=False).handle_update(
+        {"update_id": 21, "message": {"chat": {"id": 42}, "audio": {"file_id": "a1"}}}
+    )
+    await Handler({42}, bot, tg, media_enabled=False).handle_update(
+        {"update_id": 22, "message": {"chat": {"id": 42}, "photo": PHOTO_SIZES}}
+    )
     assert tg.fetched == []
     assert bot.texts == []
-    assert tg.sent == [(42, MEDIA_UNREADABLE)]
+    assert tg.sent == [(42, MEDIA_DISABLED)] * 3
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_text", "is_transient"),
+    [
+        (TranscribeError("disabled"), MEDIA_DISABLED, False),
+        (TranscribeError("unsupported_format"), VOICE_FORMAT, False),
+        (TranscribeError("too_long"), VOICE_TOO_LONG, False),
+        (TranscribeError("no_speech"), VOICE_EMPTY, False),
+        (TranscribeError("budget_exhausted"), VOICE_BUDGET, False),
+        (TranscribeError("failed"), VOICE_FAILED, True),
+        (TranscribeError("timeout"), VOICE_FAILED, True),
+        (RuntimeError("unexpected crash"), VOICE_FAILED, True),
+    ],
+)
+async def test_every_transcribe_error_maps_to_its_spec_message_and_transient_semantics(
+    error, expected_text, is_transient
+):
+    dedup = UpdateDeduplicator()
+    tg = FakeTelegram(files=file("v1", b"OggS...", "voice/f.oga"))
+    failing = FakeTranscriber(error=error)
+    u = {"update_id": 44, "message": {"chat": {"id": 42}, "voice": VOICE}}
+
+    # First delivery sends the §8 message; if sending failed on a transient error, update_id is released.
+    fail_send_tg = FakeTelegram(files=file("v1", b"OggS...", "voice/f.oga"), error=RuntimeError("send net"))
+    await Handler({42}, FakeBot(), fail_send_tg, deduplicator=dedup, transcriber=failing).handle_update(u)
+    assert len(failing.calls) == 1
+
+    # Now deliver with working Telegram: every non-committed update whose send failed was released!
+    dedup2 = UpdateDeduplicator()
+    await Handler({42}, FakeBot(), tg, deduplicator=dedup2, transcriber=failing).handle_update(u)
+    assert tg.sent == [(42, expected_text)]
+
+    ok_transcriber = FakeTranscriber("peso 82")
+    await Handler({42}, FakeBot(), tg, deduplicator=dedup2, transcriber=ok_transcriber).handle_update(u)
+    if is_transient:
+        assert len(ok_transcriber.calls) == 1
+        assert tg.sent[-1] == (42, entendi_text("peso 82"))
+    else:
+        assert ok_transcriber.calls == []
+        assert len(tg.sent) == 1
+
+
+async def test_handler_without_transcriber_answers_media_disabled_for_audio():
+    tg_client = FakeTelegram(files=file("v1", b"OggS...", "voice/f.oga"))
+    fake_bot = FakeBot()
+    await Handler({42}, fake_bot, tg_client).handle_update(media_update(voice=VOICE))
+    assert fake_bot.texts == []
+    assert tg_client.sent == [(42, MEDIA_DISABLED)]
+
+
+async def test_failed_entendi_send_deletes_confirmation_entry_and_releases_update_for_retry():
+    dedup = UpdateDeduplicator()
+    confirmations = VoiceConfirmations()
+    u = {"update_id": 55, "message": {"message_id": 8, "chat": {"id": 42}, "voice": VOICE}}
+
+    broken_tg = FakeTelegram(files=file("v1", b"OggS...", "voice/f.oga"), error=RuntimeError("network down"))
+    await Handler(
+        {42},
+        FakeBot(),
+        broken_tg,
+        deduplicator=dedup,
+        confirmations=confirmations,
+        transcriber=FakeTranscriber("peso 82,4"),
+    ).handle_update(u)
+    assert len(confirmations) == 0
+
+    working_tg = FakeTelegram(files=file("v1", b"OggS...", "voice/f.oga"))
+    await Handler(
+        {42},
+        FakeBot(),
+        working_tg,
+        deduplicator=dedup,
+        confirmations=confirmations,
+        transcriber=FakeTranscriber("peso 82,4"),
+    ).handle_update(u)
+    assert len(confirmations) == 1
+    assert working_tg.sent == [(42, entendi_text("peso 82,4"))]
 
 
 async def test_a_failed_download_gets_its_own_warning_and_skips_the_bot():

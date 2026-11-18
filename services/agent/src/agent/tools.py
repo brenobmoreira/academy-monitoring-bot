@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -26,7 +26,7 @@ _current_update_key: ContextVar[str | None] = ContextVar("telegram_update_key", 
 
 
 @contextmanager
-def update_key_scope(key: str | None) -> Iterator[None]:
+def update_key_scope(key: str | None) -> Generator[None, None, None]:
     """Binds a Telegram update prefix (e.g. 'tg:123') so write tools derive deterministic requestIds."""
     token = _current_update_key.set(key)
     try:
@@ -195,7 +195,7 @@ class Journal:
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
     @asynccontextmanager
-    async def write_turn(self) -> AsyncIterator[dict[str, Any] | None]:
+    async def write_turn(self) -> AsyncGenerator[dict[str, Any] | None, None]:
         """One write at a time per message: a write tool holds this from the decision to write
         until its result is recorded, so the next one decides knowing how this one ended. ADK
         runs the tool calls of one model answer together (one asyncio task each, on this loop),
@@ -227,7 +227,7 @@ class Journal:
         return "committed" if self.writes else "not_committed"
 
     @contextmanager
-    def writing(self) -> Iterator[None]:
+    def writing(self) -> Generator[None, None, None]:
         try:
             yield
         except asyncio.CancelledError:

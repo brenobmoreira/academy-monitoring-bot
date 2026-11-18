@@ -59,7 +59,7 @@ async def test_process_acknowledges_and_ignores_non_object_bodies(handled):
 
 def functions_framework_call(secret, body):
     headers = {webhook.SECRET_HEADER: secret} if secret is not None else {}
-    environ = EnvironBuilder(method="POST", headers=headers, json=body).get_environ()
+    environ = EnvironBuilder(method="POST", headers=list(headers.items()), json=body).get_environ()
     return main.telegram_webhook(Request(environ))
 
 

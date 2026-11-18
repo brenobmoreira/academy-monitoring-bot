@@ -44,7 +44,7 @@ import statistics
 import sys
 import time
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -1178,7 +1178,7 @@ def dry_run(args: argparse.Namespace, audios: list[AudioFile], skipped: int, tod
 
 
 @contextmanager
-def quiet_loggers() -> Iterator[None]:
+def quiet_loggers() -> Generator[None, None, None]:
     """LiteLLM's loggers and Python warnings off while running (they repeat on every call, and a
     provider error log is the one place a request could be echoed); restored on the way out."""
     loggers = [logging.getLogger(n) for n in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy")]

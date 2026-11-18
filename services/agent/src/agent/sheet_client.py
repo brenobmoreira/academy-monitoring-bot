@@ -13,7 +13,7 @@ happen before any write; every other failure is `uncertain`, comes back as the s
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Literal
@@ -122,7 +122,7 @@ _current_request_id: ContextVar[str | None] = ContextVar("sheet_request_id", def
 
 
 @contextmanager
-def request_id_scope(request_id: str | None) -> Iterator[None]:
+def request_id_scope(request_id: str | None) -> Generator[None, None, None]:
     """Binds a deterministic requestId to SheetClient calls made inside the block."""
     token = _current_request_id.set(request_id)
     try:

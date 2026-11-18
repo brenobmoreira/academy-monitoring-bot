@@ -260,6 +260,18 @@ test('setMood supports all MOODS and rich STATES, syncs .pl-bar, and create() su
   assert.equal(c4.getAttribute('data-form'), 'agua');
   assert.equal(c4.getAttribute('data-progress'), '0.25');
 
+  // Symmetrical default data-progress across create(mood), create(mood, form), and create(mood, { form })
+  for (const fullMood of ['happy', 'understood', 'record']) {
+    assert.equal(Avatar.create(fullMood).getAttribute('data-progress'), '1', `create(${fullMood})`);
+    assert.equal(Avatar.create(fullMood, 'treino').getAttribute('data-progress'), '1', `create(${fullMood}, form)`);
+    assert.equal(Avatar.create(fullMood, { form: 'revisao' }).getAttribute('data-progress'), '1', `create(${fullMood}, { form })`);
+  }
+  for (const zeroMood of ['idle', 'focused', 'alert', 'thinking', 'listening', 'oops', 'dozing']) {
+    assert.equal(Avatar.create(zeroMood).getAttribute('data-progress'), '0', `create(${zeroMood})`);
+    assert.equal(Avatar.create(zeroMood, 'treino').getAttribute('data-progress'), '0', `create(${zeroMood}, form)`);
+    assert.equal(Avatar.create(zeroMood, { form: 'revisao' }).getAttribute('data-progress'), '0', `create(${zeroMood}, { form })`);
+  }
+
   assert.match(Avatar.iconSvg('coral'), /<svg /);
   assert.match(Avatar.iconSvg('dark'), /<svg /);
   assert.match(Avatar.monoSvg(), /<mask id="dt-mono-/);
@@ -459,4 +471,27 @@ test('Muscle CSS animates only transform and opacity and disables all motion und
   }
   assert.match(A.CSS, /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?animation:\s*none\s*!important;[\s\S]*?transition:\s*none\s*!important;/);
   assert.match(A.CSS, /\.shape\[data-motion="off"\]/);
+});
+
+test('dev/muscle-motion-lab.html wires styles, ShapeAvatar + optional MuscleMotion, 4 FLIP slots, reactions, voice sim, and toggles with valid JS', () => {
+  const labPath = path.join(__dirname, '..', 'dev', 'muscle-motion-lab.html');
+  const html = fs.readFileSync(labPath, 'utf8');
+  assert.equal(html.includes('\r\n'), false, 'muscle-motion-lab.html must use LF line endings');
+  assert.match(html, /<link[^>]+href="\.\.\/styles\.css"/);
+  assert.match(html, /<script\s+src="\.\.\/src\/avatar\.js"><\/script>/);
+  assert.match(html, /<script\s+src="\.\.\/src\/muscle-motion\.js"><\/script>/);
+
+  for (const slot of ['header', 'empty', 'review', 'voice']) {
+    assert.match(html, new RegExp(`data-slot="${slot}"`), `missing stage slot ${slot}`);
+  }
+  for (const reaction of ['nod', 'tick', 'full', 'celebrate', 'pr', 'no']) {
+    assert.match(html, new RegExp(`data-react="${reaction}"`), `missing reaction button ${reaction}`);
+  }
+  for (const id of ['voice-sine', 'voice-speech', 'voice-mic', 'voice-level', 'toggle-theme', 'toggle-reduced']) {
+    assert.match(html, new RegExp(`id="${id}"`), `missing control #${id}`);
+  }
+
+  const inlineMatch = /<script>\s*([\s\S]*?)\s*<\/script>\s*<\/body>/i.exec(html);
+  assert.ok(inlineMatch, 'expected inline lab controller script');
+  assert.doesNotThrow(() => new vm.Script(inlineMatch[1], { filename: 'muscle-motion-lab.html' }));
 });

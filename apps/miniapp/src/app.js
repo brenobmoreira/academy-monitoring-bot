@@ -1722,13 +1722,15 @@
       : mascotState === 'understood' ? 'happy'
       : mascotState === 'oops' ? 'alert'
       : mascotState;
-    var avatarMood = hasRichState(mascotState) ? mascotState : fallbackMood;
+    var rich = hasRichState(mascotState);
+    var avatarMood = rich ? mascotState : fallbackMood;
     say(avatarMood, line);
     clearVoiceMascot();
     if (!els.shape) return;
     if (mascotState) {
-      if (Avatar && Avatar.setMood && hasRichState(mascotState)) Avatar.setMood(mascotState);
-      else els.shape.setAttribute('data-state', mascotState);
+      if (!(Avatar && Avatar.setMood && rich)) {
+        els.shape.setAttribute('data-state', mascotState);
+      }
       if (mascotState === 'listening') els.shape.classList.add('voice-listening');
       else if (mascotState === 'thinking') els.shape.classList.add('voice-thinking');
       else if (mascotState === 'alert' || mascotState === 'oops') els.shape.classList.add('voice-alert');
@@ -2087,12 +2089,16 @@
         clearVoiceMascot();
         say('idle', 'Antes de gravar, confira o aviso de privacidade.');
       } else if (st.status === 'transcribed' || st.status === 'confirming') {
+        var currentMascot = Avatar && Avatar.mood ? Avatar.mood() : (els.shape && els.shape.getAttribute('data-state'));
+        var unchangedTranscribed = !!(prevState && prevState.status === st.status && !prevState.textError && !st.textError);
         if (st.textError) {
           clearVoiceMascot();
           say('alert', st.textError);
         } else if (hasRichState('understood')) {
-          setVoiceMascot('understood', 'Confira o texto antes de enviar.');
-        } else {
+          if (!(unchangedTranscribed && currentMascot === 'understood')) {
+            setVoiceMascot('understood', 'Confira o texto antes de enviar.');
+          }
+        } else if (!(unchangedTranscribed && currentMascot === 'happy')) {
           clearVoiceMascot();
           say('happy', 'Confira o texto antes de enviar.');
         }

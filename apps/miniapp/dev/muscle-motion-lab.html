@@ -1,0 +1,1297 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Muscle Motion Lab · Shape</title>
+  <link rel="stylesheet" href="../styles.css">
+  <style>
+    .lab {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 20px 16px 48px;
+    }
+    .lab-top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 20px;
+    }
+    .lab-title-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .lab-title-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .lab h1 {
+      margin: 0;
+      font-size: 22px;
+      letter-spacing: -0.4px;
+    }
+    .lab-sub {
+      margin: 0;
+      font-size: 13px;
+      color: var(--hint);
+    }
+    .lab-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--fill);
+      color: var(--text);
+      border: 1px solid var(--line);
+    }
+    .lab-badge[data-engine="full"] {
+      background: var(--mint-soft);
+      color: var(--mint);
+      border-color: transparent;
+    }
+    .lab-toggles {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .lab-btn {
+      min-height: 44px;
+      min-width: 44px;
+      padding: 8px 12px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
+    }
+    .lab-btn:hover {
+      background: var(--fill);
+    }
+    .lab-btn[aria-pressed="true"],
+    .lab-btn.is-active {
+      background: var(--accent-soft);
+      border-color: var(--accent-line);
+      color: var(--accent-text);
+      font-weight: 600;
+    }
+    .lab-btn.is-danger[aria-pressed="true"] {
+      background: var(--amber-soft);
+      border-color: var(--amber);
+      color: var(--text);
+    }
+    .lab-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+      gap: 20px;
+      align-items: start;
+    }
+    @media (max-width: 820px) {
+      .lab-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .lab-card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .lab-col {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .lab-card-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .lab-card h2 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: -0.2px;
+    }
+    .lab-hint {
+      font-size: 12px;
+      color: var(--hint);
+    }
+    .chip-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    /* Stage Arena (4 FLIP Slots) */
+    .stage-header-preview {
+      position: relative;
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      padding: 14px 12px 12px;
+      border-radius: var(--radius-md);
+      background: var(--bg);
+      border: 1px dashed var(--line);
+      cursor: pointer;
+    }
+    .stage-header-preview.is-current {
+      border-style: solid;
+      border-color: var(--accent-line);
+      background: var(--accent-soft);
+    }
+    .stage-header-preview .pl-bar {
+      left: 12px;
+      right: 12px;
+      top: 5px;
+    }
+    .stage-slot {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex: none;
+      border-radius: 14px;
+      border: 1px dashed var(--line);
+      background: var(--surface);
+      position: relative;
+    }
+    .stage-slot-header {
+      width: 40px;
+      height: 40px;
+    }
+    .stage-slot-empty {
+      width: 112px;
+      height: 112px;
+    }
+    .stage-slot-review {
+      width: 92px;
+      height: 92px;
+    }
+    .stage-slot-voice {
+      width: 80px;
+      height: 80px;
+    }
+    .stage-slot .shape {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      display: block;
+    }
+    .stage-slot:empty::after {
+      content: attr(data-slot-placeholder);
+      font-size: 11px;
+      color: var(--hint);
+      pointer-events: none;
+    }
+    .stage-cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    @media (max-width: 520px) {
+      .stage-cards {
+        grid-template-columns: 1fr;
+      }
+    }
+    .stage-box {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 12px 8px;
+      border-radius: var(--radius-md);
+      background: var(--bg);
+      border: 1px dashed var(--line);
+      min-height: 164px;
+      cursor: pointer;
+      text-align: center;
+    }
+    .stage-box.is-current {
+      border-style: solid;
+      border-color: var(--accent-line);
+      background: var(--accent-soft);
+    }
+    .stage-box-label {
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .stage-box-meta {
+      font-size: 11px;
+      color: var(--hint);
+    }
+
+    /* Sliders & Meters */
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .slider-row label {
+      font-size: 13px;
+      font-weight: 500;
+      min-width: 78px;
+    }
+    .slider-row input[type="range"] {
+      flex: 1;
+      min-height: 44px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .slider-val {
+      font-family: var(--font-num);
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+      min-width: 40px;
+      text-align: right;
+      color: var(--hint);
+    }
+    .level-meter {
+      height: 8px;
+      border-radius: 999px;
+      background: var(--fill-strong);
+      overflow: hidden;
+    }
+    .level-meter-fill {
+      height: 100%;
+      width: 100%;
+      background: var(--accent);
+      transform-origin: 0 50%;
+      transform: scaleX(0);
+    }
+    .voice-status {
+      margin: 0;
+      font-size: 12px;
+      color: var(--hint);
+      min-height: 18px;
+    }
+
+    /* Telemetry & Curve Inspector */
+    .telemetry {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+    .telemetry span {
+      padding: 4px 8px;
+      border-radius: 8px;
+      background: var(--bg);
+      border: 1px solid var(--line);
+    }
+    .curve-canvas {
+      width: 100%;
+      height: 128px;
+      display: block;
+      border-radius: var(--radius-sm);
+      background: var(--bg);
+      border: 1px solid var(--line);
+    }
+    .check-inline {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--hint);
+      min-height: 44px;
+      cursor: pointer;
+    }
+    .check-inline input {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+  <main class="lab">
+    <header class="lab-top">
+      <div class="lab-title-wrap">
+        <div class="lab-title-row">
+          <h1>Muscle Motion Lab</h1>
+          <span id="engine-badge" class="lab-badge">Carregando…</span>
+        </div>
+        <p class="lab-sub">Playground interativo de formas, estados, reações, FLIP entre slots e envelope de voz.</p>
+      </div>
+      <div class="lab-toggles">
+        <button type="button" id="toggle-theme" class="lab-btn" aria-pressed="false">Tema escuro</button>
+        <button type="button" id="toggle-reduced" class="lab-btn is-danger" aria-pressed="false">data-motion="off"</button>
+      </div>
+    </header>
+
+    <div class="lab-grid">
+      <!-- Coluna esquerda: Palco FLIP + Telemetria + Curvas -->
+      <div class="lab-col">
+        <section class="lab-card" aria-labelledby="stage-heading">
+          <div class="lab-card-head">
+            <h2 id="stage-heading">Palco &amp; Viagem FLIP (4 Stage Slots)</h2>
+            <span class="lab-hint">Clique em qualquer slot para viajar em 1 clique</span>
+          </div>
+
+          <div class="chip-grid" role="group" aria-label="Selecionar Stage Slot">
+            <button type="button" class="lab-btn" data-slot-btn="header" aria-pressed="false">1. header (40×40)</button>
+            <button type="button" class="lab-btn" data-slot-btn="empty" aria-pressed="true">2. empty (112×112)</button>
+            <button type="button" class="lab-btn" data-slot-btn="review" aria-pressed="false">3. review (92×92)</button>
+            <button type="button" class="lab-btn" data-slot-btn="voice" aria-pressed="false">4. voice (80×80)</button>
+          </div>
+
+          <label class="check-inline">
+            <input type="checkbox" id="slot-auto-preset">
+            <span>Aplicar forma/estado contextual ao viajar entre slots</span>
+          </label>
+
+          <!-- Slot 1: Header (.coach) -->
+          <div id="slot-card-header" class="stage-header-preview" data-slot-card="header" role="button" tabindex="0" aria-label="Viajar para slot header">
+            <div id="slot-header" class="stage-slot stage-slot-header" data-slot="header" data-slot-placeholder="40×40"></div>
+            <div class="bubble">
+              <span class="bubble-name">Muscle</span>
+              <p id="lab-say" class="bubble-text">Pronto no laboratório. Escolha uma forma, reação ou slot!</p>
+            </div>
+          </div>
+
+          <!-- Slots 2, 3, 4: Empty, Review, Voice -->
+          <div class="stage-cards">
+            <div id="slot-card-empty" class="stage-box is-current" data-slot-card="empty" role="button" tabindex="0" aria-label="Viajar para slot empty">
+              <span class="stage-box-label">empty</span>
+              <div id="slot-empty" class="stage-slot stage-slot-empty" data-slot="empty" data-slot-placeholder="112×112">
+                <button id="shape" class="shape" type="button" data-state="idle" data-form="base" aria-label="Muscle: toque para reagir"></button>
+              </div>
+              <span class="stage-box-meta">Ficha / prato vazio · 112px</span>
+            </div>
+
+            <div id="slot-card-review" class="stage-box" data-slot-card="review" role="button" tabindex="0" aria-label="Viajar para slot review">
+              <span class="stage-box-label">review</span>
+              <div id="slot-review" class="stage-slot stage-slot-review" data-slot="review" data-slot-placeholder="92×92"></div>
+              <span class="stage-box-meta">Tela de revisão · 92px</span>
+            </div>
+
+            <div id="slot-card-voice" class="stage-box" data-slot-card="voice" role="button" tabindex="0" aria-label="Viajar para slot voice">
+              <span class="stage-box-label">voice</span>
+              <div id="slot-voice" class="stage-slot stage-slot-voice" data-slot="voice" data-slot-placeholder="80×80"></div>
+              <span class="stage-box-meta">Painel de voz · 80px</span>
+            </div>
+          </div>
+
+          <div class="lab-card-head">
+            <span class="lab-hint">Glance (olhar direcional):</span>
+            <div class="chip-grid">
+              <button type="button" class="lab-btn" data-glance="left">Olhar Série 1</button>
+              <button type="button" class="lab-btn" data-glance="right">Olhar Busca</button>
+              <button type="button" class="lab-btn" data-glance="clear">Centralizar olhar</button>
+            </div>
+          </div>
+
+          <div id="telemetry" class="telemetry" aria-live="polite"></div>
+        </section>
+
+        <section class="lab-card" aria-labelledby="curve-heading">
+          <div class="lab-card-head">
+            <h2 id="curve-heading">Curve Inspector &amp; Micro-vida</h2>
+            <span id="curve-label" class="lab-hint">SPRING_SOFT · cubic-bezier(0.25, 1.25, 0.50, 1)</span>
+          </div>
+          <canvas id="curve-canvas" class="curve-canvas" width="460" height="128"></canvas>
+          <div class="chip-grid">
+            <button type="button" class="lab-btn" data-curve="SPRING_POP">SPRING_POP</button>
+            <button type="button" class="lab-btn is-active" data-curve="SPRING_SOFT">SPRING_SOFT</button>
+            <button type="button" class="lab-btn" data-curve="EASE_DECEL">EASE_DECEL</button>
+            <button type="button" id="btn-blink-once" class="lab-btn">Piscar (1x)</button>
+            <button type="button" id="toggle-blink-loop" class="lab-btn" aria-pressed="false">Blink loop</button>
+            <button type="button" id="toggle-breath" class="lab-btn" aria-pressed="false">Idle breath</button>
+            <button type="button" id="toggle-foottap" class="lab-btn" aria-pressed="false">Foot tap</button>
+          </div>
+        </section>
+      </div>
+
+      <!-- Coluna direita: Controles -->
+      <div class="lab-col">
+        <section class="lab-card" aria-labelledby="forms-heading">
+          <div class="lab-card-head">
+            <h2 id="forms-heading">Formas de Contexto (6)</h2>
+            <span class="lab-hint">morph() / setForm()</span>
+          </div>
+          <div id="forms-group" class="chip-grid" role="group" aria-label="Formas do Muscle"></div>
+        </section>
+
+        <section class="lab-card" aria-labelledby="states-heading">
+          <div class="lab-card-head">
+            <h2 id="states-heading">Estados &amp; Moods (10)</h2>
+            <span class="lab-hint">setMood() + barra de progresso</span>
+          </div>
+          <div id="states-group" class="chip-grid" role="group" aria-label="Estados do Muscle"></div>
+          <div class="slider-row">
+            <label for="progress-slider">Progresso</label>
+            <input id="progress-slider" type="range" min="0" max="1" step="0.05" value="0">
+            <span id="progress-val" class="slider-val">0.00</span>
+          </div>
+          <div class="chip-grid">
+            <button type="button" id="toggle-dozing" class="lab-btn" aria-pressed="false">Modo cochilo (setDozing)</button>
+          </div>
+        </section>
+
+        <section class="lab-card" aria-labelledby="reactions-heading">
+          <div class="lab-card-head">
+            <h2 id="reactions-heading">Reações One-Shot (6)</h2>
+            <span class="lab-hint">react() / pulse()</span>
+          </div>
+          <div class="chip-grid" role="group" aria-label="Reações do Muscle">
+            <button type="button" class="lab-btn" data-react="nod">nod</button>
+            <button type="button" class="lab-btn" data-react="tick">tick</button>
+            <button type="button" class="lab-btn" data-react="full">full</button>
+            <button type="button" class="lab-btn" data-react="celebrate">celebrate</button>
+            <button type="button" class="lab-btn" data-react="pr">pr</button>
+            <button type="button" class="lab-btn" data-react="no">no</button>
+          </div>
+        </section>
+
+        <section class="lab-card" aria-labelledby="voice-heading">
+          <div class="lab-card-head">
+            <h2 id="voice-heading">Simulador de Voz &amp; Level (0..1)</h2>
+            <span class="lab-hint">setLevel() + ondas ao vivo</span>
+          </div>
+          <div class="chip-grid">
+            <button type="button" id="voice-sine" class="lab-btn" aria-pressed="false">Onda senoidal</button>
+            <button type="button" id="voice-speech" class="lab-btn" aria-pressed="false">Fala sintética</button>
+            <button type="button" id="voice-mic" class="lab-btn" aria-pressed="false">Microfone real</button>
+            <button type="button" id="voice-stop" class="lab-btn">Parar</button>
+          </div>
+          <div class="slider-row">
+            <label for="voice-level">Level</label>
+            <input id="voice-level" type="range" min="0" max="1" step="0.01" value="0">
+            <span id="voice-level-val" class="slider-val">0.00</span>
+          </div>
+          <div class="level-meter" aria-hidden="true">
+            <div id="voice-meter-fill" class="level-meter-fill"></div>
+          </div>
+          <p id="voice-status" class="voice-status" aria-live="polite">Simulador parado. Use onda senoidal, fala sintética, slider ou microfone.</p>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <script src="../src/avatar.js"></script>
+  <script src="../src/muscle-motion.js"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      var Avatar = window.ShapeAvatar;
+      var MM = window.MuscleMotion || null;
+
+      var CURVES = {
+        SPRING_POP:  { label: 'SPRING_POP · cubic-bezier(0.34, 1.56, 0.64, 1)', pts: [0.34, 1.56, 0.64, 1] },
+        SPRING_SOFT: { label: 'SPRING_SOFT · cubic-bezier(0.25, 1.25, 0.50, 1)', pts: [0.25, 1.25, 0.50, 1] },
+        EASE_DECEL:  { label: 'EASE_DECEL · cubic-bezier(0.16, 1, 0.30, 1)', pts: [0.16, 1, 0.30, 1] }
+      };
+
+      var FORM_LABELS = {
+        base: 'base',
+        treino: 'treino',
+        refeicao: 'refeicao',
+        agua: 'agua',
+        revisao: 'revisao',
+        descanso: 'descanso'
+      };
+
+      var SLOT_PRESETS = {
+        header: { form: 'base', state: 'idle', say: 'De volta ao cabeçalho. Toque em mim para uma dica!' },
+        empty:  { form: 'treino', state: 'idle', say: 'Palco central (112×112): pronto para montar o treino.' },
+        review: { form: 'revisao', state: 'happy', say: 'Revisão pronta (92×92): confira tudo antes de enviar.' },
+        voice:  { form: 'treino', state: 'listening', say: 'Painel de voz (80×80): estou ouvindo!' }
+      };
+
+      var $ = function (id) { return document.getElementById(id); };
+      var muscleEl = $('shape');
+      var sayEl = $('lab-say');
+      var engineBadge = $('engine-badge');
+      var themeBtn = $('toggle-theme');
+      var reducedBtn = $('toggle-reduced');
+      var autoPresetCheck = $('slot-auto-preset');
+      var progressSlider = $('progress-slider');
+      var progressVal = $('progress-val');
+      var dozingBtn = $('toggle-dozing');
+      var voiceLevelSlider = $('voice-level');
+      var voiceLevelVal = $('voice-level-val');
+      var voiceMeterFill = $('voice-meter-fill');
+      var voiceStatus = $('voice-status');
+      var telemetryEl = $('telemetry');
+      var curveCanvas = $('curve-canvas');
+      var curveLabel = $('curve-label');
+
+      var slots = {
+        header: $('slot-header'),
+        empty:  $('slot-empty'),
+        review: $('slot-review'),
+        voice:  $('slot-voice')
+      };
+
+      var currentSlot = 'empty';
+      var activeCurve = 'SPRING_SOFT';
+      var curvePlayStart = 0;
+      var curveRaf = null;
+      var activeTravel = null;
+
+      // Mount ShapeAvatar on #shape while attaching speech bubble to #lab-say inside header preview
+      Avatar.mount(muscleEl, sayEl);
+      var headerCoach = $('slot-card-header');
+      var misplacedBar = slots.empty.querySelector('.pl-bar');
+      if (misplacedBar && headerCoach) {
+        headerCoach.insertBefore(misplacedBar, headerCoach.firstChild);
+      }
+
+      if (MM) {
+        engineBadge.textContent = 'MuscleMotion + ShapeAvatar';
+        engineBadge.setAttribute('data-engine', 'full');
+      } else {
+        engineBadge.textContent = 'ShapeAvatar standalone';
+        engineBadge.setAttribute('data-engine', 'standalone');
+      }
+
+      function isReduced() {
+        if (MM && typeof MM.reducedMotion === 'function') return MM.reducedMotion(muscleEl);
+        if (muscleEl.getAttribute('data-motion') === 'off') return true;
+        return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      }
+
+      /* Theme & Reduced Motion ----------------------------------------------------------------- */
+
+      var darkPref = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+      var isDark = location.search.indexOf('dark') >= 0 || !!(darkPref && darkPref.matches);
+
+      function applyTheme(dark) {
+        isDark = !!dark;
+        document.documentElement.setAttribute('data-scheme', isDark ? 'dark' : 'light');
+        themeBtn.setAttribute('aria-pressed', isDark ? 'true' : 'false');
+        themeBtn.textContent = isDark ? 'Tema claro' : 'Tema escuro';
+        drawCurve(1);
+      }
+      themeBtn.addEventListener('click', function () { applyTheme(!isDark); });
+
+      reducedBtn.addEventListener('click', function () {
+        var nextOff = muscleEl.getAttribute('data-motion') !== 'off';
+        if (nextOff) {
+          muscleEl.setAttribute('data-motion', 'off');
+          if (activeTravel && activeTravel.cancel) activeTravel.cancel();
+        } else {
+          muscleEl.removeAttribute('data-motion');
+        }
+        reducedBtn.setAttribute('aria-pressed', nextOff ? 'true' : 'false');
+        syncUi();
+      });
+
+      /* Curve Inspector ------------------------------------------------------------------------ */
+
+      function cubicSample(p1x, p1y, p2x, p2y, t) {
+        var u = 1 - t;
+        var tt = t * t, uu = u * u;
+        var x = 3 * uu * t * p1x + 3 * u * tt * p2x + tt * t;
+        var y = 3 * uu * t * p1y + 3 * u * tt * p2y + tt * t;
+        return { x: x, y: y };
+      }
+
+      function drawCurve(progress) {
+        if (!curveCanvas || !curveCanvas.getContext) return;
+        var ctx = curveCanvas.getContext('2d');
+        var w = curveCanvas.width, h = curveCanvas.height;
+        var cs = getComputedStyle(document.documentElement);
+        var lineCol = cs.getPropertyValue('--line').trim() || 'rgba(128,128,128,0.2)';
+        var accentCol = cs.getPropertyValue('--accent').trim() || '#c9410c';
+        var hintCol = cs.getPropertyValue('--hint').trim() || '#635d58';
+
+        ctx.clearRect(0, 0, w, h);
+        var padX = 28, padTop = 28, padBot = 20;
+        var plotW = w - padX * 2;
+        var plotH = h - padTop - padBot;
+
+        // Baseline 0 and 1
+        ctx.strokeStyle = lineCol;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(padX, padTop);
+        ctx.lineTo(padX + plotW, padTop);
+        ctx.moveTo(padX, padTop + plotH);
+        ctx.lineTo(padX + plotW, padTop + plotH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        var spec = CURVES[activeCurve] || CURVES.SPRING_SOFT;
+        var pts = spec.pts;
+
+        // Control handles
+        ctx.strokeStyle = hintCol;
+        ctx.globalAlpha = 0.45;
+        ctx.beginPath();
+        ctx.moveTo(padX, padTop + plotH);
+        ctx.lineTo(padX + pts[0] * plotW, padTop + (1 - pts[1]) * plotH);
+        ctx.moveTo(padX + plotW, padTop);
+        ctx.lineTo(padX + pts[2] * plotW, padTop + (1 - pts[3]) * plotH);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+
+        // Bezier curve
+        ctx.strokeStyle = accentCol;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        for (var i = 0; i <= 60; i++) {
+          var s = cubicSample(pts[0], pts[1], pts[2], pts[3], i / 60);
+          var px = padX + s.x * plotW;
+          var py = padTop + (1 - s.y) * plotH;
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+
+        // Playback marker
+        var t = typeof progress === 'number' ? Math.max(0, Math.min(1, progress)) : 1;
+        var cur = cubicSample(pts[0], pts[1], pts[2], pts[3], t);
+        ctx.fillStyle = accentCol;
+        ctx.beginPath();
+        ctx.arc(padX + cur.x * plotW, padTop + (1 - cur.y) * plotH, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function playCurve(curveName, durationMs) {
+        if (CURVES[curveName]) {
+          activeCurve = curveName;
+          curveLabel.textContent = CURVES[curveName].label;
+          var curveBtns = document.querySelectorAll('[data-curve]');
+          for (var i = 0; i < curveBtns.length; i++) {
+            curveBtns[i].classList.toggle('is-active', curveBtns[i].getAttribute('data-curve') === curveName);
+          }
+        }
+        if (curveRaf) cancelAnimationFrame(curveRaf);
+        if (isReduced()) {
+          drawCurve(1);
+          return;
+        }
+        var dur = durationMs || 380;
+        curvePlayStart = performance.now();
+        function step(now) {
+          var p = Math.min(1, (now - curvePlayStart) / dur);
+          drawCurve(p);
+          if (p < 1) curveRaf = requestAnimationFrame(step);
+          else curveRaf = null;
+        }
+        curveRaf = requestAnimationFrame(step);
+      }
+
+      Array.prototype.forEach.call(document.querySelectorAll('[data-curve]'), function (btn) {
+        btn.addEventListener('click', function () {
+          playCurve(btn.getAttribute('data-curve'), 420);
+        });
+      });
+
+      /* Forms & States ------------------------------------------------------------------------- */
+
+      var formsGroup = $('forms-group');
+      Avatar.FORMS.forEach(function (f) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'lab-btn';
+        btn.setAttribute('data-form-btn', f);
+        btn.setAttribute('aria-pressed', f === 'base' ? 'true' : 'false');
+        btn.textContent = FORM_LABELS[f] || f;
+        btn.addEventListener('click', function () {
+          setMuscleForm(f);
+        });
+        formsGroup.appendChild(btn);
+      });
+
+      var statesGroup = $('states-group');
+      Avatar.STATES.forEach(function (st) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'lab-btn';
+        btn.setAttribute('data-state-btn', st);
+        btn.setAttribute('aria-pressed', st === 'idle' ? 'true' : 'false');
+        btn.textContent = st;
+        btn.addEventListener('click', function () {
+          setMuscleState(st);
+        });
+        statesGroup.appendChild(btn);
+      });
+
+      function setMuscleForm(form) {
+        if (MM && typeof MM.morph === 'function') {
+          MM.morph(muscleEl, form);
+        } else {
+          Avatar.setForm(form);
+        }
+        playCurve('SPRING_SOFT', Avatar.FORM_MS);
+        syncUi();
+      }
+
+      function setMuscleState(state) {
+        if (state !== 'listening' && activeVoice) {
+          stopVoiceSimulator(true);
+        }
+        if (Avatar.dozing() && state !== 'dozing') {
+          Avatar.setDozing(false);
+        }
+        Avatar.setMood(state);
+        playCurve(state === 'record' || state === 'happy' || state === 'understood' ? 'SPRING_POP' : 'SPRING_SOFT', 360);
+        syncUi();
+      }
+
+      progressSlider.addEventListener('input', function () {
+        var v = Number(progressSlider.value);
+        Avatar.setProgress(v);
+        progressVal.textContent = v.toFixed(2);
+        syncUi();
+      });
+
+      dozingBtn.addEventListener('click', function () {
+        var next = !Avatar.dozing();
+        Avatar.setDozing(next);
+        syncUi();
+      });
+
+      /* Reactions ------------------------------------------------------------------------------ */
+
+      function triggerReaction(kind) {
+        if (kind === 'pr') {
+          Avatar.setMood('record');
+          Avatar.say('Novo PR registrado!');
+          if (MM && typeof MM.react === 'function') {
+            if (!MM.react(muscleEl, 'pr')) MM.react(muscleEl, 'celebrate');
+          } else {
+            Avatar.pulse('celebrate');
+          }
+          playCurve('SPRING_POP', 520);
+          syncUi();
+          return;
+        }
+        if (MM && typeof MM.react === 'function') {
+          MM.react(muscleEl, kind);
+        } else {
+          Avatar.pulse(kind);
+        }
+        playCurve(kind === 'celebrate' || kind === 'full' ? 'SPRING_POP' : 'SPRING_SOFT', 380);
+        syncUi();
+      }
+
+      Array.prototype.forEach.call(document.querySelectorAll('[data-react]'), function (btn) {
+        btn.addEventListener('click', function () {
+          triggerReaction(btn.getAttribute('data-react'));
+        });
+      });
+
+      muscleEl.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        triggerReaction('nod');
+      });
+
+      /* FLIP Stage Slots ----------------------------------------------------------------------- */
+
+      function standaloneTravelTo(targetSlot, opts) {
+        var options = opts || {};
+        if (!targetSlot) return null;
+        if (activeTravel && activeTravel.cancel) {
+          activeTravel.cancel();
+          activeTravel = null;
+        }
+        var sameSlot = muscleEl.parentNode === targetSlot;
+        if (sameSlot || isReduced() || !muscleEl.animate) {
+          if (!sameSlot) targetSlot.appendChild(muscleEl);
+          if (options.form) Avatar.setForm(options.form);
+          if (options.state) Avatar.setMood(options.state);
+          if (options.onArrive) options.onArrive();
+          return null;
+        }
+
+        var first = muscleEl.getBoundingClientRect();
+        targetSlot.appendChild(muscleEl);
+        if (options.form) Avatar.setForm(options.form);
+        if (options.state) Avatar.setMood(options.state);
+        var last = muscleEl.getBoundingClientRect();
+        var inv = Avatar.flip(last, first);
+
+        if (!inv.x && !inv.y && inv.s === 1) {
+          if (options.onArrive) options.onArrive();
+          return null;
+        }
+
+        var dur = targetSlot === slots.header ? 320 : 380;
+        var anim = muscleEl.animate([
+          { transform: 'translate(' + inv.x + 'px, ' + inv.y + 'px) scale(' + inv.s + ')' },
+          { transform: 'translate(0px, 0px) scale(1)' }
+        ], {
+          duration: dur,
+          easing: 'cubic-bezier(0.16, 1, 0.3, 1)'
+        });
+        activeTravel = anim;
+        anim.onfinish = function () {
+          activeTravel = null;
+          var pose = muscleEl.querySelector('.dt-pose');
+          if (pose && pose.animate && !isReduced()) {
+            pose.animate([
+              { transform: 'scale(1.04, 0.96)', offset: 0 },
+              { transform: 'scale(0.98, 1.02)', offset: 0.6 },
+              { transform: 'scale(1, 1)', offset: 1 }
+            ], {
+              duration: 220,
+              easing: 'cubic-bezier(0.25, 1.25, 0.50, 1)',
+              composite: 'add'
+            });
+          }
+          if (options.onArrive) options.onArrive();
+        };
+        anim.oncancel = function () { activeTravel = null; };
+        return anim;
+      }
+
+      function travelToSlot(slotName) {
+        var target = slots[slotName];
+        if (!target) return;
+        currentSlot = slotName;
+        var preset = autoPresetCheck.checked ? SLOT_PRESETS[slotName] : null;
+        var opts = preset ? { form: preset.form, state: preset.state } : {};
+        if (preset && preset.say) Avatar.say(preset.say);
+
+        if (MM && typeof MM.travelTo === 'function') {
+          MM.travelTo(muscleEl, target, opts);
+        } else {
+          standaloneTravelTo(target, opts);
+        }
+        playCurve('EASE_DECEL', slotName === 'header' ? 320 : 380);
+        syncUi();
+      }
+
+      Array.prototype.forEach.call(document.querySelectorAll('[data-slot-btn]'), function (btn) {
+        btn.addEventListener('click', function () {
+          travelToSlot(btn.getAttribute('data-slot-btn'));
+        });
+      });
+
+      Array.prototype.forEach.call(document.querySelectorAll('[data-slot-card]'), function (card) {
+        card.addEventListener('click', function () {
+          travelToSlot(card.getAttribute('data-slot-card'));
+        });
+        card.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            travelToSlot(card.getAttribute('data-slot-card'));
+          }
+        });
+      });
+
+      /* Glance --------------------------------------------------------------------------------- */
+
+      Array.prototype.forEach.call(document.querySelectorAll('[data-glance]'), function (btn) {
+        btn.addEventListener('click', function () {
+          var dir = btn.getAttribute('data-glance');
+          var target = dir === 'left' ? $('forms-heading') : dir === 'right' ? $('voice-heading') : null;
+          if (MM && typeof MM.glance === 'function') MM.glance(muscleEl, target);
+          else Avatar.glance(target);
+        });
+      });
+
+      /* Micro-life Controls -------------------------------------------------------------------- */
+
+      var stopBlinkFn = null;
+      var stopBreathFn = null;
+      var stopFootFn = null;
+
+      function standaloneBlink() {
+        if (isReduced()) return null;
+        var eyes = muscleEl.querySelector('.dt-eyes');
+        if (!eyes || !eyes.animate) return null;
+        return eyes.animate([
+          { transform: 'scaleY(1)', offset: 0 },
+          { transform: 'scaleY(0.08)', offset: 0.3 },
+          { transform: 'scaleY(0.08)', offset: 0.5 },
+          { transform: 'scaleY(1)', offset: 1 }
+        ], { duration: 200, easing: 'ease-out' });
+      }
+
+      $('btn-blink-once').addEventListener('click', function () {
+        if (MM && typeof MM.blink === 'function') MM.blink(muscleEl);
+        else standaloneBlink();
+      });
+
+      $('toggle-blink-loop').addEventListener('click', function () {
+        var btn = $('toggle-blink-loop');
+        if (stopBlinkFn) {
+          stopBlinkFn();
+          stopBlinkFn = null;
+          btn.setAttribute('aria-pressed', 'false');
+          return;
+        }
+        if (MM && typeof MM.startBlinkLoop === 'function') {
+          stopBlinkFn = MM.startBlinkLoop(muscleEl);
+        } else {
+          var seq = [3800, 5200, 4100, 6400, 3200, 5800, 4600, 7000];
+          var idx = 0;
+          var timer = null;
+          var loop = function () {
+            standaloneBlink();
+            timer = setTimeout(loop, seq[idx++ % seq.length]);
+          };
+          timer = setTimeout(loop, seq[idx++]);
+          stopBlinkFn = function () { clearTimeout(timer); };
+        }
+        btn.setAttribute('aria-pressed', 'true');
+      });
+
+      $('toggle-breath').addEventListener('click', function () {
+        var btn = $('toggle-breath');
+        if (stopBreathFn) {
+          stopBreathFn();
+          stopBreathFn = null;
+          btn.setAttribute('aria-pressed', 'false');
+          return;
+        }
+        if (MM && typeof MM.startIdleBreath === 'function') {
+          stopBreathFn = MM.startIdleBreath(muscleEl) || function () {};
+        } else {
+          var breath = muscleEl.querySelector('.dt-breath');
+          var anim = (!isReduced() && breath && breath.animate) ? breath.animate([
+            { transform: 'scale(1, 1)' },
+            { transform: 'scale(1.008, 1.018)' },
+            { transform: 'scale(1, 1)' }
+          ], { duration: 3600, easing: 'cubic-bezier(0.45, 0, 0.55, 1)', iterations: Infinity }) : null;
+          stopBreathFn = function () { if (anim) anim.cancel(); };
+        }
+        btn.setAttribute('aria-pressed', 'true');
+      });
+
+      $('toggle-foottap').addEventListener('click', function () {
+        var btn = $('toggle-foottap');
+        if (stopFootFn) {
+          stopFootFn();
+          stopFootFn = null;
+          btn.setAttribute('aria-pressed', 'false');
+          return;
+        }
+        if (MM && typeof MM.startFootTap === 'function') {
+          stopFootFn = MM.startFootTap(muscleEl);
+        } else {
+          var foot = muscleEl.querySelector('.dt-foot');
+          var anim = (!isReduced() && foot && foot.animate) ? foot.animate([
+            { transform: 'rotate(0)', offset: 0 },
+            { transform: 'rotate(-6deg)', offset: 0.35 },
+            { transform: 'rotate(0)', offset: 0.55 },
+            { transform: 'rotate(0)', offset: 1 }
+          ], { duration: 600, easing: 'ease-in-out', iterations: Infinity, composite: 'add' }) : null;
+          stopFootFn = function () { if (anim) anim.cancel(); };
+        }
+        btn.setAttribute('aria-pressed', 'true');
+      });
+
+      /* Voice Simulator (Sine + Synthetic Speech + Manual Slider + Real Mic) ------------------- */
+
+      var activeVoice = null; // { mode, stop() }
+
+      function paintLevelReadout(v) {
+        var clamped = Avatar.clampProgress(v);
+        voiceLevelSlider.value = String(clamped);
+        voiceLevelVal.textContent = clamped.toFixed(2);
+        voiceMeterFill.style.transform = 'scaleX(' + clamped + ')';
+      }
+
+      function syncVoiceButtons(mode) {
+        $('voice-sine').setAttribute('aria-pressed', mode === 'sine' ? 'true' : 'false');
+        $('voice-speech').setAttribute('aria-pressed', mode === 'speech' ? 'true' : 'false');
+        $('voice-mic').setAttribute('aria-pressed', mode === 'mic' ? 'true' : 'false');
+      }
+
+      function stopVoiceSimulator(keepMood) {
+        if (activeVoice) {
+          var prev = activeVoice;
+          activeVoice = null;
+          prev.stop();
+        }
+        Avatar.setLevel(null);
+        paintLevelReadout(0);
+        syncVoiceButtons('');
+        if (!keepMood && Avatar.mood() === 'listening') {
+          Avatar.setMood('idle');
+        }
+        voiceStatus.textContent = 'Simulador parado.';
+        syncUi();
+      }
+
+      function ensureListeningForVoice() {
+        if (Avatar.dozing()) Avatar.setDozing(false);
+        if (Avatar.mood() !== 'listening') Avatar.setMood('listening');
+      }
+
+      function startSineWave() {
+        if (activeVoice && activeVoice.mode === 'sine') {
+          stopVoiceSimulator(false);
+          return;
+        }
+        stopVoiceSimulator(true);
+        ensureListeningForVoice();
+
+        var rafId = null;
+        var mmSim = (MM && typeof MM.createSineSimulator === 'function')
+          ? MM.createSineSimulator(muscleEl, 2000)
+          : null;
+        var t0 = performance.now();
+
+        function loop(now) {
+          var phase = ((now - t0) % 2000) / 2000;
+          var v = Math.sin(phase * Math.PI * 2) * 0.5 + 0.5;
+          if (!mmSim) Avatar.setLevel(v);
+          paintLevelReadout(Number(muscleEl.getAttribute('data-level') || v));
+          syncTelemetry();
+          rafId = requestAnimationFrame(loop);
+        }
+        rafId = requestAnimationFrame(loop);
+
+        activeVoice = {
+          mode: 'sine',
+          stop: function () {
+            if (rafId !== null) cancelAnimationFrame(rafId);
+            if (mmSim && mmSim.stop) mmSim.stop();
+          }
+        };
+        syncVoiceButtons('sine');
+        voiceStatus.textContent = 'Onda senoidal ativa (período 2.0s · 0 → 1 → 0).';
+        syncUi();
+      }
+
+      function startSyntheticSpeech() {
+        if (activeVoice && activeVoice.mode === 'speech') {
+          stopVoiceSimulator(false);
+          return;
+        }
+        stopVoiceSimulator(true);
+        ensureListeningForVoice();
+
+        var rafId = null;
+        var t0 = performance.now();
+        var level = 0;
+
+        function speechEnvelope(sec) {
+          // Natural cadence: 3.4s phrase with syllabic bursts and a short breath pause
+          var phrase = sec % 3.4;
+          if (phrase > 2.75) return 0.02;
+          var syl = Math.max(0, Math.sin(phrase * Math.PI * 5.2));
+          var mod = 0.55 + 0.45 * Math.sin(phrase * Math.PI * 1.7 + 0.6);
+          var accent = 0.75 + 0.25 * Math.cos(phrase * Math.PI * 8.3);
+          return Math.min(1, Math.pow(syl, 1.35) * mod * accent * 1.12);
+        }
+
+        function tick(now) {
+          var target = speechEnvelope((now - t0) / 1000);
+          var coeff = target > level ? 0.5 : 0.09;
+          level += (target - level) * coeff;
+          Avatar.setLevel(level);
+          paintLevelReadout(level);
+          syncTelemetry();
+          rafId = requestAnimationFrame(tick);
+        }
+        rafId = requestAnimationFrame(tick);
+
+        activeVoice = {
+          mode: 'speech',
+          stop: function () {
+            if (rafId !== null) cancelAnimationFrame(rafId);
+          }
+        };
+        syncVoiceButtons('speech');
+        voiceStatus.textContent = 'Fala sintética ativa (envelope silábico com ataque/decay).';
+        syncUi();
+      }
+
+      function createStandaloneMicMeter(stream) {
+        var AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return { level: function () { return 0; }, stop: function () {} };
+        var ctx = new AudioCtx();
+        var analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0;
+        var source = ctx.createMediaStreamSource(stream);
+        source.connect(analyser);
+        var buf = new Uint8Array(analyser.frequencyBinCount);
+        var current = 0;
+        var rafId = null;
+        var stopped = false;
+
+        function tick() {
+          if (stopped) return;
+          analyser.getByteTimeDomainData(buf);
+          var sum = 0;
+          for (var i = 0; i < buf.length; i++) {
+            var s = (buf[i] - 128) / 128;
+            sum += s * s;
+          }
+          var raw = Math.min(1, Math.sqrt(sum / buf.length) * 4);
+          current += (raw - current) * (raw > current ? 0.5 : 0.08);
+          Avatar.setLevel(current);
+          rafId = requestAnimationFrame(tick);
+        }
+        rafId = requestAnimationFrame(tick);
+
+        return {
+          level: function () { return current; },
+          stop: function () {
+            if (stopped) return;
+            stopped = true;
+            if (rafId !== null) cancelAnimationFrame(rafId);
+            try { source.disconnect(); } catch (e) { /* ignore */ }
+            try { analyser.disconnect(); } catch (e) { /* ignore */ }
+            try { if (ctx.state !== 'closed') ctx.close(); } catch (e) { /* ignore */ }
+          }
+        };
+      }
+
+      function startRealMic() {
+        if (activeVoice && activeVoice.mode === 'mic') {
+          stopVoiceSimulator(false);
+          return;
+        }
+        if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+          voiceStatus.textContent = 'getUserMedia indisponível neste navegador/contexto.';
+          return;
+        }
+        stopVoiceSimulator(true);
+        voiceStatus.textContent = 'Solicitando permissão do microfone…';
+
+        var cancelled = false;
+        var pendingStop = {
+          mode: 'mic',
+          stop: function () { cancelled = true; }
+        };
+        activeVoice = pendingStop;
+        syncVoiceButtons('mic');
+
+        navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+        }).then(function (stream) {
+          if (cancelled || activeVoice !== pendingStop) {
+            stream.getTracks().forEach(function (t) { t.stop(); });
+            return;
+          }
+          ensureListeningForVoice();
+          var meter = (MM && typeof MM.createVoiceMeter === 'function')
+            ? MM.createVoiceMeter(stream, muscleEl)
+            : createStandaloneMicMeter(stream);
+          var uiRaf = null;
+          function syncMeter() {
+            var lv = meter && typeof meter.level === 'function'
+              ? meter.level()
+              : Number(muscleEl.getAttribute('data-level') || 0);
+            paintLevelReadout(lv);
+            syncTelemetry();
+            uiRaf = requestAnimationFrame(syncMeter);
+          }
+          uiRaf = requestAnimationFrame(syncMeter);
+
+          activeVoice = {
+            mode: 'mic',
+            stop: function () {
+              if (uiRaf !== null) cancelAnimationFrame(uiRaf);
+              if (meter && meter.stop) meter.stop();
+              stream.getTracks().forEach(function (t) { t.stop(); });
+            }
+          };
+          voiceStatus.textContent = 'Microfone real conectado (zero retenção · fecha ao parar).';
+          syncUi();
+        }, function (err) {
+          if (activeVoice === pendingStop) activeVoice = null;
+          syncVoiceButtons('');
+          voiceStatus.textContent = 'Microfone não autorizado (' + (err && err.name ? err.name : 'erro') + ').';
+          syncUi();
+        });
+      }
+
+      $('voice-sine').addEventListener('click', startSineWave);
+      $('voice-speech').addEventListener('click', startSyntheticSpeech);
+      $('voice-mic').addEventListener('click', startRealMic);
+      $('voice-stop').addEventListener('click', function () { stopVoiceSimulator(false); });
+
+      voiceLevelSlider.addEventListener('input', function () {
+        if (activeVoice) {
+          var prev = activeVoice;
+          activeVoice = null;
+          prev.stop();
+          syncVoiceButtons('');
+        }
+        var v = Number(voiceLevelSlider.value);
+        ensureListeningForVoice();
+        Avatar.setLevel(v);
+        paintLevelReadout(v);
+        voiceStatus.textContent = 'Controle manual de level (' + v.toFixed(2) + ').';
+        syncUi();
+      });
+
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden && activeVoice && activeVoice.mode === 'mic') stopVoiceSimulator(false);
+      });
+      window.addEventListener('pagehide', function () {
+        if (activeVoice) stopVoiceSimulator(false);
+      });
+
+      /* UI Sync & Telemetry -------------------------------------------------------------------- */
+
+      function syncTelemetry() {
+        var state = Avatar.mood() || 'idle';
+        var form = Avatar.form() || 'base';
+        var lvl = muscleEl.getAttribute('data-level');
+        var motionAttr = muscleEl.getAttribute('data-motion') || 'on';
+        telemetryEl.replaceChildren();
+        [
+          'slot=' + currentSlot,
+          'form=' + form,
+          'state=' + state,
+          'progress=' + Avatar.progress().toFixed(2),
+          'level=' + (lvl === null ? '-' : lvl),
+          'dozing=' + String(Avatar.dozing()),
+          'motion=' + (isReduced() ? 'reduced (' + motionAttr + ')' : 'active')
+        ].forEach(function (item) {
+          var tag = document.createElement('span');
+          tag.textContent = item;
+          telemetryEl.appendChild(tag);
+        });
+      }
+
+      function syncUi() {
+        var curForm = Avatar.form();
+        var curState = Avatar.mood();
+
+        Array.prototype.forEach.call(document.querySelectorAll('[data-form-btn]'), function (b) {
+          b.setAttribute('aria-pressed', b.getAttribute('data-form-btn') === curForm ? 'true' : 'false');
+        });
+        Array.prototype.forEach.call(document.querySelectorAll('[data-state-btn]'), function (b) {
+          b.setAttribute('aria-pressed', b.getAttribute('data-state-btn') === curState ? 'true' : 'false');
+        });
+        Array.prototype.forEach.call(document.querySelectorAll('[data-slot-btn]'), function (b) {
+          b.setAttribute('aria-pressed', b.getAttribute('data-slot-btn') === currentSlot ? 'true' : 'false');
+        });
+        Array.prototype.forEach.call(document.querySelectorAll('[data-slot-card]'), function (c) {
+          c.classList.toggle('is-current', c.getAttribute('data-slot-card') === currentSlot);
+        });
+        dozingBtn.setAttribute('aria-pressed', Avatar.dozing() ? 'true' : 'false');
+        syncTelemetry();
+      }
+
+      applyTheme(isDark);
+      syncUi();
+    })();
+  </script>
+</body>
+</html>

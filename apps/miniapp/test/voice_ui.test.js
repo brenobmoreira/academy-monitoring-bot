@@ -1020,3 +1020,84 @@ test('Muscle voice integration: ShapeAvatar enters listening, thinking, understo
   assert.equal(shape.classList.contains('voice-alert'), false);
   assert.equal(p.ctx.ShapeAvatar.form(), 'treino');
 });
+
+test('Muscle smoothness: setVoiceMascot calls setMood once per transition and typing in #voice-textarea does not re-trigger setMood(understood)', async () => {
+  const media = makeFakeMediaHarness();
+  const p = await bootApp({
+    loadAvatar: true,
+    catalog: makeVoiceCatalog(),
+    storage: storageWith({ [C.VOICE_CONSENT_KEY]: '1' }),
+    navigator: { mediaDevices: { getUserMedia: () => media.getUserMedia() } },
+    globals: { MediaRecorder: media.MediaRecorder },
+    fetch: async (url) => {
+      if (String(url).endsWith('/v1/auth/sessions')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ v: 1, session: 's1.smooth-tok', expires_at: 1700043200, scopes: ['voice'], ref: 'acct-a' }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ v: 1, id: 'c'.repeat(32), text: 'remada 60 kg por 10' }),
+      };
+    },
+  });
+
+  const shape = p.doc.getElementById('shape');
+  const moodCalls = [];
+  const origSetMood = p.ctx.ShapeAvatar.setMood;
+  p.ctx.ShapeAvatar.setMood = function (mood) {
+    moodCalls.push(mood);
+    return origSetMood.call(this, mood);
+  };
+
+  // Start recording -> asking_permission ('listening') -> granted ('listening')
+  p.doc.getElementById('dock-mic').click();
+  assert.deepEqual(moodCalls, ['listening'], 'setVoiceMascot must call setMood once, not twice');
+  await flushMicrotasks();
+
+  // Stop -> sending ('thinking') -> transcribed ('understood')
+  moodCalls.length = 0;
+  p.advanceMs(1500);
+  p.button('Parar').click();
+  assert.deepEqual(moodCalls, ['thinking'], 'transition to thinking calls setMood once');
+
+  moodCalls.length = 0;
+  await flushMicrotasks();
+  assert.deepEqual(moodCalls, ['understood'], 'transition to transcribed calls setMood(understood) once');
+  assert.equal(shape.getAttribute('data-state'), 'understood');
+  assert.equal(shape.classList.contains('voice-understood'), true);
+
+  // Typing multiple characters in #voice-textarea keeps data-state="understood" without re-triggering setMood
+  const ta = p.doc.getElementById('voice-textarea');
+  assert.ok(ta);
+  moodCalls.length = 0;
+  for (const nextVal of ['remada 60 kg por 10!', 'remada 62,5 kg por 10', 'remada 65 kg por 12']) {
+    ta.value = nextVal;
+    ta.dispatchEvent({ type: 'input', target: ta, bubbles: true });
+    assert.equal(shape.getAttribute('data-state'), 'understood');
+    assert.equal(shape.classList.contains('voice-understood'), true);
+  }
+  assert.deepEqual(moodCalls, [], 'typing in #voice-textarea must not re-trigger setMood(understood)');
+
+  // Submitting blank text triggers alert, and typing valid text again restores understood once
+  ta.value = '   ';
+  ta.dispatchEvent({ type: 'input', target: ta, bubbles: true });
+  assert.deepEqual(moodCalls, []);
+  p.pressMain();
+  assert.deepEqual(moodCalls, ['alert']);
+  assert.equal(shape.getAttribute('data-state'), 'alert');
+
+  moodCalls.length = 0;
+  ta.value = 'remada 65 kg por 10';
+  ta.dispatchEvent({ type: 'input', target: ta, bubbles: true });
+  assert.deepEqual(moodCalls, ['understood'], 'recovering from textError calls setMood(understood) once');
+  assert.equal(shape.getAttribute('data-state'), 'understood');
+
+  moodCalls.length = 0;
+  ta.value = 'remada 65 kg por 10 séries';
+  ta.dispatchEvent({ type: 'input', target: ta, bubbles: true });
+  assert.deepEqual(moodCalls, [], 'subsequent typing stays quiet again');
+});

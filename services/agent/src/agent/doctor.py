@@ -41,6 +41,7 @@ from agent.settings import (
     validation_problems,
 )
 from agent.sheet_client import SheetClient
+from agent.voice_api import HEALTHZ_PATH, TRANSCRIPTIONS_PATH
 from agent.voice_settings import _normalize_origin
 
 CheckStatus = Literal["ok", "warn", "fail"]
@@ -671,7 +672,7 @@ async def _check_voice_service(
         )
 
     started = time.perf_counter()
-    health_url = f"{voice_base_url}/healthz"
+    health_url = f"{voice_base_url}{HEALTHZ_PATH}"
     try:
         async with asyncio.timeout(timeout_s):
             health_resp = await client.get(health_url, timeout=timeout_s)
@@ -699,7 +700,7 @@ async def _check_voice_service(
             "voice_service", "ok", f"healthz=200, cors=skipped (no MINIAPP_URL) ({elapsed_ms}ms)"
         )
 
-    preflight_url = f"{voice_base_url}/v1/voice/transcribe"
+    preflight_url = f"{voice_base_url}{TRANSCRIPTIONS_PATH}"
     headers = {
         "Origin": miniapp_origin,
         "Access-Control-Request-Method": "POST",

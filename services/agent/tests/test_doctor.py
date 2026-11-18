@@ -12,9 +12,15 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
 from agent import logs
 from agent.doctor import format_json, format_text, run_cli, run_doctor
+from agent.voice_api import HEALTHZ_PATH, TRANSCRIPTIONS_PATH
+from agent.voice_asgi import build_voice_service
+from agent.voice_settings import VoiceSettings
+
+from .voice_fakes import FakeTranscriber
 
 pytestmark = pytest.mark.unit
 
@@ -158,6 +164,7 @@ def _make_mock_client(
     voice_cors_origin: str | None = MINIAPP_ORIGIN,
     voice_cors_status: int = 200,
     voice_exc: Callable[[httpx.Request], BaseException] | None = None,
+    voice_transport: httpx.AsyncBaseTransport | None = None,
 ) -> httpx.AsyncClient:
     effective_catalog = catalog_body if catalog_body is not None else _catalog_payload()
     effective_me = (
@@ -189,12 +196,12 @@ def _make_mock_client(
                 return httpx.Response(webhook_status, json=effective_wh)
             return httpx.Response(404, json={"ok": False, "error_code": 404})
 
-        if host in ("fitness-voice-demo.a.run.app", "127.0.0.1", "localhost"):
+        if voice_transport is None and host in ("fitness-voice-demo.a.run.app", "127.0.0.1", "localhost"):
             if voice_exc is not None:
                 raise voice_exc(request)
-            if path == "/healthz" and request.method == "GET":
+            if path == HEALTHZ_PATH and request.method == "GET":
                 return httpx.Response(voice_health_status, text="ok")
-            if path == "/v1/voice/transcribe" and request.method == "OPTIONS":
+            if path == TRANSCRIPTIONS_PATH and request.method == "OPTIONS":
                 headers: dict[str, str] = {}
                 if voice_cors_origin is not None:
                     headers["Access-Control-Allow-Origin"] = voice_cors_origin
@@ -202,7 +209,8 @@ def _make_mock_client(
 
         return httpx.Response(500, text="unexpected mock route")
 
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    mounts = {VOICE_API_URL: voice_transport} if voice_transport is not None else None
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), mounts=mounts)
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +391,53 @@ async def test_local_http_voice_api_url_warns_and_exits_zero(isolated_env: Path)
         assert by_name["settings"].status == "ok"
         assert by_name["miniapp_voice_config"].status == "warn"
         assert by_name["voice_service"].status == "ok"
+
+
+async def test_voice_service_real_asgi_cors_and_routes(isolated_env: Path) -> None:
+    assert HEALTHZ_PATH == "/healthz"
+    assert TRANSCRIPTIONS_PATH == "/v1/voice/transcriptions"
+
+    voice_settings = VoiceSettings(
+        ALLOWED_CHAT_IDS=frozenset({CANARY_CHAT_ID}),
+        APP_AUTH_SECRET=SecretStr(CANARY_AUTH_SECRET),
+        VOICE_ALLOWED_ORIGINS=("https://example.github.io",),
+        TRANSCRIBE_API_KEY=SecretStr(CANARY_TRANSCRIBE_KEY),
+    )
+    asgi_transport = httpx.ASGITransport(
+        app=build_voice_service(voice_settings, transcriber=FakeTranscriber())
+    )
+
+    env_matching = _write_env(
+        isolated_env / ".env.asgi.ok",
+        _base_env_values(
+            MINIAPP_URL="https://example.github.io/app/",
+            VOICE_ALLOWED_ORIGINS="",
+        ),
+    )
+    env_mismatched = _write_env(
+        isolated_env / ".env.asgi.fail",
+        _base_env_values(
+            MINIAPP_URL="https://other.github.io/app/",
+            VOICE_ALLOWED_ORIGINS="",
+        ),
+    )
+
+    async with _make_mock_client(voice_transport=asgi_transport) as client:
+        report_ok = await run_doctor(env_file=env_matching, mode="poll", http=client)
+        assert report_ok.ok is True
+        assert report_ok.exit_code == 0
+        by_name_ok = {c.name: c for c in report_ok.checks}
+        assert by_name_ok["voice_service"].status == "ok"
+        assert "Origin=https://example.github.io" in by_name_ok["voice_service"].detail
+
+        report_fail = await run_doctor(env_file=env_mismatched, mode="poll", http=client)
+        assert report_fail.ok is False
+        assert report_fail.exit_code == 1
+        by_name_fail = {c.name: c for c in report_fail.checks}
+        assert by_name_fail["miniapp_voice_config"].status == "ok"
+        assert by_name_fail["voice_service"].status == "fail"
+        assert "cors=fail" in by_name_fail["voice_service"].detail
+        assert "https://other.github.io" in by_name_fail["voice_service"].detail
 
 
 # ---------------------------------------------------------------------------

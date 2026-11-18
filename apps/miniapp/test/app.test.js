@@ -312,7 +312,7 @@ test('a draft keeps its id across reopening; a fresh or cleared draft gets a new
 
   const storage = storageWith(foodDraft(today(), { id: kept }));
   const r = await boot({ storage, view: 'food' });
-  button(r.doc.getElementById('view'), 'Limpar refeição').click();
+  button(r.doc.getElementById('view'), 'Limpar prato').click();
   r.timers.run(1000); // the draft is saved
   const saved = JSON.parse([...storage.map.entries()].find(([k]) => k.indexOf(':f:') > 0)[1]);
   assert.match(saved.id, ID);
@@ -358,4 +358,294 @@ test('body map: the form shows the last 7 days plus the valid sets typed; the re
 test('body map: without the component the page works as before', async () => {
   const p = await inReview(storageWith(doneWorkoutDraft(today(), SAMPLE.next)));
   assert.equal(p.review.hidden, false);
+});
+
+/* sheet focus trap & scrollInto -------------------------------------------------------------- */
+
+function keyEvent(key, shiftKey = false) {
+  let prevented = false;
+  return {
+    type: 'keydown',
+    key,
+    shiftKey,
+    preventDefault() { prevented = true; },
+    get prevented() { return prevented; },
+  };
+}
+
+test('sheet: openSheet traps Tab/Shift+Tab circularly, focuses fallback element, and restores opener on close', async () => {
+  const p = await boot({ storage: storageWith(doneWorkoutDraft(today(), SAMPLE.next)) });
+  const addBtn = button(p.doc.getElementById('view'), 'Adicionar exercício');
+  p.focus(addBtn);
+  addBtn.click();
+
+  const sheet = p.doc.getElementById('sheet');
+  assert.equal(sheet.hidden, false);
+  assert.equal(p.doc.getElementById('sheet-title').getAttribute('tabindex'), '-1');
+
+  p.timers.run(60);
+  const input = sheet.querySelector('input');
+  const results = sheet.querySelectorAll('.result');
+  assert.ok(results.length >= 2, 'exercise picker has at least 2 focusable result buttons');
+  assert.equal(p.doc.activeElement, input, 'explicit focusEl receives initial focus');
+
+  // Shift+Tab on first focusable wraps to last focusable
+  const shiftFirst = keyEvent('Tab', true);
+  p.doc.dispatchEvent(shiftFirst);
+  assert.equal(shiftFirst.prevented, true);
+  assert.equal(p.doc.activeElement, results[results.length - 1]);
+
+  // Tab on last focusable wraps back to first focusable
+  const tabLast = keyEvent('Tab', false);
+  p.doc.dispatchEvent(tabLast);
+  assert.equal(tabLast.prevented, true);
+  assert.equal(p.doc.activeElement, input);
+
+  // Tab from a middle item is allowed without trapping override
+  p.focus(results[0]);
+  const tabMid = keyEvent('Tab', false);
+  p.doc.dispatchEvent(tabMid);
+  assert.equal(tabMid.prevented, false);
+
+  // Escape closes the sheet, clears the trap, and restores focus to the opener
+  p.doc.dispatchEvent(keyEvent('Escape'));
+  assert.equal(sheet.hidden, true);
+  assert.equal(p.doc.activeElement, addBtn);
+
+  // Trap listener is cleaned up after closeSheet
+  const outsideTab = keyEvent('Tab', false);
+  p.doc.dispatchEvent(outsideTab);
+  assert.equal(outsideTab.prevented, false);
+
+  // If opener was detached before closing, closeSheet does not restore focus to it
+  p.focus(addBtn);
+  addBtn.click();
+  p.timers.run(60);
+  addBtn.parentNode.removeChild(addBtn);
+  p.doc.dispatchEvent(keyEvent('Escape'));
+  assert.notEqual(p.doc.activeElement, addBtn);
+});
+
+test('sheet: openSheet without focusEl focuses the first focusable item (openRestore)', async () => {
+  const storage = storageWith(foodDraft(today()));
+  const first = await inReview(storage, 'food');
+  first.press();
+
+  const p = await boot({ storage, view: 'food' });
+  const restoreBtn = button(p.doc.getElementById('view'), 'Restaurar último envio');
+  p.focus(restoreBtn);
+  restoreBtn.click();
+  p.timers.run(60);
+
+  const firstResult = p.doc.getElementById('sheet').querySelector('.result');
+  assert.equal(p.doc.activeElement, firstResult);
+
+  // Backdrop click closes and restores focus to restoreBtn
+  p.doc.getElementById('sheet-backdrop').click();
+  assert.equal(p.doc.getElementById('sheet').hidden, true);
+  assert.equal(p.doc.activeElement, restoreBtn);
+});
+
+test('scrollInto: uses auto when ShapeMotion.enabled() is false and smooth when true', async () => {
+  const calls = [];
+  let motionEnabled = false;
+  let origScroll = null;
+  const card = C.planCards(C.normalizeCatalog(SAMPLE), SAMPLE.next)[0];
+  card.sets[0].reps = '8'; // missing kg triggers validation scrollInto(el, 'start')
+
+  const p = await boot({
+    storage: pulsoWorkout([card]),
+    globals(ctx) {
+      origScroll = ctx.Element.prototype.scrollIntoView;
+      ctx.Element.prototype.scrollIntoView = function (opts) { calls.push({ ...opts }); };
+      return { ShapeMotion: { enabled: () => motionEnabled } };
+    },
+  });
+
+  try {
+    p.press();
+    assert.deepEqual(calls.at(-1), { behavior: 'auto', block: 'start' });
+
+    motionEnabled = true;
+    p.press();
+    assert.deepEqual(calls.at(-1), { behavior: 'smooth', block: 'start' });
+
+    // Exercise picker uses block: 'center' and respects ShapeMotion.enabled()
+    button(p.doc.getElementById('view'), 'Adicionar exercício').click();
+    p.doc.getElementById('sheet').querySelector('.result').click();
+    assert.deepEqual(calls.at(-1), { behavior: 'smooth', block: 'center' });
+
+    motionEnabled = false;
+    button(p.doc.getElementById('view'), 'Adicionar exercício').click();
+    p.doc.getElementById('sheet').querySelector('.result').click();
+    assert.deepEqual(calls.at(-1), { behavior: 'auto', block: 'center' });
+  } finally {
+    if (origScroll) p.doc.body.constructor.prototype.scrollIntoView = origScroll;
+  }
+});
+
+/* M9 & M10 polish ---------------------------------------------------------------------------- */
+
+test('M9: addItem shows inline role=alert and .is-bad and clears them on input', async () => {
+  const p = await boot({ view: 'food', catalog: Object.assign({}, SAMPLE, { foods: null }) });
+  const nameInput = p.doc.querySelectorAll('input').find((el) => el.getAttribute('data-error-path') === 'food');
+  const qtyInput = p.doc.querySelectorAll('input').find((el) => el.getAttribute('data-error-path') === 'qty');
+  p.input(nameInput, 'Arroz');
+
+  button(p.doc.getElementById('view'), 'Pôr no prato').click();
+  const panel = p.doc.querySelector('.panel');
+  const alertEl = panel.querySelector('.composer-error');
+  assert.ok(alertEl, 'composer inline error is rendered inside .panel');
+  assert.equal(alertEl.getAttribute('role'), 'alert');
+  assert.match(alertEl.textContent, /Quantidade: obrigatório/i);
+  assert.equal(qtyInput.classList.contains('is-bad'), true);
+
+  // Typing into the invalid field clears .is-bad and removes the inline alert
+  p.input(qtyInput, '150');
+  assert.equal(qtyInput.classList.contains('is-bad'), false);
+  assert.equal(panel.querySelector('.composer-error'), null);
+});
+
+test('M9: invalid plateItem displays inline error below .plate-meta', async () => {
+  const badDraft = foodDraft(today(), { items: [{ kind: 'description', description: '' }] });
+  const p = await boot({ view: 'food', storage: storageWith(badDraft) });
+  p.press(); // triggers S.showErrors = true and renderFood()
+  assert.equal(p.review.hidden, true);
+  const li = p.doc.querySelector('.plate-item');
+  assert.equal(li.classList.contains('bad'), true);
+  const meta = li.querySelector('.plate-meta');
+  const err = li.querySelector('.plate-error');
+  assert.ok(meta && err);
+  assert.equal(err.hidden, false);
+  assert.equal(err.classList.contains('field-error'), true);
+  assert.equal(err.getAttribute('role'), 'alert');
+  assert.match(err.textContent, /Descrição: obrigatório/i);
+  assert.ok(meta.parentNode === err.parentNode);
+  const kids = meta.parentNode.children;
+  assert.ok(kids.indexOf(err) > kids.indexOf(meta), 'error sits below .plate-meta');
+});
+
+test('M9: copyJson shows "JSON copiado" for 1800ms, resets timer on double tap, and guards screen changes', async () => {
+  const copied = [];
+  const p = await boot({
+    telegram: null,
+    fetch: async () => ({ ok: true, status: 200, json: async () => SAMPLE }),
+    storage: storageWith(foodDraft(today())),
+    navigator: { clipboard: { writeText: (txt) => { copied.push(txt); return Promise.resolve(); } } },
+  });
+  p.tab('food');
+  p.press();
+  p.timers.run(400);
+  assert.equal(p.review.hidden, false);
+
+  const primary = p.doc.getElementById('dock-primary');
+  assert.equal(primary.textContent, 'Copiar JSON');
+
+  // First copy click
+  primary.click();
+  await Promise.resolve();
+  assert.equal(copied.length, 1);
+  assert.equal(primary.textContent, 'JSON copiado');
+
+  // Second click at 1000ms resets the 1800ms timer
+  p.timers.run(1000);
+  assert.equal(primary.textContent, 'JSON copiado');
+  primary.click();
+  await Promise.resolve();
+  p.timers.run(1000); // 2000ms since 1st, 1000ms since 2nd
+  assert.equal(primary.textContent, 'JSON copiado');
+  p.timers.run(800); // 1800ms since 2nd
+  assert.equal(primary.textContent, 'Copiar JSON');
+
+  // Leaving review before 1800ms does not restore "Copiar JSON" over the form button
+  primary.click();
+  await Promise.resolve();
+  assert.equal(primary.textContent, 'JSON copiado');
+  p.doc.getElementById('dock-secondary').click(); // Editar -> showForm()
+  p.timers.run(2000);
+  assert.match(primary.textContent, /^Revisar refeição/);
+});
+
+test('M10: renderReview hides meter and details.raw for small ok payloads in Telegram and reveals when >75% or !ok', async () => {
+  // 1) Small ok payload in Telegram: no meter, no details.raw, capitalized Status, concise view-sub
+  const pSmall = await inReview(storageWith(doneWorkoutDraft(today(), SAMPLE.next)));
+  assert.equal(pSmall.review.querySelector('.meter'), null);
+  assert.equal(pSmall.review.querySelector('details.raw'), null);
+  assert.ok(pSmall.review.querySelectorAll('dd').some((dd) => dd.textContent === 'Concluída'));
+  assert.doesNotMatch(pSmall.review.querySelector('.view-sub').textContent, /planilha confere/i);
+
+  // 2) Payload > 75% of PAYLOAD_BYTES (4096 * 0.75 = 3072) and ok: shows meter, keeps details.raw hidden
+  const longNote = 'a'.repeat(200);
+  const bigCards = C.planCards(C.normalizeCatalog(SAMPLE), SAMPLE.next);
+  while (bigCards.length < 12) {
+    const ex = SAMPLE.ex[bigCards.length % SAMPLE.ex.length];
+    bigCards.push(C.newCard(ex[0] + ' ' + bigCards.length, ex[1]));
+  }
+  const bigCat = Object.assign({}, SAMPLE, { ex: bigCards.map((c) => [c.name, c.group]) });
+  bigCards.forEach((c) => { c.sets = [{ kg: '60', reps: '10', rir: '1' }, { kg: '60', reps: '10', rir: '1' }]; c.note = longNote; });
+  const key = `shape-miniapp:v2:w:${encodeURIComponent(SAMPLE.client)}:${today()}:${encodeURIComponent(SAMPLE.next)}`;
+  const pBig = await boot({ catalog: bigCat, storage: storageWith({ [key]: { v: 1, savedAt: 1, date: today(), session: SAMPLE.next, complete: false, cards: bigCards } }) });
+  pBig.press();
+  pBig.timers.run(400);
+  assert.equal(pBig.review.hidden, false);
+  assert.ok(pBig.review.querySelector('.meter'), 'meter is shown when payload > 75%');
+  assert.equal(pBig.review.querySelector('.meter').classList.contains('over'), false);
+  assert.equal(pBig.review.querySelector('details.raw'), null, 'details.raw stays hidden when p.ok is true');
+  assert.ok(pBig.review.querySelectorAll('dd').some((dd) => dd.textContent === 'Parcial'));
+
+  // 3) !p.ok in renderReview: shows .meter.over and details.raw ("Ver o JSON")
+  let okReads = 0;
+  const wrappedCore = Object.assign({}, C, {
+    serializePayload(t, args, id) {
+      const base = C.serializePayload(t, args, id);
+      return {
+        json: base.json,
+        bytes: C.LIMITS.PAYLOAD_BYTES + 120,
+        get ok() { okReads += 1; return okReads === 1; },
+      };
+    },
+  });
+  const pOver = await boot({ storage: storageWith(doneWorkoutDraft(today(), SAMPLE.next)), globals: { ShapeCore: wrappedCore } });
+  pOver.press();
+  pOver.timers.run(400);
+  assert.equal(pOver.review.hidden, false);
+  assert.ok(pOver.review.querySelector('.meter.over'), 'meter.over shown when !p.ok');
+  assert.ok(pOver.review.querySelector('details.raw'), 'details.raw shown when !p.ok');
+  assert.equal(pOver.review.querySelector('details.raw summary').textContent, 'Ver o JSON');
+});
+
+test('M10: catalogProblem in Telegram never leaks raw technical English err.message', async () => {
+  const zlib = require('node:zlib');
+  const badJsonBlob = zlib.deflateRawSync(Buffer.from('{not-json', 'utf8')).toString('base64url');
+  const p1 = await boot({ hash: `#v=workout&c=${badJsonBlob}`, expectFatal: true });
+  const body1 = p1.doc.querySelector('#view .empty-plan').textContent;
+  assert.match(p1.say(), /veio quebrada/);
+  assert.doesNotMatch(body1, /Unexpected|JSON|SyntaxError|property name/i);
+
+  const p2 = await boot({
+    hash: `#v=workout&c=${badJsonBlob}`,
+    expectFatal: true,
+    globals: { ShapeCore: Object.assign({}, C, { decodeCatalog: () => Promise.reject(new Error('DecompressionStream is not defined')) }) },
+  });
+  const body2 = p2.doc.querySelector('#view .empty-plan').textContent;
+  assert.match(p2.say(), /desatualizado/);
+  assert.doesNotMatch(body2, /DecompressionStream|is not defined/i);
+});
+
+test('M10: favorite chips render SVG star with aria-hidden and workout card errors start uppercase', async () => {
+  const card = C.planCards(C.normalizeCatalog(SAMPLE), SAMPLE.next)[0];
+  card.sets[0].reps = '8';
+  const p = await boot({ view: 'workout', storage: pulsoWorkout([card]) });
+  p.press();
+  const errLi = p.doc.querySelector('.card .errors li');
+  assert.ok(errLi);
+  assert.match(errLi.textContent, /^[A-ZÁÉÍÓÚÂÊÔÃÕÇ]/, 'card error starts uppercase');
+
+  p.tab('food');
+  button(p.doc.getElementById('view'), 'Favorita').click();
+  const favChip = p.doc.querySelector('.chip.fav');
+  assert.ok(favChip);
+  const svg = favChip.querySelector('svg');
+  assert.ok(svg, 'favorite chip renders an inline SVG star');
+  assert.equal(svg.getAttribute('aria-hidden'), 'true');
 });

@@ -83,14 +83,17 @@
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>',
     mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4M8 21h8"/>',
+    star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" fill="currentColor" stroke="none"/>',
   };
   function icon(name) {
     var span = document.createElement('span');
     span.className = 'ic';
     span.setAttribute('aria-hidden', 'true');
     // Constant markup only (never user text).
-    span.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' + ICONS[name] + '</svg>';
-    return span.firstChild;
+    span.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICONS[name] + '</svg>';
+    var svg = span.firstChild;
+    if (svg && svg.setAttribute) svg.setAttribute('aria-hidden', 'true');
+    return svg;
   }
 
   function haptic(kind) {
@@ -106,6 +109,7 @@
   }
 
   function plural(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
+  function capFirst(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''; }
   function dateLabel(key) {
     var opt = S.dates.filter(function (d) { return d.key === key; })[0];
     return (opt ? opt.label + ', ' : '') + C.weekday(key) + ' ' + C.shortDate(key);
@@ -189,6 +193,11 @@
     var M = window.ShapeMotion;
     if (!M || typeof M[name] !== 'function') return null;
     try { return M[name].apply(M, Array.prototype.slice.call(arguments, 1)); } catch (e) { return null; }
+  }
+  function scrollInto(el, block) {
+    if (!el || typeof el.scrollIntoView !== 'function') return;
+    var smooth = !!(window.ShapeMotion && typeof window.ShapeMotion.enabled === 'function' && window.ShapeMotion.enabled());
+    el.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: block || 'center' });
   }
   /** Run a re-render that drops `el`: its ghost fades out and what was below closes the gap. */
   function dropping(el, fn) {
@@ -709,7 +718,7 @@
           h('div', {},
             stepper({ value: card.pain, step: 1, min: C.LIMITS.PAIN_MIN, max: C.LIMITS.PAIN_MAX, start: 0, label: 'dor de 0 a 10', integer: true,
               path: 'pain', say: 'Dor: 0 é nenhuma, 10 é parar na hora.', onChange: function (v) { card.pain = v; liveCard(i); } })),
-          h('p', { class: 'hint', style: 'margin:0', text: 'Vazio = não informado.' }))));
+          h('p', { class: 'hint m-0', text: 'Vazio = não informado.' }))));
     }
 
     if (card.showNote || !isBlank(card.note)) {
@@ -736,7 +745,7 @@
     }
 
     var ul = h('ul', { class: 'errors' });
-    errs.forEach(function (e) { ul.appendChild(h('li', { text: e.message.replace(card.name + ': ', '') })); });
+    errs.forEach(function (e) { ul.appendChild(h('li', { text: capFirst(e.message.replace(card.name + ': ', '')) })); });
     ul.hidden = !errs.length;
     el._errors = ul;
     body.appendChild(ul);
@@ -805,14 +814,21 @@
         var mine = errs.filter(function (e) { return e.card === i; });
         el.setAttribute('data-status', mine.length ? 'error' : C.cardIsEmpty(card) ? 'empty' : 'filled');
         if (el._errors) {
-          el._errors.replaceChildren.apply(el._errors, mine.map(function (e) { return h('li', { text: e.message.replace(card.name + ': ', '') }); }));
+          el._errors.replaceChildren.apply(el._errors, mine.map(function (e) { return h('li', { text: capFirst(e.message.replace(card.name + ': ', '')) }); }));
           el._errors.hidden = !mine.length;
         }
       });
     } else {
       var ferrs = build().errors;
       document.querySelectorAll('.plate-item').forEach(function (li, i) {
-        li.classList.toggle('bad', ferrs.some(function (e) { return e.item === i; }));
+        var mine = ferrs.filter(function (e) { return e.item === i; });
+        var bad = mine.length > 0;
+        li.classList.toggle('bad', bad);
+        if (li._error) {
+          li._error.textContent = bad ? mine.map(function (e) { return capFirst(e.message.replace('Item ' + (i + 1) + ': ', '')); }).join(' · ') : '';
+          if (bad) li._error.setAttribute('role', 'alert'); else li._error.removeAttribute('role');
+          li._error.hidden = !bad;
+        }
       });
     }
   }
@@ -839,20 +855,117 @@
 
   /* exercise picker (bottom sheet) ---------------------------------------------------------- */
 
+  var sheetOpener = null;
+  var sheetFocusTimer = null;
+
+  function isElementConnected(el) {
+    if (!el) return false;
+    if (typeof el.isConnected === 'boolean') return el.isConnected;
+    if (typeof document.contains === 'function') return document.contains(el);
+    for (var cur = el; cur; cur = cur.parentNode) {
+      if (cur === document || cur === document.body || cur === document.documentElement) return true;
+    }
+    return false;
+  }
+
+  function isSheetElVisible(el) {
+    if (!el || el.hidden) return false;
+    for (var cur = el; cur && cur !== document && cur.nodeType !== 9; cur = cur.parentNode) {
+      if (cur.hidden || (cur.hasAttribute && cur.hasAttribute('hidden'))) return false;
+      if (cur.style && (cur.style.display === 'none' || cur.style.visibility === 'hidden')) return false;
+      if (cur === els.sheet) break;
+    }
+    if (typeof window.getComputedStyle === 'function') {
+      try {
+        var cs = window.getComputedStyle(el);
+        if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return false;
+      } catch (e) { /* ignore */ }
+    }
+    return true;
+  }
+
+  function isSheetFocusable(el) {
+    if (!el || !el.tagName || el.disabled || (el.hasAttribute && el.hasAttribute('disabled'))) return false;
+    if (!isSheetElVisible(el)) return false;
+    var ti = el.getAttribute ? el.getAttribute('tabindex') : null;
+    if (ti === '-1') return false;
+    var tag = el.tagName;
+    if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return true;
+    if (tag === 'A' && el.hasAttribute && el.hasAttribute('href')) return true;
+    return ti !== null && ti !== '';
+  }
+
+  function sheetFocusables() {
+    var out = [];
+    function walk(node) {
+      var kids = node && node.children ? node.children : [];
+      for (var i = 0; i < kids.length; i++) {
+        var c = kids[i];
+        if (isSheetFocusable(c)) out.push(c);
+        walk(c);
+      }
+    }
+    walk(els.sheet);
+    return out;
+  }
+
+  function onSheetKeydown(e) {
+    if (!S.sheetOpen) return;
+    if (e.key === 'Escape') {
+      closeSheet();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    var list = sheetFocusables();
+    if (!list.length) {
+      if (typeof e.preventDefault === 'function') e.preventDefault();
+      var titleEl = $('sheet-title');
+      if (titleEl && typeof titleEl.focus === 'function') titleEl.focus();
+      return;
+    }
+    var first = list[0];
+    var last = list[list.length - 1];
+    var idx = list.indexOf(document.activeElement);
+    if (e.shiftKey) {
+      if (idx <= 0) {
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+        last.focus();
+      }
+    } else if (idx < 0 || idx === list.length - 1) {
+      if (typeof e.preventDefault === 'function') e.preventDefault();
+      first.focus();
+    }
+  }
+
   function openSheet(title, content, focusEl) {
-    els.sheet.replaceChildren(h('div', { class: 'sheet-grip', 'aria-hidden': 'true' }), h('h2', { class: 'sheet-title', id: 'sheet-title', text: title }), content);
+    if (!S.sheetOpen) sheetOpener = document.activeElement || null;
+    clearTimeout(sheetFocusTimer);
+    sheetFocusTimer = null;
+    var titleEl = h('h2', { class: 'sheet-title', id: 'sheet-title', tabindex: '-1', text: title });
+    els.sheet.replaceChildren(h('div', { class: 'sheet-grip', 'aria-hidden': 'true' }), titleEl, content);
     cancelReview();
     motion('keep', els.sheet); // reopened while it was still sliding out
     motion('keep', els.backdrop);
     els.sheet.hidden = false;
     els.backdrop.hidden = false;
     S.sheetOpen = true;
+    document.removeEventListener('keydown', onSheetKeydown);
+    document.addEventListener('keydown', onSheetKeydown);
     updateBack();
     syncVoiceDock();
-    if (focusEl) setTimeout(function () { focusEl.focus(); }, 60);
+    var target = focusEl || sheetFocusables()[0] || titleEl;
+    if (target && typeof target.focus === 'function') {
+      sheetFocusTimer = setTimeout(function () {
+        sheetFocusTimer = null;
+        if (S.sheetOpen && typeof target.focus === 'function') target.focus();
+      }, 60);
+    }
   }
   /** The state closes at once; the sheet and backdrop only finish sliding out (taps pass through). */
   function closeSheet() {
+    clearTimeout(sheetFocusTimer);
+    sheetFocusTimer = null;
+    document.removeEventListener('keydown', onSheetKeydown);
     [els.sheet, els.backdrop].forEach(function (el) {
       if (el.hidden) return;
       if (!motion('out', el, function () { el.hidden = true; })) el.hidden = true;
@@ -860,9 +973,11 @@
     S.sheetOpen = false;
     updateBack();
     syncVoiceDock();
+    var opener = sheetOpener;
+    sheetOpener = null;
+    if (opener && isElementConnected(opener) && typeof opener.focus === 'function') opener.focus();
   }
   els.backdrop.addEventListener('click', closeSheet);
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && S.sheetOpen) closeSheet(); });
 
   function openExercisePicker() {
     var present = cards().map(function (c) { return C.fold(c.name); });
@@ -890,13 +1005,13 @@
             say('idle', e.name + ' entrou na lista. Preencha as séries.');
             var el = cardEls[cardEls.length - 1];
             motion('enter', el);
-            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            scrollInto(el, 'center');
           },
         }, h('span', { text: e.name }), h('span', { class: 'tag', text: e.group })));
       }) : [h('li', { class: 'hint', text: options.length ? 'Nada com esse nome no catálogo.' : 'Todos os exercícios do catálogo já estão na lista.' })]);
     }
     fill();
-    openSheet('Adicionar exercício', h('div', { style: 'display:flex;flex-direction:column;min-height:0;flex:1' },
+    openSheet('Adicionar exercício', h('div', { class: 'sheet-col' },
       h('label', { class: 'search' }, icon('search'), input), list), input);
   }
 
@@ -932,11 +1047,11 @@
     var plateTitle = h('h2', { class: 'section-title' }, 'No prato', h('span', { class: 'count', text: f.items.length + '/' + C.LIMITS.MAX_FOOD_ITEMS }));
     var errs = S.showErrors ? build().errors : [];
     var plate = f.items.length ? h('ul', { class: 'plate' }, f.items.map(function (it, i) {
-      return plateItem(it, i, errs.some(function (e) { return e.item === i; }));
+      return plateItem(it, i, errs.filter(function (e) { return e.item === i; }));
     })) : h('div', { class: 'empty-plate' }, mascot('idle', 'Prato vazio', 'Busque um alimento, toque numa favorita ou descreva sem cálculo.'));
 
     var reset = h('div', { class: 'foot-actions' }, restoreButton('food'), f.items.length ? h('button', {
-      type: 'button', class: 'btn-text', text: 'Limpar refeição',
+      type: 'button', class: 'btn-text', text: 'Limpar prato',
       onclick: function () { confirmDialog('Tirar todos os itens do prato?', function () { f.items = []; f.id = C.newSubmissionId(); S.showErrors = false; renderFood(); changed(true); }); },
     }) : null);
 
@@ -990,18 +1105,18 @@
       return h('div', {},
         h('div', { class: 'chip-wrap' }, S.catalog.fav.map(function (name) {
           return h('button', {
-            type: 'button', class: 'chip fav', text: name,
+            type: 'button', class: 'chip fav',
             onclick: function () { addItem({ kind: 'favorite', favorite: name, portions: '1' }); },
-          });
+          }, icon('star'), name);
         })),
-        h('p', { class: 'hint', text: 'Um toque põe 1 porção no prato; ajuste as porções na lista.' }));
+        h('p', { class: 'hint', text: 'Um toque põe 1 porção; ajuste as porções no prato.' }));
     }
 
     if (f.mode === 'description') {
       var counter = h('span', { class: 'counter', text: c.description.length + '/' + C.LIMITS.DESCRIPTION_MAX });
       var ta = h('textarea', {
         class: 'textarea', rows: '2', maxlength: String(C.LIMITS.DESCRIPTION_MAX), placeholder: 'Ex.: pastel de feira',
-        'aria-label': 'Descrição do item', 'data-error-path': 'description', 'data-say': 'Sem cálculo: entra no diário sem calorias nem macros.', value: c.description,
+        'aria-label': 'Descrição do item', 'data-error-path': 'description', 'data-say': 'Sem cálculo: entra na refeição sem calorias nem macros.', value: c.description,
         oninput: function () { c.description = ta.value; counter.textContent = ta.value.length + '/' + C.LIMITS.DESCRIPTION_MAX; descErr.check(); },
       });
       var descErr = formulaHint(ta, 'A descrição');
@@ -1009,8 +1124,8 @@
       return h('div', {},
         h('label', { class: 'field-label' }, h('span', { text: 'Descrição' }), counter), ta, descErr,
         h('p', { class: 'sub-label', text: 'Quantidade (opcional)' }), dq,
-        h('div', { style: 'margin-top:8px' }, unitChips(c.dunit, function (u) { c.dunit = u; renderFood(); }, true)),
-        h('p', { class: 'hint warn', text: 'Sem cálculo: o item entra no diário sem calorias nem macros.' }),
+        h('div', { class: 'mt-8' }, unitChips(c.dunit, function (u) { c.dunit = u; renderFood(); }, true)),
+        h('p', { class: 'hint warn', text: 'Sem cálculo: o item entra na refeição sem calorias nem macros.' }),
         h('button', {
           type: 'button', class: 'btn-primary',
           onclick: function () {
@@ -1047,7 +1162,7 @@
       };
       fillResults();
       return h('div', {}, h('label', { class: 'search' }, icon('search'), input), results,
-        S.catalog.freeFoods ? h('button', { type: 'button', class: 'btn-text', text: 'Digitar nome da planilha', onclick: function () { c.manual = true; renderFood(); } }) : null);
+        S.catalog.freeFoods ? h('button', { type: 'button', class: 'btn-text', text: 'Digitar outro nome', onclick: function () { c.manual = true; renderFood(); } }) : null);
     }
 
     if (free) {
@@ -1063,7 +1178,7 @@
     }
     var qty = qtyField(c.qty, 'Quantidade com vírgula vale: 82,5.', function (v) { c.qty = v; }, function () { return c.unit; });
     parts.push(h('p', { class: 'sub-label', text: 'Quantidade' }), qty,
-      h('div', { style: 'margin-top:8px' }, unitChips(c.unit, function (u) { c.unit = u; qty._refresh(); renderUnitsOnly(); })),
+      h('div', { class: 'mt-8' }, unitChips(c.unit, function (u) { c.unit = u; qty._refresh(); renderUnitsOnly(); })),
       h('p', { class: 'sub-label', text: 'Medição' }),
       h('div', { class: 'seg small', role: 'group', 'aria-label': 'Medição' }, C.MEASURES.map(function (m) {
         return h('button', {
@@ -1091,6 +1206,29 @@
     }, 30);
   }
 
+  function clearComposerError(panel) {
+    if (!panel) return;
+    var prevErr = panel.querySelector('.composer-error');
+    if (prevErr && prevErr.parentNode) prevErr.parentNode.removeChild(prevErr);
+    if (panel._errTarget) {
+      var t = panel._errTarget;
+      if (!(t.getAttribute('data-error-path') === 'description' && C.formulaProblem(t.value))) {
+        t.classList.remove('is-bad');
+      }
+      if (panel._errHandler) {
+        t.removeEventListener('input', panel._errHandler);
+        t.removeEventListener('change', panel._errHandler);
+      }
+      panel._errTarget = null;
+    }
+    panel.classList.remove('is-bad');
+    if (panel._errHandler) {
+      panel.removeEventListener('input', panel._errHandler);
+      panel.removeEventListener('change', panel._errHandler);
+      panel._errHandler = null;
+    }
+  }
+
   function addItem(item) {
     if (S.food.items.length >= C.LIMITS.MAX_FOOD_ITEMS) {
       haptic('error');
@@ -1100,11 +1238,29 @@
     }
     var r = C.buildFoodItem(item, S.catalog);
     if (r.errors.length) {
+      var panel = els.view.querySelector('.panel');
+      clearComposerError(panel);
       haptic('error');
-      nudge(els.view.querySelector('.panel'));
+      nudge(panel);
       var error = C.pulsoError(r.errors);
+      var target = errorTarget(error, true);
+      if (target) target.classList.add('is-bad');
+      if (panel) {
+        var msg = h('p', { class: 'field-error composer-error', role: 'alert', text: capFirst(error.line) });
+        var body = panel.querySelector('.panel-body') || panel;
+        body.appendChild(msg);
+        var clear = function () { clearComposerError(panel); };
+        panel._errTarget = target;
+        panel._errHandler = clear;
+        panel.addEventListener('input', clear);
+        panel.addEventListener('change', clear);
+        if (target && target !== panel) {
+          target.addEventListener('input', clear);
+          target.addEventListener('change', clear);
+        }
+      }
       react(error);
-      glance(errorTarget(error, true));
+      glance(target);
       return false;
     }
     S.food.items.push(item);
@@ -1135,7 +1291,14 @@
     return Number.isFinite(n) ? C.formatBR(n) + (it.unit ? ' ' + it.unit : '') : '';
   }
 
-  function plateItem(it, i, bad) {
+  function plateItem(it, i, itemErrs) {
+    var bad = Array.isArray(itemErrs) ? itemErrs.length > 0 : !!itemErrs;
+    var errText = Array.isArray(itemErrs) && itemErrs.length
+      ? itemErrs.map(function (e) { return capFirst(e.message.replace('Item ' + (i + 1) + ': ', '')); }).join(' · ')
+      : '';
+    var errEl = h('span', { class: 'field-error plate-error', text: errText });
+    if (bad) errEl.setAttribute('role', 'alert');
+    errEl.hidden = !bad;
     var right = h('div', { class: 'plate-right' });
     if (itemQty(it)) right.appendChild(h('span', { class: 'plate-qty', text: itemQty(it) }));
     if (it.kind === 'favorite') {
@@ -1157,10 +1320,12 @@
         dropping(e.currentTarget.closest('.plate-item'), function () { S.food.items.splice(i, 1); haptic('light'); renderFood(); changed(true); });
       },
     }));
-    return h('li', { class: 'plate-item k-' + it.kind + (bad ? ' bad' : '') },
+    var li = h('li', { class: 'plate-item k-' + it.kind + (bad ? ' bad' : '') },
       h('span', { class: 'plate-bar', 'aria-hidden': 'true' }),
-      h('span', {}, h('span', { class: 'plate-name', text: itemName(it) }), h('span', { class: 'plate-meta', text: itemMeta(it) })),
+      h('span', {}, h('span', { class: 'plate-name', text: itemName(it) }), h('span', { class: 'plate-meta', text: itemMeta(it) }), errEl),
       right);
+    li._error = errEl;
+    return li;
   }
 
   /* review & send ---------------------------------------------------------------------------- */
@@ -1185,7 +1350,7 @@
         if (firstCard) cards()[firstCard.card].open = true;
         renderWorkout();
         var el = firstCard ? cardEls[firstCard.card] : null;
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        scrollInto(el, 'start');
         nudge(el);
       } else {
         renderFood();
@@ -1223,7 +1388,16 @@
     }, 320);
   }
 
+  var copyTimer = null;
+  function clearCopyTimer() {
+    if (copyTimer !== null) {
+      clearTimeout(copyTimer);
+      copyTimer = null;
+    }
+  }
+
   function renderReview(args, p, view) {
+    clearCopyTimer();
     els.view.hidden = true;
     els.tabBar.hidden = true;
     els.dates.hidden = true;
@@ -1235,7 +1409,7 @@
       facts = h('dl', { class: 'facts' },
         h('dt', { text: 'Data' }), h('dd', { text: dateLabel(args.date) }),
         h('dt', { text: 'Sessão' }), h('dd', { text: args.session }),
-        h('dt', { text: 'Status' }), h('dd', { text: args.complete ? 'concluída' : 'parcial' }));
+        h('dt', { text: 'Status' }), h('dd', { text: args.complete ? 'Concluída' : 'Parcial' }));
       list = args.exercises.length ? h('ul', { class: 'review-list' }, args.exercises.map(function (ex) {
         var lines = ex.work.map(function (s, j) { return 'Série ' + (j + 1) + ': ' + C.describeSet(s); });
         if (ex.warmup) lines.push('Aquecimento: ' + C.describeSet(ex.warmup));
@@ -1243,7 +1417,7 @@
         if (ex.pain !== undefined) lines.push('Dor: ' + ex.pain);
         if (ex.note) lines.push('Nota: ' + ex.note);
         return h('li', { class: 'review-item' }, h('b', { text: ex.name }), lines.map(function (l) { return h('span', { text: l }); }));
-      })) : h('p', { class: 'empty-plate', style: 'padding:16px', text: 'Sem exercícios: só marca a sessão como concluída.' });
+      })) : h('p', { class: 'empty-plate p-16', text: 'Sem exercícios: só marca a sessão como concluída.' });
     } else {
       facts = h('dl', { class: 'facts' },
         h('dt', { text: 'Data' }), h('dd', { text: dateLabel(args.date) }),
@@ -1267,22 +1441,25 @@
       }
     }
 
+    var showMeter = !inTelegram || !p.ok || p.bytes > C.LIMITS.PAYLOAD_BYTES * 0.75;
     var pct = Math.min(100, Math.round(p.bytes / C.LIMITS.PAYLOAD_BYTES * 100));
-    var meter = h('div', { class: 'meter' + (p.ok ? '' : ' over') },
+    var meter = showMeter ? h('div', { class: 'meter' + (p.ok ? '' : ' over') },
       h('div', { class: 'meter-bar' }, h('i', { style: 'width:' + pct + '%' })),
-      h('p', { text: p.bytes + ' de ' + C.LIMITS.PAYLOAD_BYTES + ' bytes do limite do Telegram' }));
+      h('p', { text: p.bytes + ' de ' + C.LIMITS.PAYLOAD_BYTES + ' bytes do limite do Telegram' })) : null;
 
     var pretty = JSON.stringify(JSON.parse(p.json), null, 2);
     var raw = inTelegram
-      ? h('details', { class: 'raw' }, h('summary', { text: 'Ver o JSON' }), h('pre', { class: 'json', text: pretty }))
+      ? (!p.ok ? h('details', { class: 'raw' }, h('summary', { text: 'Ver o JSON' }), h('pre', { class: 'json', text: pretty })) : null)
       : h('div', {}, h('h2', { class: 'section-title', text: 'JSON que iria para o bot' }), h('pre', { class: 'json', id: 'json-out', text: pretty }));
 
-    els.review.replaceChildren(
+    var reviewNodes = [
       mascot('happy', null, C.pulsoSummary(pulsoContext())),
-      h('div', { class: 'view-head', style: 'margin-top:12px' },
+      h('div', { class: 'view-head mt-12' },
         h('h1', { class: 'view-title', text: 'Confira o envio' }),
-        h('p', { class: 'view-sub', text: 'É exatamente isto que vai para o bot. A planilha confere de novo, e só a resposta do bot diz o que foi gravado.' })),
-      facts, map || '', list, meter, raw);
+        h('p', { class: 'view-sub', text: 'Confira os dados abaixo antes de enviar.' })),
+      facts, map, list, meter, raw,
+    ].filter(function (node) { return !!node; });
+    els.review.replaceChildren.apply(els.review, reviewNodes);
 
     if (inTelegram) {
       setMain('Enviar ao bot', function () { send(p.json); });
@@ -1309,6 +1486,7 @@
 
   function showForm() {
     var back = S.screen === 'review';
+    clearCopyTimer();
     endSend();
     S.screen = 'form';
     els.review.hidden = true;
@@ -1368,8 +1546,8 @@
         onclick: function () { closeSheet(); restoreSent(e); },
       }, h('span', { text: e.label }), h('span', { class: 'tag', text: 'enviado ' + C.shortDate(C.todayIn(S.catalog.tz, when)) + ' ' + time })));
     }));
-    openSheet('Restaurar último envio', h('div', { style: 'display:flex;flex-direction:column;min-height:0;flex:1' },
-      h('p', { class: 'hint', style: 'margin:0', text: 'Use se o bot respondeu que não gravou. O formulário volta como estava no envio; revise e envie de novo.' }), ul));
+    openSheet('Restaurar último envio', h('div', { class: 'sheet-col' },
+      h('p', { class: 'hint m-0', text: 'Use se o bot respondeu que não gravou. O formulário volta como estava no envio; revise e envie de novo.' }), ul));
   }
 
   function restoreSent(e) {
@@ -1404,7 +1582,20 @@
   }
 
   function copyJson(json) {
-    var done = function () { haptic('success'); say('happy', 'JSON copiado. No Telegram ele iria para o bot, e só a resposta do bot confirma.'); };
+    var done = function () {
+      haptic('success');
+      say('happy', 'JSON copiado. No Telegram ele iria para o bot, e só a resposta do bot confirma.');
+      if (!inTelegram && S.screen === 'review' && !isVoiceActive() && els.dockPrimary) {
+        clearCopyTimer();
+        els.dockPrimary.textContent = 'JSON copiado';
+        copyTimer = setTimeout(function () {
+          copyTimer = null;
+          if (!inTelegram && S.screen === 'review' && !isVoiceActive() && els.dockPrimary) {
+            els.dockPrimary.textContent = 'Copiar JSON';
+          }
+        }, 1800);
+      }
+    };
     var fallback = function () {
       var pre = $('json-out');
       if (pre) { var range = document.createRange(); range.selectNodeContents(pre); var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); }
@@ -1996,7 +2187,7 @@
     els.dock.hidden = true;
     if (els.voicePanel) els.voicePanel.hidden = true;
     if (els.dockMic) els.dockMic.hidden = true;
-    els.view.replaceChildren(h('div', { class: 'empty-plan', style: 'margin-top:16px' }, mascot('alert', line, text)));
+    els.view.replaceChildren(h('div', { class: 'empty-plan mt-16' }, mascot('alert', line, text)));
     say('alert', line);
     if (tg && tg.MainButton) { try { tg.MainButton.hide(); } catch (e) { /* ignore */ } }
   }
@@ -2004,16 +2195,17 @@
   /** Plain-language reason for a catalog that could not be read. */
   function catalogProblem(err) {
     var m = String(err && err.message || err);
+    var detail = inTelegram ? '' : ' (' + m + ')';
     if (err && err.code === 'no_catalog') {
       return ['Abra de novo pelo /app.', 'Este botão não trouxe a sua ficha. Mande /app no chat do bot: ele envia botões novos de Treino e Refeição.'];
     }
     if (/TextDecoder|DecompressionStream|is not defined|not a function|not supported/i.test(m)) {
-      return ['Este Telegram está desatualizado.', 'O aplicativo não consegue abrir a ficha neste aparelho (' + m + '). Atualize o Telegram, ou registre pelo chat do bot como antes.'];
+      return ['Este Telegram está desatualizado.', 'O aplicativo não consegue abrir a ficha neste aparelho' + detail + '. Atualize o Telegram, ou registre pelo chat do bot como antes.'];
     }
     if (/inflate|base64|JSON|Unexpected|versão|inválid/i.test(m)) {
-      return ['A ficha deste link veio quebrada.', 'Não consegui ler a ficha (' + m + '). Mande /app no chat do bot para receber botões novos.'];
+      return ['A ficha deste link veio quebrada.', 'Não consegui ler a ficha' + detail + '. Mande /app no chat do bot para receber botões novos.'];
     }
-    return ['Não consegui abrir a ficha.', 'Algo deu errado ao abrir a ficha (' + m + '). Mande /app no chat do bot e tente de novo.'];
+    return ['Não consegui abrir a ficha.', 'Algo deu errado ao abrir a ficha' + detail + '. Mande /app no chat do bot e tente de novo.'];
   }
 
   function loadCatalog(hash) {
@@ -2057,7 +2249,8 @@
       els.dockPrimary.addEventListener('click', onMain);
       if (window.matchMedia) {
         var mq = window.matchMedia('(prefers-color-scheme: dark)');
-        if (mq.addEventListener) mq.addEventListener('change', applyScheme);
+        if (mq && mq.addEventListener) mq.addEventListener('change', applyScheme);
+        else if (mq && mq.addListener) mq.addListener(applyScheme);
       }
     }
 

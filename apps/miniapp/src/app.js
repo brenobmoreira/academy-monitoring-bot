@@ -119,8 +119,12 @@
 
   // Artwork stays swappable; context/reaction decisions come from ShapeCore.
   var Avatar = window.ShapeAvatar;
+  var MM = window.MuscleMotion || null; // progressive enhancement – absent = no-op
   var Body = window.ShapeBody || null; // the muscle map (src/body.js); the page works without it
   if (Avatar) Avatar.mount(els.shape, els.say);
+  if (MM && typeof MM.attachLife === 'function') {
+    try { MM.attachLife(els.shape); } catch (e) { /* ignore */ }
+  }
   if (Avatar && Avatar.intro) Avatar.intro('Abrindo sua ficha'); // lands in the header on the first say()
 
   function syncForm(extra) {
@@ -136,7 +140,12 @@
       : (ctx.dozing ? 'descanso' : (ctx.screen === 'review' || ctx.screen === 'sent') ? 'revisao'
         : ctx.intro ? 'base' : ctx.view === 'workout' ? 'treino' : ctx.view === 'food' ? 'refeicao'
           : ctx.view === 'water' ? 'agua' : 'base');
-    Avatar.setForm(nextForm);
+    var currentForm = els.shape && els.shape.getAttribute ? els.shape.getAttribute('data-form') : null;
+    if (MM && typeof MM.morph === 'function' && currentForm !== nextForm) {
+      try { MM.morph(els.shape, nextForm); } catch (e) { Avatar.setForm(nextForm); }
+    } else {
+      Avatar.setForm(nextForm);
+    }
   }
   syncForm({ intro: true });
 
@@ -1645,6 +1654,18 @@
   var voiceTimerId = null;
   var voiceStartedAt = 0;
   var lockedControls = [];
+  var mmVoiceMeter = null; // MuscleMotion voice meter handle (progressive enhancement)
+
+  /** Called by voice.js onStream: starts/stops MuscleMotion voice meter reactivity. */
+  function mmOnStream(stream) {
+    if (mmVoiceMeter && typeof mmVoiceMeter.stop === 'function') {
+      try { mmVoiceMeter.stop(); } catch (e) { /* ignore */ }
+      mmVoiceMeter = null;
+    }
+    if (stream && MM && typeof MM.createVoiceMeter === 'function') {
+      try { mmVoiceMeter = MM.createVoiceMeter(stream, els.shape); } catch (e) { /* ignore */ }
+    }
+  }
 
   function isVoiceActive() {
     return voicePlanBOpen || !!voiceUiBlocked || !!voicePreviewResult || !!(voiceCtrl && voiceCtrl.state().status !== 'idle');
@@ -1722,13 +1743,15 @@
       : mascotState === 'understood' ? 'happy'
       : mascotState === 'oops' ? 'alert'
       : mascotState;
-    var avatarMood = hasRichState(mascotState) ? mascotState : fallbackMood;
+    var rich = hasRichState(mascotState);
+    var avatarMood = rich ? mascotState : fallbackMood;
     say(avatarMood, line);
     clearVoiceMascot();
     if (!els.shape) return;
     if (mascotState) {
-      if (Avatar && Avatar.setMood && hasRichState(mascotState)) Avatar.setMood(mascotState);
-      else els.shape.setAttribute('data-state', mascotState);
+      if (!(Avatar && Avatar.setMood && rich)) {
+        els.shape.setAttribute('data-state', mascotState);
+      }
       if (mascotState === 'listening') els.shape.classList.add('voice-listening');
       else if (mascotState === 'thinking') els.shape.classList.add('voice-thinking');
       else if (mascotState === 'alert' || mascotState === 'oops') els.shape.classList.add('voice-alert');
@@ -2087,12 +2110,16 @@
         clearVoiceMascot();
         say('idle', 'Antes de gravar, confira o aviso de privacidade.');
       } else if (st.status === 'transcribed' || st.status === 'confirming') {
+        var currentMascot = Avatar && Avatar.mood ? Avatar.mood() : (els.shape && els.shape.getAttribute('data-state'));
+        var unchangedTranscribed = !!(prevState && prevState.status === st.status && !prevState.textError && !st.textError);
         if (st.textError) {
           clearVoiceMascot();
           say('alert', st.textError);
         } else if (hasRichState('understood')) {
-          setVoiceMascot('understood', 'Confira o texto antes de enviar.');
-        } else {
+          if (!(unchangedTranscribed && currentMascot === 'understood')) {
+            setVoiceMascot('understood', 'Confira o texto antes de enviar.');
+          }
+        } else if (!(unchangedTranscribed && currentMascot === 'happy')) {
           clearVoiceMascot();
           say('happy', 'Confira o texto antes de enviar.');
         }
@@ -2151,6 +2178,7 @@
         onState: function (next, prev) { syncVoiceUi(prev); },
         onSendData: sendVoicePayload,
         onPlanB: openPlanB,
+        onStream: mmOnStream,
       };
       if (!useReal) {
         ctrlOpts.getUserMedia = fallbackMedia.getUserMedia;
@@ -2176,6 +2204,7 @@
       onState: function (next, prev) { syncVoiceUi(prev); },
       onSendData: sendVoicePayload,
       onPlanB: openPlanB,
+      onStream: mmOnStream,
       onDeleteSession: function () {
         voiceSessionResult = {
           ok: false,
@@ -2278,7 +2307,10 @@
       if (document.hidden && voiceCtrl) voiceCtrl.hide();
     });
     if (window.addEventListener) {
-      window.addEventListener('pagehide', function () { if (voiceCtrl) voiceCtrl.hide(); });
+      window.addEventListener('pagehide', function () {
+        if (voiceCtrl) voiceCtrl.hide();
+        mmOnStream(null); // deterministic meter cleanup
+      });
     }
     if (tg) {
       try { tg.ready(); tg.expand(); } catch (e) { /* ignore */ }

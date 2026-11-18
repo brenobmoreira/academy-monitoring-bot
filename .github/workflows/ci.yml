@@ -74,12 +74,13 @@ jobs:
       - name: requirements.txt matches uv.lock
         shell: bash
         run: diff -u <(tail -n +3 requirements.txt) <(uv export --locked --no-dev --no-emit-project --no-hashes --no-header --format requirements-txt)
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run ty check
+      - run: uv run ruff check . ../../e2e
+      - run: uv run ruff format --check . ../../e2e
+      - run: uv run ty check . ../../e2e
       - run: uv run pytest
       # Scripted provider only: no LLM key, no network.
       - run: uv run python ../../e2e/run.py
+      - run: uv run python ../../e2e/run.py --server uvicorn
       - uses: actions/upload-artifact@v7
         if: always()
         with:

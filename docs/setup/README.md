@@ -8,6 +8,7 @@ Four stages, in order. Each one ends with a check, so you know it works before m
 | [2. Telegram bot](#2-telegram-bot) | ~5 min | bot token and your chat id |
 | [3. Agent on your machine](#3-agent-on-your-machine) | ~10 min | bot answering through local polling |
 | [4. Cloud Run](#4-cloud-run) | ~30 min | bot answering through the webhook, deployed from GitHub |
+| [Mini App (GitHub Pages)](#mini-app-github-pages) | ~5 min | formulário estático da Mini App publicado em `https://<owner>.github.io/<repo>/` |
 | [Voz Mini App (Opcional)](#serviço-de-voz-da-mini-app-opcional--cloud-run) | ~10 min | gravação de voz ativa na Mini App via Cloud Run (`Dockerfile.voice`) |
 
 > **Deployment model (one deploy per client):** Each client spreadsheet has its own bound Apps Script deployment (`apps/sheet4`) and its own agent instance (e.g. `fitness-agent-breno`, `fitness-agent-zoio`), each configured with that client's `SHEET_API_URL`, `SHEET_API_KEY`, `ALLOWED_CHAT_IDS`, and `TELEGRAM_BOT_TOKEN`.
@@ -152,6 +153,16 @@ Each client spreadsheet has its own Cloud Run service (`SERVICE=fitness-agent-<c
 the function's **Logs**, and Apps Script → **Executions** for `doPost`. With the reminders:
 `gcloud scheduler jobs run ${SERVICE}-remind-weekly --location us-central1` → the week's summary in
 the chat.
+
+## Mini App (GitHub Pages)
+
+O bundle estático de produção da Mini App (`apps/miniapp/`) é publicado via GitHub Pages usando o workflow [`.github/workflows/pages.yml`](../../.github/workflows/pages.yml):
+
+1. No GitHub do repositório → **Settings → Pages → Build and deployment → Source**, selecione **GitHub Actions**.
+2. Rode o workflow **Deploy Mini App (Pages)** manualmente em **Actions → Deploy Mini App (Pages) → Run workflow** (a partir da branch `main`) para o primeiro deploy, ou aguarde um push na branch `main` alterando `apps/miniapp/**`.
+3. Configure `MINIAPP_URL=https://<owner>.github.io/<repo>/` no serviço do agente (localmente no `.env` ou via `--update-env-vars MINIAPP_URL="https://<owner>.github.io/<repo>/"` no Cloud Run). Caso utilize o serviço `fitness-voice`, configure `VOICE_ALLOWED_ORIGINS=https://<owner>.github.io` — **apenas a origem (`scheme://host`), sem path ou barra final**.
+
+> **Nota:** Abrir a URL pública do GitHub Pages diretamente no navegador fora do Telegram (sem o fragmento `#c=` enviado pelo comando `/app`) não carrega `dev/sample-catalog.json` por design, pois os arquivos de `dev/` ficam fora do bundle de produção.
 
 ## Serviço de Voz da Mini App (Opcional — Cloud Run)
 

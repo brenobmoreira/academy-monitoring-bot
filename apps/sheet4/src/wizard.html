@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="pt-BR">
 <head>
   <base target="_top">
   <meta charset="utf-8">
@@ -26,10 +26,11 @@
   <h2>Configuração do cliente (colar JSON, opcional)</h2>
   <textarea id="json" placeholder='{"format": "academy-client/1", "config": {...}, "history": {...}}'></textarea>
   <button type="button" onclick="load()">Ler proposta</button>
-  <div id="errors" class="err"></div>
+  <div id="errors" class="err" role="alert"></div>
+
   <div id="form"></div>
   <button type="button" id="confirm" onclick="confirmRun()" disabled>Confirmar e migrar</button>
-  <div id="out"></div>
+  <div id="out" role="status" aria-live="polite" aria-atomic="false"></div>
 
   <script>
     var current = null;

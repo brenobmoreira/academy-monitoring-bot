@@ -5,12 +5,18 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    exclude-paths:
+      - "requirements.txt"
     ignore:
       - dependency-name: google-adk
         update-types: ["version-update:semver-major"]
       - dependency-name: litellm
         update-types: ["version-update:semver-major"]
       - dependency-name: functions-framework
+        update-types: ["version-update:semver-major"]
+      - dependency-name: cloudevents
+        update-types: ["version-update:semver-major"]
+      - dependency-name: importlib-metadata
         update-types: ["version-update:semver-major"]
     groups:
       dev-tools:

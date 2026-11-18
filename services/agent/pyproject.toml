@@ -19,6 +19,7 @@ dependencies = [
 [project.scripts]
 agent-poll = "agent.poll:main"
 agent-commands = "agent.commands:main"
+agent-doctor = "agent.doctor:main"
 
 [build-system]
 requires = ["uv_build>=0.13.8,<0.14.0"]

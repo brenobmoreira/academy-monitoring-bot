@@ -210,6 +210,7 @@ def build_voice_service(
     concurrency_gate = ConcurrencyGate(max_concurrent=settings.VOICE_MAX_CONCURRENT)
     idempotency_cache = IdempotencyCache(
         ttl_s=settings.VOICE_IDEMPOTENCY_TTL_S,
+        max_entries=settings.VOICE_IDEMPOTENCY_MAX_ENTRIES,
         clock=limiter_clock,
         error_code=idempotency_error_code,
     )

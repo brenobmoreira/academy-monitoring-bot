@@ -26,6 +26,10 @@ CONCURRENCY_RETRY_AFTER = 2
 
 # Spec §5.5 (D6): finished idempotency entries TTL.
 IDEMPOTENCY_TTL_S = 300.0
+# Hard ceiling on live entries (in-flight + finished).  An authenticated client flooding distinct
+# idempotency keys cannot grow the cache beyond this.  After prune, if still at capacity the new
+# slot is refused with ConcurrencyLimitError -> HTTP 429 rate_limited + Retry-After.
+IDEMPOTENCY_MAX_ENTRIES = 10_000
 
 # Spec §6.7: POST /v1/auth/sessions exchange limits.
 EXCHANGE_RATE_PER_MIN = 30  # per process
@@ -387,13 +391,17 @@ class IdempotencyCache:
         self,
         ttl_s: float = IDEMPOTENCY_TTL_S,
         *,
+        max_entries: int = IDEMPOTENCY_MAX_ENTRIES,
         clock: Clock = time.monotonic,
         error_code: Callable[[BaseException], str | None] = _default_error_code,
         no_speech_error: Callable[[], BaseException] = NoSpeechError,
     ) -> None:
         if ttl_s <= 0:
             raise ValueError(f"ttl_s must be > 0, got {ttl_s}")
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
         self._ttl_s = ttl_s
+        self._max_entries = max_entries
         self._clock = clock
         self._error_code = error_code
         self._no_speech_error = no_speech_error
@@ -450,6 +458,11 @@ class IdempotencyCache:
             return outcome
 
         loop = asyncio.get_running_loop()
+        # Hard cap: prevent unbounded growth under a flood of distinct idempotency keys.
+        # _prune() above already removed expired _FinishedEntry slots; if we are still at
+        # capacity (mostly in-flight entries), refuse the new slot with a retryable 429.
+        if len(self._entries) >= self._max_entries:
+            raise ConcurrencyLimitError()
         future: asyncio.Future[Any] = loop.create_future()
         future.add_done_callback(_consume_exception)
         in_flight = _InFlightEntry(digest=digest, future=future)

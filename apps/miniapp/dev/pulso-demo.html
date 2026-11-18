@@ -3,24 +3,27 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Expressões do Pulso</title>
+  <title>Expressões e formas do Muscle</title>
   <link rel="stylesheet" href="../styles.css">
   <style>
     main { max-width: 390px; margin: auto; padding: 16px; }
     h1 { margin: 0 0 8px; font-size: 22px; }
+    h2 { margin: 20px 0 6px; font-size: 16px; }
     p { font-size: 13px; color: var(--hint); }
     button { padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
-    section { display: grid; grid-template-columns: 76px 40px 32px 112px; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+    section { display: grid; grid-template-columns: 84px 40px 32px 112px; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
     section b { font-size: 13px; }
     section .shape { margin: 0; }
   </style>
 </head>
 <body>
   <main>
-    <h1>Expressões do Pulso</h1>
+    <h1>Expressões do Muscle</h1>
     <button type="button" id="theme">Trocar tema</button>
     <p>Da esquerda para a direita: 40, 32 e 112 px.</p>
     <div id="moods"></div>
+    <h2>Formas por contexto</h2>
+    <div id="forms"></div>
   </main>
   <script src="../src/avatar.js"></script>
   <script>
@@ -30,20 +33,43 @@
       function theme() { document.documentElement.setAttribute('data-scheme', dark ? 'dark' : 'light'); }
       document.getElementById('theme').onclick = function () { dark = !dark; theme(); };
       theme();
-      var names = ['À vontade', 'Foco', 'Alegria', 'Atenção', 'Pensando', 'Cochilo'];
-      ShapeAvatar.MOODS.concat(['dozing']).forEach(function (mood, i) {
+      var stateLabels = {
+        idle: 'À vontade', focused: 'Foco', happy: 'Alegria', alert: 'Atenção',
+        thinking: 'Pensando', listening: 'Ouvindo', understood: 'Entendi',
+        oops: 'Ops', record: 'Recorde', dozing: 'Cochilo'
+      };
+      ShapeAvatar.STATES.forEach(function (state) {
         var row = document.createElement('section');
         var name = document.createElement('b');
-        name.textContent = names[i];
+        name.textContent = stateLabels[state] || state;
         row.appendChild(name);
         [40, 32, 112].forEach(function (size) {
-          var art = ShapeAvatar.create(mood === 'dozing' ? 'idle' : mood, 0.5);
-          if (mood === 'dozing') art.setAttribute('data-dozing', 'true');
+          var art = ShapeAvatar.create(state, 0.5, state === 'dozing' ? 'descanso' : 'base');
+          if (state === 'dozing') art.setAttribute('data-dozing', 'true');
           art.style.width = size + 'px';
           art.style.height = size + 'px';
           row.appendChild(art);
         });
         document.getElementById('moods').appendChild(row);
+      });
+      var formLabels = {
+        base: 'Base', treino: 'Treino', refeicao: 'Refeição',
+        agua: 'Água', revisao: 'Revisão', descanso: 'Descanso'
+      };
+      ShapeAvatar.FORMS.forEach(function (form) {
+        var row = document.createElement('section');
+        var name = document.createElement('b');
+        name.textContent = formLabels[form] || form;
+        row.appendChild(name);
+        [40, 32, 112].forEach(function (size) {
+          var mood = form === 'descanso' ? 'dozing' : form === 'revisao' ? 'happy' : 'idle';
+          var art = ShapeAvatar.create(mood, 0.5, form);
+          if (form === 'descanso') art.setAttribute('data-dozing', 'true');
+          art.style.width = size + 'px';
+          art.style.height = size + 'px';
+          row.appendChild(art);
+        });
+        document.getElementById('forms').appendChild(row);
       });
     })();
   </script>

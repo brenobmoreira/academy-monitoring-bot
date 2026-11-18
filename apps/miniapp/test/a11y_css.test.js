@@ -191,3 +191,33 @@ test('M5-M7 sheet height, scroll margins, tokens, and utility classes are declar
     ruleBody(util);
   }
 });
+
+test('Muscle palette meets WCAG AA contrast in light and dark schemes and styles.css has no conflicting voice ring rules', () => {
+  const Avatar = require('../src/avatar.js');
+  const avatarRoot = /:root\s*\{([^}]*)\}/.exec(Avatar.CSS);
+  const avatarDark = /:root\[data-scheme="dark"\]\s*\{([^}]*)\}/.exec(Avatar.CSS);
+  assert.ok(avatarRoot && avatarDark, 'expected :root and dark rules in ShapeAvatar.CSS');
+
+  const lightSkin = parseHexColor(tokenValue(avatarRoot[1], '--dt-skin'));
+  const lightInk = parseHexColor(tokenValue(avatarRoot[1], '--dt-ink'));
+  const lightLine = parseHexColor(tokenValue(avatarRoot[1], '--dt-line'));
+  const darkSkin = parseHexColor(tokenValue(avatarDark[1], '--dt-skin'));
+  const darkLine = parseHexColor(tokenValue(avatarDark[1], '--dt-line'));
+
+  const lightFaceRatio = contrastRatio(lightInk, lightSkin);
+  const darkFaceRatio = contrastRatio(lightInk, darkSkin);
+  assert.ok(lightFaceRatio >= 4.5, `Muscle light ink/skin contrast ${lightFaceRatio.toFixed(2)} must be >= 4.5`);
+  assert.ok(darkFaceRatio >= 4.5, `Muscle dark ink/skin contrast ${darkFaceRatio.toFixed(2)} must be >= 4.5`);
+
+  const appLightBg = parseHexColor(tokenValue(ruleBody(':root'), '--bg'));
+  const appDarkBg = parseHexColor(tokenValue(ruleBody(':root[data-scheme="dark"]'), '--bg'));
+  assert.ok(contrastRatio(lightLine, appLightBg) >= 4.5, 'Muscle light wave/zz stroke contrast >= 4.5');
+  assert.ok(contrastRatio(darkLine, appDarkBg) >= 4.5, 'Muscle dark wave/zz stroke contrast >= 4.5');
+
+  // .bubble-name highlights rich states (understood, record, oops) and styles.css has no leftover .pl-ring listening rule
+  assert.match(CSS, /\.shape\[data-state="understood"\]\s*~\s*\.bubble\s+\.bubble-name/);
+  assert.match(CSS, /\.shape\[data-state="record"\]\s*~\s*\.bubble\s+\.bubble-name/);
+  assert.match(CSS, /\.shape\[data-state="oops"\]\s*~\s*\.bubble\s+\.bubble-name/);
+  assert.doesNotMatch(CSS, /\.pl-ring/);
+  assert.doesNotMatch(CSS, /\.shape\[data-state="listening"\]/);
+});

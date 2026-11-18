@@ -146,8 +146,11 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 }
 .bubble-name { display: block; font-size: 12px; font-weight: 700; color: var(--accent-text); }
 .bubble-text { margin: 1px 0 0; font-size: 15px; line-height: 1.32; height: 3.96em; overflow-y: auto; overscroll-behavior: contain; }
-.shape[data-state="alert"] ~ .bubble .bubble-name { color: var(--alert); }
-.shape[data-state="happy"] ~ .bubble .bubble-name { color: var(--mint); }
+.shape[data-state="alert"] ~ .bubble .bubble-name,
+.shape[data-state="oops"] ~ .bubble .bubble-name { color: var(--alert); }
+.shape[data-state="happy"] ~ .bubble .bubble-name,
+.shape[data-state="understood"] ~ .bubble .bubble-name,
+.shape[data-state="record"] ~ .bubble .bubble-name { color: var(--mint); }
 .bubble-text.swap { animation: say-in 0.28s ease-out; }
 @keyframes say-in { from { opacity: 0; transform: translateY(3px); } }
 
@@ -699,9 +702,3 @@ details.raw summary { min-height: 44px; display: flex; align-items: center; colo
   font-weight: 600;
 }
 
-/* Listening mascot state name: reuses focused tokens/artwork until custom art arrives. */
-.shape[data-state="listening"] { --pl-c: var(--pl-focused); }
-.shape[data-state="listening"] .st-focused { display: inline; }
-.shape[data-state="listening"] .pl-ring { animation: pl-tick 12s steps(12, end) infinite; }
-.shape[data-state="listening"] .pl-core { opacity: 1; }
-.shape[data-state="listening"] .pl-eyes { transform: scaleY(0.72); }

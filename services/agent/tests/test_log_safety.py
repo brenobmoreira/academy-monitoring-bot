@@ -620,15 +620,85 @@ async def test_a_failing_button_is_logged_by_its_action_not_its_callback_data(ca
 
 
 def test_the_action_of_a_button_is_a_listed_verb_or_other():
-    assert [buttons.action(d) for d in ("ok", "undo:w1,w2", "retry:k", "fix")] == [
+    assert [
+        buttons.action(d) for d in ("ok", "undo:w1,w2", "retry:k", "fix", "vok:abc", "vfix:abc", "vno:abc")
+    ] == [
         "ok",
         "undo",
         "retry",
         "fix",
+        "vok",
+        "vfix",
+        "vno",
     ]
     assert buttons.action(f"{TEXT_SENTINEL}:x") == "other"
     assert buttons.action(TEXT_SENTINEL) == "other"
     assert buttons.action("") == "other"
+
+
+class AllFailingTelegram(FakeTelegram):
+    async def send_message(self, chat_id, text, *, html=False, reply_markup=None, reply_to=None):
+        raise leaky()
+
+    async def answer_callback_query(self, callback_query_id, text=None):
+        raise leaky()
+
+    async def edit_message_reply_markup(self, chat_id, message_id, reply_markup=None):
+        raise leaky()
+
+
+async def test_voice_and_undo_callbacks_log_failing_telegram_calls_without_leaks(captured):
+    from agent.voice_confirm import VoiceConfirmations, sha256_hex
+
+    caplog, stream = captured
+    store = VoiceConfirmations()
+    vid_ok = store.create(CHAT, sha256_hex(TEXT_SENTINEL), message_id=9)
+    vid_fix = store.create(CHAT, sha256_hex(TEXT_SENTINEL), message_id=10)
+    vid_no = store.create(CHAT, sha256_hex(TEXT_SENTINEL), message_id=11)
+
+    sheet = FakeSheet(write_undo=[{"ok": False, "errors": [{"code": "internal", "message": TEXT_SENTINEL}]}])
+    tg = AllFailingTelegram()
+    handler = Handler({CHAT}, FakeBot(TEXT_SENTINEL), tg, sheet=sheet, confirmations=store)
+
+    for idx, (verb, vid, mid) in enumerate(
+        (("vok", vid_ok, 9), ("vfix", vid_fix, 10), ("vno", vid_no, 11)), start=40
+    ):
+        cb = {
+            "update_id": idx,
+            "callback_query": {
+                "id": f"cb-{TEXT_SENTINEL}",
+                "from": {"id": CHAT, "is_bot": False},
+                "data": f"{verb}:{vid}",
+                "message": {
+                    "message_id": mid,
+                    "chat": {"id": CHAT},
+                    "date": 1_700_000_000,
+                    "text": buttons.entendi_text(TEXT_SENTINEL),
+                },
+            },
+        }
+        await handler.handle_update(cb)
+
+    undo_cb = {
+        "update_id": 43,
+        "callback_query": {
+            "id": f"cb-{TEXT_SENTINEL}",
+            "data": "undo:w1",
+            "message": {"message_id": 12, "chat": {"id": CHAT}, "text": TEXT_SENTINEL},
+        },
+    }
+    await handler.handle_update(undo_cb)
+
+    assert_clean(caplog.records, stream.getvalue())
+    assert_no_chat_id(caplog, stream)
+    for vid in (vid_ok, vid_fix, vid_no):
+        assert vid not in caplog.text and vid not in stream.getvalue()
+    assert "could not answer the tap of update 40: tests.test_log_safety.LeakyError" in caplog.text
+    assert "could not remove the buttons of message 9: tests.test_log_safety.LeakyError" in caplog.text
+    assert "could not send the reply of update 40: tests.test_log_safety.LeakyError" in caplog.text
+    assert "could not send the reply of update 43: tests.test_log_safety.LeakyError" in caplog.text
+    assert "Traceback" not in caplog.text and "Traceback" not in stream.getvalue()
+    assert all(r.exc_info is None for r in caplog.records)
 
 
 # chat ids --------------------------------------------------------------------------------------

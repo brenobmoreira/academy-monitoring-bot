@@ -24,7 +24,15 @@ from agent.settings import Settings
 from agent.sheet_client import SheetClient
 from agent.telegram import TelegramClient
 from agent.tools import update_key_scope
-from agent.undo import undo_writes
+from agent.undo import undo_run
+from agent.voice_confirm import (
+    VOICE_CANCEL_OK,
+    ClaimResult,
+    TerminalOutcome,
+    VoiceAction,
+    VoiceConfirmations,
+    voice_toast,
+)
 
 log = logging.getLogger(__name__)
 
@@ -45,11 +53,10 @@ class UpdateDeduplicator:
     """Thread-safe, in-process guard against duplicate Telegram update deliveries.
 
     While an update_id is in flight, a second delivery in the same instance is ignored immediately.
-    Once an update finishes without a transient failure (`reply.transient` is False), its update_id
-    is kept in a bounded FIFO cache so late webhook retries are also ignored. If an update fails
-    transiently (sheet/model/download/send error), it is released without marking completed so a
-    retry can complete the work. An update cut at the hard time limit counts as completed: what it
-    did is unknown, and running it again could undo a second write (/desfazer).
+    Once an update reaches a terminal write outcome (`committed` or `uncertain`), is cut at the
+    hard time limit, or sends a non-transient reply, its update_id is kept in a bounded FIFO cache
+    so late webhook retries are ignored. Transient pre-write failures (sheet down before any write,
+    download failure, or failed send with no write) release update_id so a retry can do the work.
     """
 
     def __init__(self, max_size: int = 1024) -> None:
@@ -217,6 +224,7 @@ class Handler:
         send_reserve_s: float = SEND_RESERVE_S,
         miniapp_url: str = "",
         pending: miniapp.PendingStore | None = None,
+        confirmations: VoiceConfirmations | None = None,
     ) -> None:
         self._allowed = allowed_chat_ids
         self._bot = bot
@@ -232,6 +240,7 @@ class Handler:
         self._send_reserve_s = send_reserve_s
         self._miniapp_url = miniapp_url
         self._pending = pending if pending is not None else miniapp.PendingStore()
+        self._confirmations = confirmations if confirmations is not None else VoiceConfirmations()
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         """Never raises: a webhook that errors makes Telegram resend the same update. A malformed
@@ -275,6 +284,8 @@ class Handler:
         query = update.get("callback_query")
         message = (query.get("message") if query else update.get("message")) or {}
         chat_id = (message.get("chat") or {}).get("id")
+        if chat_id is None and isinstance(query, dict) and isinstance(query.get("from"), dict):
+            chat_id = strict_int(query["from"].get("id"))
         update_id = strict_int(update.get("update_id"))
 
         async def answer(query: dict[str, Any]) -> None:
@@ -293,6 +304,23 @@ class Handler:
         if chat_id in self._allowed:
             notices.append(tell(chat_id))
         await asyncio.gather(*notices)
+
+    async def _deliver(
+        self,
+        chat_id: int,
+        reply: Reply,
+        update_id: int | None,
+        *,
+        reply_to: int | None = None,
+    ) -> bool:
+        """Decides completion from `reply.write_outcome` (§4.3.4) before sending, then sends."""
+        terminal = reply.write_outcome in ("committed", "uncertain")
+        try:
+            await self._send(chat_id, reply, reply_to=reply_to)
+        except Exception as error:
+            log.warning("could not send the reply of update %s: %s", update_id, describe(error))
+            return terminal
+        return terminal or not reply.transient
 
     async def _process_update(self, update: dict[str, Any], update_id: int | None) -> bool:
         if "callback_query" in update:
@@ -316,12 +344,7 @@ class Handler:
                 reply = await self._command(*parsed, chat_id=chat_id, update_id=update_id)
             else:
                 reply = await self._run_bot(text, message, update_id)
-        try:
-            await self._send(chat_id, reply)
-        except Exception as error:
-            log.warning("could not send the reply of update %s: %s", update_id, describe(error))
-            return False
-        return not reply.transient
+        return await self._deliver(chat_id, reply, update_id)
 
     async def _miniapp(self, web_app_data: Any, chat_id: int, update_id: int | None) -> Reply:
         """The form of the Mini App: validated and written without the model or any download."""
@@ -342,27 +365,36 @@ class Handler:
             return Reply(FAILURE, failed=True, transient=True)
 
     async def _run_bot(
-        self, text: str, message: dict[str, Any], update_id: Any, media: list[Media] | None = None
+        self,
+        text: str,
+        message: dict[str, Any],
+        update_id: Any,
+        media: list[Media] | None = None,
+        *,
+        scope_key: str | None = None,
+        use_reply_context: bool = True,
     ) -> Reply:
         chat_id = message["chat"]["id"]
         typing = asyncio.create_task(self._keep_typing(chat_id, strict_int(update_id)))
         await asyncio.sleep(0)  # let the first action go out before the bot starts
         try:
-            context = replied_text(message)
+            context = replied_text(message) if use_reply_context else None
             uid = strict_int(update_id)
-            scope_key = f"tg:{uid}" if uid is not None else None
-            with update_key_scope(scope_key):
+            default_scope = f"tg:{uid}" if uid is not None else None
+            resolved_scope = scope_key if scope_key is not None else default_scope
+            with update_key_scope(resolved_scope):
                 if media:
                     answer = await self._bot.reply(text, user_id=str(chat_id), context=context, media=media)
                 else:
                     answer = await self._bot.reply(text, user_id=str(chat_id), context=context)
             markup = buttons.keyboard(answer.write_ids) if answer.wrote else None
+            transient = answer.failed and answer.outcome not in ("committed", "uncertain")
             return Reply(
                 answer.text,
                 html=True,
                 reply_markup=markup,
                 failed=answer.failed,
-                transient=answer.failed,
+                transient=transient,
                 write_outcome=answer.outcome,
             )
         except Exception as error:
@@ -425,15 +457,40 @@ class Handler:
             log.error("command /%s failed on update %s: %s", name, update_id, describe(error))
             return Reply(FAILURE, failed=True, transient=True)
 
+    async def _answer_callback(self, query: dict[str, Any], toast: str | None, update_id: int | None) -> None:
+        try:
+            await self._telegram.answer_callback_query(str(query.get("id", "")), toast)
+        except Exception as error:
+            log.error("could not answer the tap of update %s: %s", update_id, describe(error))
+
     async def _callback(self, query: dict[str, Any], update_id: int | None = None) -> bool:
         """A tap on an inline button. Always answered (Telegram shows a spinner until then), even
         when the chat is not allowed or the action fails; the failure shows as a toast. A tap can
         replay what the person sent (🔁 runs a stored form), so a failure is logged through
         describe(), with the button's action and never its `callback_data`."""
-        message = query.get("message") or {}
-        chat_id = (message.get("chat") or {}).get("id")
+        raw_message = query.get("message")
+        message = raw_message if isinstance(raw_message, dict) else {}
+        if isinstance(raw_message, dict) and raw_message.get("chat") is not None:
+            chat_id = (raw_message.get("chat") or {}).get("id")
+        else:
+            sender = query.get("from")
+            chat_id = strict_int(sender.get("id")) if isinstance(sender, dict) else None
         message_id = strict_int(message.get("message_id"))
         data = str(query.get("data") or "")
+        verb, _ = buttons.parse(data)
+        if verb in buttons.VOICE_VERBS:
+            if chat_id not in self._allowed:
+                await self._answer_callback(query, None, update_id)
+                return True
+            return await self._voice_button(
+                cast(VoiceAction, verb),
+                data.partition(":")[2],
+                query,
+                raw_message,
+                chat_id,
+                message_id,
+                update_id,
+            )
         toast = None
         completed = True
         try:
@@ -443,11 +500,77 @@ class Handler:
             log.error("button %s failed on update %s: %s", buttons.action(data), update_id, describe(error))
             toast = FAILURE
             completed = False
-        try:
-            await self._telegram.answer_callback_query(str(query.get("id", "")), toast)
-        except Exception as error:
-            log.error("could not answer the tap of update %s: %s", update_id, describe(error))
+        await self._answer_callback(query, toast, update_id)
         return completed
+
+    async def _voice_button(
+        self,
+        verb: VoiceAction,
+        vid: str,
+        query: dict[str, Any],
+        raw_message: Any,
+        chat_id: int,
+        message_id: int | None,
+        update_id: int | None,
+    ) -> bool:
+        """Handles `vok:<vid>`, `vfix:<vid>` and `vno:<vid>` (§4.1), answering the callback first."""
+        claim = self._confirmations.claim(vid, chat_id, verb)
+        transcript: str | None = None
+        if claim.ok and verb in (buttons.VOICE_OK, buttons.VOICE_FIX):
+            expected = claim.entry.text_sha256 if claim.entry is not None else ""
+            transcript = buttons.transcript_from(raw_message, expected)
+            if transcript is None:
+                self._confirmations.expire(vid)
+                claim = ClaimResult(ok=False, state="expired", refusal="expired", entry=claim.entry)
+
+        await self._answer_callback(query, voice_toast(verb, claim), update_id)
+
+        target_mid = (
+            message_id
+            if message_id is not None
+            else (claim.entry.message_id if claim.entry is not None else None)
+        )
+        if not claim.ok:
+            if (claim.refusal in ("unknown", "expired") or claim.state == "expired") and (
+                target_mid is not None and claim.refusal != "wrong_chat"
+            ):
+                await self._remove_keyboard(chat_id, target_mid)
+            return True
+
+        if verb == buttons.VOICE_NO:
+            if target_mid is not None:
+                await self._remove_keyboard(chat_id, target_mid)
+            return await self._deliver(chat_id, Reply(VOICE_CANCEL_OK), update_id, reply_to=target_mid)
+
+        assert transcript is not None
+        if verb == buttons.VOICE_FIX:
+            text, markup = buttons.voice_fix_prompt(transcript)
+            return await self._deliver(
+                chat_id,
+                Reply(text, html=True, reply_markup=markup),
+                update_id,
+                reply_to=target_mid,
+            )
+
+        if target_mid is not None:
+            await self._remove_keyboard(chat_id, target_mid)
+        try:
+            reply = await self._run_bot(
+                transcript,
+                {"chat": {"id": chat_id}},
+                update_id,
+                scope_key=f"tg:voice:{vid}",
+                use_reply_context=False,
+            )
+        except BaseException:
+            self._confirmations.finish(vid, "uncertain")
+            raise
+        deadline_at = MESSAGE_DEADLINE_AT.get()
+        cut = deadline_at is not None and asyncio.get_running_loop().time() >= deadline_at and reply.failed
+        outcome: TerminalOutcome = "uncertain" if (reply.write_outcome == "uncertain" or cut) else "done"
+        self._confirmations.finish(vid, outcome)
+        delivered = await self._deliver(chat_id, reply, update_id, reply_to=target_mid)
+        return delivered or outcome == "uncertain"
 
     async def _button(
         self,
@@ -464,24 +587,24 @@ class Handler:
         if verb == buttons.UNDO:
             if self._sheet is None:
                 raise RuntimeError("this handler has no sheet API")
-            text, sheet_down = await undo_writes(self._sheet, ids)
-            if not sheet_down:  # otherwise keep the button for another try
+            run = await undo_run(self._sheet, ids)
+            if not run.sheet_down:  # otherwise keep the button for another try
                 await self._remove_keyboard(chat_id, message_id)
-            await self._send(chat_id, Reply(text), reply_to=message_id)
-            return not sheet_down
+            reply = Reply(run.text, transient=run.sheet_down, write_outcome=run.outcome)
+            return await self._deliver(chat_id, reply, update_id, reply_to=message_id)
         if verb == buttons.RETRY:
             if self._sheet is None:
                 raise RuntimeError("this handler has no sheet API")
             sheet = cast(miniapp.MiniappSheet, self._sheet)
             reply = await miniapp.retry(sheet, ids[0] if ids else "", self._pending, chat_id)
-            if not reply.transient:  # otherwise keep the button for another try
+            if reply.write_outcome in ("committed", "uncertain") or not reply.transient:
                 await self._remove_keyboard(chat_id, message_id)
-            await self._send(chat_id, reply, reply_to=message_id)
-            return not reply.transient
+            return await self._deliver(chat_id, reply, update_id, reply_to=message_id)
         if verb == buttons.FIX:
             text, markup = buttons.fix_prompt(message.get("text"))
-            await self._send(chat_id, Reply(text, reply_markup=markup), reply_to=message_id)
-            return True
+            return await self._deliver(
+                chat_id, Reply(text, reply_markup=markup), update_id, reply_to=message_id
+            )
         log.warning("unknown button data of %d characters on update %s", len(data), update_id)
         return True
 
@@ -515,14 +638,18 @@ class Handler:
 def replied_text(message: dict[str, Any]) -> str | None:
     """The text of the bot message this one replies to (swipe-reply or ✏️ Corrigir), the only
     context the agent gets from earlier messages besides the sheet's recent writes. A reply to
-    the user's own message, or to one without text, gives none."""
+    the user's own message, to the voice fix prompt (§4.1), or to one without text gives none."""
     replied = message.get("reply_to_message")
     author = replied.get("from") if isinstance(replied, dict) else None
     # `is True`: a string ("false") or a number in `is_bot` does not make the author a bot.
     if not isinstance(replied, dict) or not isinstance(author, dict) or author.get("is_bot") is not True:
         return None
     text = replied.get("text")
-    return text if isinstance(text, str) and text.strip() else None
+    if not isinstance(text, str) or not text.strip():
+        return None
+    if text.splitlines()[0].strip() == buttons.VOICE_FIX_PROMPT:
+        return None
+    return text
 
 
 def build_handler(
@@ -530,6 +657,7 @@ def build_handler(
     http: httpx.AsyncClient,
     *,
     deduplicator: UpdateDeduplicator | None = None,
+    confirmations: VoiceConfirmations | None = None,
 ) -> Handler:
     sheet = SheetClient(settings.SHEET_API_URL, settings.SHEET_API_KEY.get_secret_value(), http)
     bot = Bot(
@@ -551,4 +679,5 @@ def build_handler(
         message_deadline_s=settings.MESSAGE_DEADLINE_S,
         deduplicator=deduplicator,
         miniapp_url=settings.MINIAPP_URL,
+        confirmations=confirmations,
     )

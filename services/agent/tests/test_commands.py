@@ -420,3 +420,130 @@ async def test_ficha_and_progressao_show_last_work_and_progression_suggestions()
     assert "sugerir 62,5 kg" in prog_text
     assert "Últimas cargas registradas na ficha:" in prog_text
     assert "Supino inclinado (Upper, 18/09): 60 kg × 10 (RIR 1)" in prog_text
+
+
+# ---- /app with VoiceLink (voice spec §6.4, §7.1, §13 C7) ------------------------------------
+
+
+def _decode_fragment(url: str) -> dict[str, Any]:
+    import base64
+    import zlib
+
+    packed = url.split("&c=", 1)[1]
+    raw_bytes = base64.urlsafe_b64decode(packed + "=" * (-len(packed) % 4))
+    return json.loads(zlib.decompress(raw_bytes, -15).decode("utf-8"))
+
+
+async def test_app_with_and_without_voice_link_and_end_to_end_tg_link_exchange():
+    from datetime import UTC, datetime, timedelta
+
+    from agent.auth import (
+        VOICE,
+        AllowedChats,
+        AuthError,
+        ConfigRevocations,
+        LinkCodes,
+        Sessions,
+        SignIn,
+        TelegramDirectory,
+        derive_keys,
+    )
+    from agent.commands import VoiceLink
+
+    miniapp_url = "https://example.github.io/app/"
+    voice_origin = "https://voice.example.com"
+    secret = "voice-auth-secret-sentinel-32bytes!"
+    t0 = datetime(2026, 9, 21, 15, 0, tzinfo=UTC)
+
+    # 1. Without VoiceLink: buttons have no vu/vc/vx.
+    plain_reply = await COMMANDS["app"].run(
+        Context(sheet=FakeSheet(catalog=[catalog()]), today=TODAY, chat_id=42, miniapp_url=miniapp_url), ""
+    )
+    assert plain_reply.reply_markup is not None
+    for btn in plain_reply.reply_markup["keyboard"][0]:
+        decoded = _decode_fragment(btn["web_app"]["url"])
+        assert "vu" not in decoded and "vc" not in decoded and "vx" not in decoded
+
+    # 2. With VoiceLink: /app issues ONE code for ctx.chat_id and embeds vu/vc/vx in both buttons.
+    keys = derive_keys(secret)
+    directory = TelegramDirectory(keys, {42, 7})
+    allowed = AllowedChats({42, 7})
+    codes = LinkCodes(keys, directory, allowed, ttl_s=900)
+    voice = VoiceLink(api_url=voice_origin, codes=codes, clock=lambda: t0)
+
+    reply = await COMMANDS["app"].run(
+        Context(
+            sheet=FakeSheet(catalog=[catalog()]),
+            today=TODAY,
+            chat_id=42,
+            miniapp_url=miniapp_url,
+            voice=voice,
+        ),
+        "",
+    )
+    assert reply.reply_markup is not None
+    w_cat = _decode_fragment(reply.reply_markup["keyboard"][0][0]["web_app"]["url"])
+    f_cat = _decode_fragment(reply.reply_markup["keyboard"][0][1]["web_app"]["url"])
+    assert w_cat["vu"] == f_cat["vu"] == voice_origin
+    assert w_cat["vc"] == f_cat["vc"]  # one code issued per /app
+    assert w_cat["vx"] == f_cat["vx"] == int(t0.timestamp()) + 900
+    assert str(42) not in w_cat["vc"]  # opaque ref, never raw chat_id
+
+    # 3. End-to-end verification on the voice service's tg_link provider:
+    # A service directory/authorizer that only knows chat 7 refuses chat 42's code:
+    only_7_codes = LinkCodes(keys, TelegramDirectory(keys, {7}), AllowedChats({7}), ttl_s=900)
+    with pytest.raises(AuthError) as forbidden_err:
+        only_7_codes.verify(w_cat["vc"], t0)
+    assert forbidden_err.value.code == "forbidden"
+
+    # At vx (expired): refused with auth_expired before burning single-use nonce:
+    service_codes = LinkCodes(keys, directory, allowed, ttl_s=900)
+    sessions = Sessions(keys, directory, allowed, ConfigRevocations({}), ttl_s=43_200)
+    sign_in = SignIn([service_codes], sessions)
+    with pytest.raises(AuthError) as exp_err:
+        sign_in.exchange("tg_link", w_cat["vc"], datetime.fromtimestamp(w_cat["vx"], UTC))
+    assert exp_err.value.code == "auth_expired"
+
+    # Just before vx: exchanges cleanly for chat 42 ONLY, and single-use blocks replay:
+    grant = sign_in.exchange("tg_link", w_cat["vc"], t0 + timedelta(seconds=899))
+    principal = sessions.verify(grant.session, VOICE, t0 + timedelta(seconds=900))
+    assert principal.chat_id == 42
+    assert principal.subject == "42"
+    with pytest.raises(AuthError) as replay_err:
+        sign_in.exchange("tg_link", w_cat["vc"], t0 + timedelta(seconds=899))
+    assert replay_err.value.code == "credential_used"
+
+
+async def test_app_reports_dropped_voice_label_when_link_budget_drops_voice():
+    from datetime import UTC, datetime
+
+    from agent.auth import AllowedChats, LinkCodes, TelegramDirectory, derive_keys
+    from agent.commands import VoiceLink
+
+    keys = derive_keys("voice-auth-secret-sentinel-32bytes!")
+    codes = LinkCodes(keys, TelegramDirectory(keys, {42}), AllowedChats({42}), ttl_s=900)
+    voice = VoiceLink("https://voice.example.com", codes, clock=lambda: datetime(2026, 9, 21, tzinfo=UTC))
+
+    # Craft a miniapp_url length where the bare catalog fits without voice, but exceeds 4096 with voice:
+    from agent import miniapp
+
+    cat = catalog()
+    bare = {**cat["result"], "plan": [{k: v for k, v in r.items() if k != "prescription"} for r in PLAN]}
+    without_len = max(
+        len(b["web_app"]["url"]) for b in miniapp.keyboard_markup("https://x.dev/", bare)[0]["keyboard"][0]
+    )
+    pad = 4096 - without_len
+    tight_url = "https://x.dev/" + "a" * pad
+
+    reply = await COMMANDS["app"].run(
+        Context(
+            sheet=FakeSheet(catalog=[cat]),
+            today=TODAY,
+            chat_id=42,
+            miniapp_url=tight_url,
+            voice=voice,
+        ),
+        "",
+    )
+    assert reply.reply_markup is not None
+    assert "Para caber no link, deixei de fora: prescrições, voz." in reply.text

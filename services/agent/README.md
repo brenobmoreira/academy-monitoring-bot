@@ -36,6 +36,11 @@ Telegram ─webhook─▶ main.telegram_webhook (Functions Framework)  ┐
 | `main.py` (+ root `main.py` shim) | Functions Framework entry — Cloud Run functions; `/remind` goes to `reminder.py`, any other path is the webhook |
 | `asgi.py` | ASGI app — uvicorn in any container; `POST /remind`, `GET /healthz` (`make serve`) |
 | `poll.py` | Local long polling (`uv run agent-poll`, `make poll`) |
+| `transcribe.py` / `budget.py` | Audio-to-text through Gemini (`Transcriber`, `MeteredClient`, `implied_audio_tokens`) and per-principal / per-process daily token budgets (`MemoryBudget`) |
+| `auth.py` | Sign-in providers (`LinkCodes`, `TelegramInitData`), opaque subject refs, `TelegramDirectory`, `AllowedChats`, `ConfigRevocations` and `Sessions` |
+| `voice_limits.py` | Sliding-window `RateLimiter`, `ExchangeLimiter`, `ConcurrencyGate` and digest-first `IdempotencyCache` |
+| `voice_settings.py` | `AuthSettings` mixin and `VoiceSettings` (standalone voice service loader, independent of sheet and bot settings) |
+| `voice_api.py` / `voice_asgi.py` | Standalone ASGI voice service (`uvicorn agent.voice_asgi:app`, `build_voice_service`): `POST /v1/auth/sessions`, `POST /v1/voice/transcriptions`, `GET /healthz` |
 
 ## Context between messages
 
@@ -362,6 +367,89 @@ Refresh `requirements.txt` whenever dependencies change (the buildpack installs 
 ```bash
 uv export --no-dev --no-emit-project --no-hashes --format requirements-txt -o requirements.txt
 ```
+
+## Voice service (`agent.voice_asgi:app`)
+
+A standalone ASGI service for Mini App speech-to-text (`docs/specs/2026-11-14-voice-input-design.md`,
+§5 and §6), separate from `agent.asgi:app`. It never imports the bot, handler, Telegram client or
+Sheet client, and requires no `SHEET_API_*` or `LLM_*` configuration.
+
+Routes:
+- `POST /v1/auth/sessions` — exchanges a one-time link code (`tg_link`) or Telegram Mini App
+  `initData` (`tg_init_data`, enabled only when `TELEGRAM_BOT_TOKEN` is set) for a bearer session
+- `POST /v1/voice/transcriptions` — streams raw audio bytes in, returns `{"v": 1, "id": "...", "text": "..."}`
+- `OPTIONS` on both — CORS preflight restricted to `VOICE_ALLOWED_ORIGINS`
+- `GET /healthz` — liveness (`200 ok`)
+
+Run locally from `services/agent`:
+
+```bash
+export APP_AUTH_SECRET="$(openssl rand -hex 32)"
+export TRANSCRIBE_API_KEY="<gemini-api-key>"
+export ALLOWED_CHAT_IDS="<comma-separated-chat-ids>"
+export VOICE_ALLOWED_ORIGINS="https://example.github.io"
+# Optional: enables kind="tg_init_data" on POST /v1/auth/sessions
+# export TELEGRAM_BOT_TOKEN="<bot-token>"
+
+uv run uvicorn agent.voice_asgi:app --host 0.0.0.0 --port 8080
+```
+
+`VoiceSettings` reads the same sources and precedence as `Settings` (environment → `.env` →
+`settings.yaml` → defaults), rejects secrets in YAML, registers all secrets for log masking and
+installs `logs.install()`:
+
+| Variable | Default / Required | Notes |
+|----------|--------------------|-------|
+| `VOICE_API_ENABLED` | `true` | `false` answers `503 disabled` on `/v1/*` without requiring keys or origins |
+| `APP_AUTH_SECRET` | required (≥ 32 bytes) | secret; shared with the bot that issues `/app` link codes |
+| `TRANSCRIBE_MODEL` | `gemini/gemini-3.8-flash` | `gemini/<model>` or `vertex_ai/<model>` only |
+| `TRANSCRIBE_API_KEY` | required for `gemini/*` | secret (unless `GEMINI_API_KEY` / `GOOGLE_API_KEY` is set) |
+| `ALLOWED_CHAT_IDS` | required | comma-separated integers checked at exchange and on every request |
+| `VOICE_ALLOWED_ORIGINS` | required | comma-separated `https://host[:port]` origins (no path, query or `*`) |
+| `TELEGRAM_BOT_TOKEN` | optional | secret; when omitted, `tg_init_data` is disabled and only `tg_link` is registered |
+| `APP_SESSION_NOT_BEFORE` | empty | optional `<chat_id>:<unix seconds>,...` per-person revocation |
+| `TIMEZONE` | `America/Sao_Paulo` | day boundary for token budgets and `Retry-After` on `budget_exhausted` |
+| `VOICE_MAX_BYTES` / `VOICE_MAX_SECONDS` | `1500000` / `90` | request body cap and duration cap (header + post-transcription audio tokens) |
+| `VOICE_RATE_PER_MIN` / `VOICE_RATE_PER_DAY` | `6` / `60` | per-principal transcription request sliding windows |
+| `VOICE_MAX_CONCURRENT` | `4` | per-process concurrent transcriptions (`429`, `Retry-After: 2` above it) |
+| `VOICE_IDEMPOTENCY_TTL_S` | `300` | seconds finished `200` and `no_speech` outcomes stay in `IdempotencyCache` |
+| `EXCHANGE_RATE_PER_MIN` / `EXCHANGE_RATE_PER_DAY` | `30` / `20` | exchange limit per process per minute and per principal per day |
+| `VOICE_DAILY_TOKENS` / `VOICE_GLOBAL_DAILY_TOKENS` | `120000` / `500000` | approximate in-memory token budgets per day in `TIMEZONE` |
+
+### Owner deploy checklist (Cloud Run service, spec §5.1)
+
+Deploying the voice service is the owner's action; none of the items below is a hard single-instance
+or zero-overshoot guarantee:
+
+1. **`max-instances=1`.** Rate limits, token budgets, single-use credential sets (`UsedSet`) and the
+   idempotency cache live in process memory. Cloud Run treats `max-instances=1` as a target and
+   **can briefly run more instances during traffic spikes**; each extra instance starts with empty
+   counters and sets.
+2. **Project spend cap** on the transcription key's Gemini project (AI Studio billing). It takes
+   **about 10 minutes** to take effect after it is reached, so spending continues during that
+   window.
+3. **Billing budget with an e-mail alert** on the same project, set below the spend cap, for early
+   warning.
+4. **Secrets from Secret Manager:** `APP_AUTH_SECRET`, `TRANSCRIBE_API_KEY` and (when `tg_init_data`
+   is used) `TELEGRAM_BOT_TOKEN`.
+5. **Scale to zero is allowed.** Each cold start and each midnight in `TIMEZONE` resets in-memory
+   rate windows, daily token counters, single-use sets (within their 15 min / 300 s expiry windows)
+   and the 5-minute idempotency cache.
+
+### What actually limits spending (overshoot windows, spec §5.1)
+
+| Layer | Acts | Overshoot |
+| --- | --- | --- |
+| Per-principal rate limits and concurrency gate (§5.6) | per request, per instance | none within one warm instance; multiplied by the number of instances actually running |
+| In-process token budgets (§5.6) | per attempt, per instance, per day | none above the budget within one counter life, since each attempt reserves the most it can cost (`E`); renewed at every midnight and every cold start; multiplied by the instances running |
+| Project spend cap | at the provider | whatever is spent in the ~10 minutes after the cap is reached |
+
+Budgets hold per day (in `TIMEZONE`), per instance and per counter life (cold start or midnight to
+the next of either): `≤ 120 k` counted tokens per principal and `≤ 500 k` across all principals per
+counter life (`exposure(day) ≤ 500 k × Σ over instances (1 + cold starts that day)`). A ~10-minute
+spend-cap window that crosses midnight covers two days and can spend up to `2 × 500 k` per warm
+instance (`2 × 120 k` per principal), plus `500 k` for any cold start or extra instance inside that
+window.
 
 ## Smoke test
 

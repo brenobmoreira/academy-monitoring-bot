@@ -19,6 +19,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
@@ -40,7 +41,7 @@ jobs:
         run: |
           rm -rf _site
           mkdir -p _site/assets _site/data _site/src
-          cp apps/miniapp/index.html _site/index.html
+          grep -v 'src="dev/voice-stub.js"' apps/miniapp/index.html > _site/index.html
           cp apps/miniapp/styles.css _site/styles.css
           cp apps/miniapp/assets/shape.svg _site/assets/shape.svg
           cp apps/miniapp/data/foods.taco.json _site/data/foods.taco.json
@@ -53,8 +54,7 @@ jobs:
             apps/miniapp/src/muscle-motion.js \
             apps/miniapp/src/voice.js \
             _site/src/
-          : > _site/.nojekyll
-          test ! -d _site/dev && test ! -d _site/test && test ! -f _site/motion-demo.html && test -f _site/index.html && test -f _site/.nojekyll
+          test ! -d _site/dev && test ! -d _site/test && test ! -f _site/motion-demo.html && test -s _site/index.html && ! grep -q 'dev/voice-stub.js' _site/index.html
 
       - uses: actions/configure-pages@v6
 

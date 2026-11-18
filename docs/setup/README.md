@@ -159,8 +159,10 @@ the chat.
 O bundle estático de produção da Mini App (`apps/miniapp/`) é publicado via GitHub Pages usando o workflow [`.github/workflows/pages.yml`](../../.github/workflows/pages.yml):
 
 1. No GitHub do repositório → **Settings → Pages → Build and deployment → Source**, selecione **GitHub Actions**.
-2. Rode o workflow **Deploy Mini App (Pages)** manualmente em **Actions → Deploy Mini App (Pages) → Run workflow** para o primeiro deploy (ou aguarde um push na branch `main` alterando `apps/miniapp/**`).
+2. Rode o workflow **Deploy Mini App (Pages)** manualmente em **Actions → Deploy Mini App (Pages) → Run workflow** (a partir da branch `main`) para o primeiro deploy, ou aguarde um push na branch `main` alterando `apps/miniapp/**`.
 3. Configure `MINIAPP_URL=https://<owner>.github.io/<repo>/` no serviço do agente (localmente no `.env` ou via `--update-env-vars MINIAPP_URL="https://<owner>.github.io/<repo>/"` no Cloud Run). Caso utilize o serviço `fitness-voice`, configure `VOICE_ALLOWED_ORIGINS=https://<owner>.github.io` — **apenas a origem (`scheme://host`), sem path ou barra final**.
+
+> **Nota:** Abrir a URL pública do GitHub Pages diretamente no navegador fora do Telegram (sem o fragmento `#c=` enviado pelo comando `/app`) não carrega `dev/sample-catalog.json` por design, pois os arquivos de `dev/` ficam fora do bundle de produção.
 
 ## Serviço de Voz da Mini App (Opcional — Cloud Run)
 

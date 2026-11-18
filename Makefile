@@ -8,12 +8,13 @@ HOST ?= 127.0.0.1
 PORT ?= 8080
 VOICE_PORT ?= 8081
 E2E_ARGS ?=
+DOCTOR_ARGS ?=
 KIND ?= daily
 CLASP ?= clasp
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install sync-reqs test test-sheet test-miniapp test-agent lint fmt e2e poll serve serve-voice \
+.PHONY: help install sync-reqs test test-sheet test-miniapp test-agent lint fmt e2e doctor poll serve serve-voice \
 	webhook-set webhook-info webhook-delete commands push-sheet remind
 
 help: ## List the targets
@@ -48,6 +49,9 @@ fmt: ## Format and autofix the agent (ruff format, ruff check --fix)
 
 e2e: ## Local end-to-end run, scripted provider (extra flags: E2E_ARGS="--server uvicorn")
 	cd $(AGENT) && uv run python ../../e2e/run.py $(E2E_ARGS)
+
+doctor: ## Run pre-flight checks against configured .env (DOCTOR_ARGS="--env .env --mode poll")
+	cd $(AGENT) && uv run agent-doctor $(DOCTOR_ARGS)
 
 poll: ## Run the bot with local long polling (needs services/agent/.env; delete the webhook first)
 	cd $(AGENT) && uv run agent-poll

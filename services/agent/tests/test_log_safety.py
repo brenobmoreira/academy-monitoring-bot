@@ -797,3 +797,126 @@ def test_describe_prints_the_transcription_error_codes():
         "disabled",
     ):
         assert logs.describe(TranscribeError(code)).endswith(f"[code={code}]"), code
+
+
+# chat voice path (§10.3, task C4d) ---------------------------------------------------------------
+
+
+async def test_chat_voice_path_never_logs_audio_transcript_caption_chat_id_or_leaky_errors(captured, capsys):
+    from agent.bot import VOICE_FAILED
+    from agent.voice_confirm import VoiceConfirmations
+
+    from .fakes import file
+
+    caplog, stream = captured
+    caption_sentinel = "SENTINELA-LEGENDA-5d2e"
+    padded_audio = AUDIO_SENTINEL * ((MIN_BODY_BYTES // len(AUDIO_SENTINEL)) + 2)
+    padded_b64 = base64.b64encode(padded_audio).decode("ascii")
+    voice_item = {
+        "file_id": "v-sec",
+        "duration": 9,
+        "mime_type": "audio/ogg",
+        "file_size": len(padded_audio),
+    }
+
+    budget = MemoryBudget(principal_daily=200_000, global_daily=500_000, timezone="America/Sao_Paulo")
+    tx_settings = TranscribeSettings(
+        TRANSCRIBE_MODEL="gemini/gemini-3.8-flash",
+        TRANSCRIBE_API_KEY=SecretStr("secret-transcribe-key"),
+        TRANSCRIBE_RETRIES=0,
+    )
+
+    # 1. Success -> Entendi -> vok -> Bot raises LeakyError: no sentinel or chat_id anywhere.
+    tx_ok = Transcriber(
+        tx_settings,
+        budget,
+        client=FakeLiteLLMClient([text_response(TEXT_SENTINEL)]),
+        clock=lambda: NOW,
+    )
+    tg = FakeTelegram(files=file("v-sec", padded_audio, "voice/sec.oga"))
+    confirmations = VoiceConfirmations()
+    handler = Handler(
+        {CHAT},
+        FakeBot(error=leaky()),
+        tg,
+        confirmations=confirmations,
+        transcriber=tx_ok,
+    )
+    await handler.handle_update(
+        {
+            "update_id": 601,
+            "message": {
+                "message_id": 7,
+                "chat": {"id": CHAT},
+                "voice": voice_item,
+                "caption": caption_sentinel,
+            },
+        }
+    )
+    _, entendi_msg = tg.sent[-1]
+    vid = tg.options[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].partition(":")[2]
+    await handler.handle_update(
+        {
+            "update_id": 602,
+            "callback_query": {
+                "id": "cb-602",
+                "data": f"vok:{vid}",
+                "message": {
+                    "message_id": 1,
+                    "date": 1_700_000_000,
+                    "chat": {"id": CHAT},
+                    "text": entendi_msg,
+                },
+            },
+        }
+    )
+
+    # 2. Provider LeakyError inside Transcriber -> VOICE_FAILED, logged safely.
+    tx_fail = Transcriber(
+        tx_settings,
+        budget,
+        client=FakeLiteLLMClient([leaky()]),
+        clock=lambda: NOW,
+    )
+    tg_fail = FakeTelegram(files=file("v-sec", padded_audio, "voice/sec.oga"))
+    await Handler({CHAT}, FakeBot(), tg_fail, transcriber=tx_fail).handle_update(
+        {
+            "update_id": 603,
+            "message": {"chat": {"id": CHAT}, "voice": voice_item, "caption": caption_sentinel},
+        }
+    )
+    assert tg_fail.sent == [(CHAT, VOICE_FAILED)]
+
+    # 3. Sending Entendi fails with LeakyError -> entry deleted, logged safely.
+    tx_send_fail = Transcriber(
+        tx_settings,
+        budget,
+        client=FakeLiteLLMClient([text_response(TEXT_SENTINEL)]),
+        clock=lambda: NOW,
+    )
+    fail_confirmations = VoiceConfirmations()
+    tg_send_fail = FakeTelegram(files=file("v-sec", padded_audio, "voice/sec.oga"), error=leaky())
+    await Handler(
+        {CHAT},
+        FakeBot(),
+        tg_send_fail,
+        confirmations=fail_confirmations,
+        transcriber=tx_send_fail,
+    ).handle_update(
+        {
+            "update_id": 604,
+            "message": {"chat": {"id": CHAT}, "voice": voice_item, "caption": caption_sentinel},
+        }
+    )
+    assert len(fail_confirmations) == 0
+
+    std = capsys.readouterr()
+    combined_out = "\n".join([stream.getvalue(), caplog.text, std.out, std.err])
+    assert_clean(caplog.records, combined_out)
+    assert_no_chat_id(caplog, stream)
+    for extra in (caption_sentinel, padded_b64, "Traceback", str(CHAT)):
+        assert extra not in combined_out
+        for record in caplog.records:
+            assert extra not in record.getMessage()
+            assert extra not in repr(record.args)
+            assert record.exc_info is None

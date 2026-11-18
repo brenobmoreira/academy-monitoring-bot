@@ -49,6 +49,12 @@ MODEL_FAILED_NOTHING_WRITTEN = "⚠ O modelo não respondeu agora. Nada foi grav
 WRITE_UNCERTAIN = "⚠ Não sei se a planilha gravou: a resposta não chegou. Confira com /hoje antes de repetir."
 SHEET_FAILED = "⚠ A planilha não respondeu. Tente de novo em alguns minutos."
 MEDIA_UNREADABLE = "Não consegui ler o áudio/foto com o modelo configurado; envie em texto."
+MEDIA_DISABLED = "Este bot está sem leitura de áudio e foto; envie em texto."
+VOICE_FAILED = "⚠ Não consegui transcrever o áudio agora. Tente de novo ou envie em texto."
+VOICE_EMPTY = "Não ouvi nada no áudio. Tente de novo, mais perto do microfone."
+VOICE_FORMAT = "Não leio esse formato de áudio; grave pelo 🎤 do Telegram ou envie em texto."
+VOICE_BUDGET = "Hoje já transcrevi o máximo de áudios. Envie em texto."
+VOICE_TOO_LONG = "O áudio passou de 1min30. Envie um mais curto ou em partes."
 
 INSTRUCTION = """\
 Você registra o acompanhamento físico de uma pessoa (diário, alimentação e treino) numa planilha \
@@ -129,12 +135,11 @@ responder a uma mensagem do bot (abaixo), ela indica a gravação e tem priorida
 15. Se o contexto não deixar claro a que gravação a mensagem se refere (recent vazio, várias \
 possíveis, exercício que não está lá numa correção), não invente: siga a regra 10.
 
-Áudio e foto:
-16. Mensagem com áudio: transcreva o que foi dito e aplique as mesmas regras ao texto. Com foto \
-(balança, tela de app de passos, sono ou treino): leia os valores mostrados e aplique as mesmas \
-regras. Nunca adivinhe um dígito ilegível ou um trecho inaudível: grave o resto e diga o que não \
-deu para ler. Se a mensagem indica áudio ou foto anexados mas você não recebeu o conteúdo, não \
-grave nada e responda que não conseguiu ler o áudio/foto.
+Foto:
+16. Mensagem com foto (balança, tela de app de passos, sono ou treino): leia os valores mostrados \
+e aplique as mesmas regras. Nunca adivinhe um dígito ilegível: grave o resto e diga o que não deu \
+para ler. Se a mensagem indica foto anexada mas você não recebeu o conteúdo, não grave nada e \
+responda que não conseguiu ler a foto.
 {reply_context}"""
 
 # The replied-to message is our own reply, at most one Telegram message long; the cap only keeps

@@ -14,20 +14,29 @@ from typing import Any
 
 import httpx
 
+from agent.budget import MemoryBudget
 from agent.handler import UpdateDeduplicator, build_handler, strict_int
 from agent.logs import describe
 from agent.settings import Settings
+from agent.voice_confirm import VoiceConfirmations
 
 log = logging.getLogger(__name__)
 
 SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 _DEDUPLICATOR = UpdateDeduplicator()
+_CONFIRMATIONS = VoiceConfirmations()
 
 
 @functools.cache
 def get_settings() -> Settings:
     """Read once per process: a restart is what applies changed settings."""
     return Settings.load()
+
+
+@functools.cache
+def _get_budget(principal_daily: int, global_daily: int, timezone: str) -> MemoryBudget:
+    """Process-wide voice token budget (§5.6), shared across webhook requests."""
+    return MemoryBudget(principal_daily=principal_daily, global_daily=global_daily, timezone=timezone)
 
 
 def is_authorized(settings: Settings, given: str | None) -> bool:
@@ -45,7 +54,18 @@ class HandlerNotBuilt(Exception):
 async def handle_update(settings: Settings, update: dict[str, Any]) -> None:
     async with httpx.AsyncClient() as http:
         try:
-            handler = build_handler(settings, http, deduplicator=_DEDUPLICATOR)
+            budget = _get_budget(
+                settings.VOICE_DAILY_TOKENS,
+                settings.VOICE_GLOBAL_DAILY_TOKENS,
+                settings.TIMEZONE,
+            )
+            handler = build_handler(
+                settings,
+                http,
+                deduplicator=_DEDUPLICATOR,
+                confirmations=_CONFIRMATIONS,
+                budget=budget,
+            )
         except Exception as error:
             raise HandlerNotBuilt from error
         await handler.handle_update(update)

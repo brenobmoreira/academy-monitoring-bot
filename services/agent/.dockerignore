@@ -1,0 +1,30 @@
+# Version control
+.git/
+.github/
+
+# Environment files and secrets (never leak into build context)
+.env
+.env.*
+*.local
+*.local.*
+!.env.example
+
+# Python virtual environment and bytecode
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test suite and cache (not needed in production container image)
+tests/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Cloud Build and deployment metadata
+.gcloudignore
+cloudbuild*.yaml

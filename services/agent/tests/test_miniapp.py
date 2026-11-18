@@ -841,3 +841,138 @@ def test_the_pending_store_is_bounded_and_expires():
     now[0] = 101
     assert store.get(keys[24], 42) is None
     store.discard("missing")
+
+
+# ---- voice text payload and catalog voice keys (voice spec §4.2, §7.1, §13 C7) --------------
+
+TEXT_VOICE: dict[str, Any] = {
+    "v": 1,
+    "t": "text",
+    "id": SID,
+    "src": "voice",
+    "text": "almoço 150 g de arroz e 120 g de frango",
+}
+
+VOICE_KEYS: dict[str, Any] = {
+    "vu": "https://voice.example.com",
+    "vc": "c1." + "A" * 84 + "." + "B" * 43,
+    "vx": 1_800_000_900,
+}
+
+
+def test_valid_voice_text_payload_parses_and_trims_without_formula_restriction():
+    parsed, errors = parse_payload(raw({**TEXT_VOICE, "text": "  +2k passos\ndormi 7h30  "}), TODAY)
+    assert errors == []
+    assert isinstance(parsed, miniapp.TextPayload)
+    assert parsed.t == "text"
+    assert parsed.src == "voice"
+    assert parsed.id == SID
+    assert parsed.text == "+2k passos\ndormi 7h30"
+
+    # Exactly 2000 Unicode code points fits:
+    exact, errors = parse_payload(raw({**TEXT_VOICE, "text": "a" * 2000}), TODAY)
+    assert errors == [] and isinstance(exact, miniapp.TextPayload) and len(exact.text) == 2000
+
+
+@pytest.mark.parametrize("bad_text", ["", "   ", "\n\n"])
+def test_voice_text_payload_rejects_empty_text(bad_text):
+    errors = errors_of({**TEXT_VOICE, "text": bad_text})
+    assert errors == ["text: texto vazio"]
+
+
+@pytest.mark.parametrize("ctrl", ["\x00", "\t", "\r", "\x1f", "\x7f", "\x85"])
+def test_voice_text_payload_rejects_control_characters_even_at_edges(ctrl):
+    errors = errors_of({**TEXT_VOICE, "text": f"{ctrl}almoço{ctrl}"})
+    assert errors == ["text: texto contém caracteres de controle inválidos"]
+
+
+def test_voice_text_payload_enforces_2000_char_and_4096_byte_limits():
+    too_many_chars = {**TEXT_VOICE, "text": "a" * 2001}
+    assert len(raw(too_many_chars).encode("utf-8")) <= 4096
+    assert errors_of(too_many_chars) == ["text: máximo 2000 caracteres, recebido 2001"]
+
+    too_many_bytes = raw({**TEXT_VOICE, "text": "🏋" * 1020})
+    assert len(too_many_bytes.encode("utf-8")) > 4096
+    assert errors_of(too_many_bytes) == ["dados passam de 4096 bytes"]
+
+
+def test_voice_text_payload_validates_required_null_extra_and_src_fields():
+    for field in ("v", "t", "id", "src", "text"):
+        without = {k: v for k, v in TEXT_VOICE.items() if k != field}
+        errors = errors_of(without)
+        if field == "t":
+            assert errors == ["(raiz): t deve ser workout, food ou text"]
+        else:
+            assert errors == [f"{field}: campo obrigatório"]
+        assert errors_of({**TEXT_VOICE, field: None})
+
+    assert errors_of({**TEXT_VOICE, "src": "keyboard"})
+    assert errors_of({**TEXT_VOICE, "extra": 1}) == ["extra: campo desconhecido"]
+    assert errors_of({**TEXT_VOICE, "args": {}}) == ["args: campo desconhecido"]
+    assert errors_of({**TEXT_VOICE, "v": True})
+    assert errors_of({**TEXT_VOICE, "v": 2})
+
+
+async def test_miniapp_handle_refuses_text_payload_without_calling_sheet():
+    sheet = FakeSheet()
+    with pytest.raises(ValueError, match="text payloads"):
+        await handle(sheet, raw(TEXT_VOICE), 42, TODAY)
+    assert sheet.calls == []
+
+
+def test_keyboard_markup_omits_voice_keys_by_default_and_includes_them_when_given():
+    markup_plain, dropped_plain = keyboard_markup(URL, CATALOG)
+    assert dropped_plain == []
+    for btn in markup_plain["keyboard"][0]:
+        page = decode(btn["web_app"]["url"])
+        assert "vu" not in page and "vc" not in page and "vx" not in page
+
+    markup_voice, dropped_voice = keyboard_markup(URL, CATALOG, voice_keys=VOICE_KEYS)
+    assert dropped_voice == []
+    for btn in markup_voice["keyboard"][0]:
+        page = decode(btn["web_app"]["url"])
+        assert page["vu"] == VOICE_KEYS["vu"]
+        assert page["vc"] == VOICE_KEYS["vc"]
+        assert page["vx"] == VOICE_KEYS["vx"]
+
+    # Realistic catalog with 110 own food values + voice keys fits within 4096 chars:
+    real_markup, real_dropped = keyboard_markup(URL, realistic_catalog(), voice_keys=VOICE_KEYS)
+    assert real_dropped == []
+    assert all(len(b["web_app"]["url"]) <= 4096 for b in real_markup["keyboard"][0])
+
+
+def test_voice_keys_survive_all_catalog_trims_and_drop_only_as_last_resort():
+    assert miniapp.DROPPED_LABELS["voice"] == "voz"
+
+    cat = big_catalog()
+    cat["recentGroups"] = [{"group": f"Grupo {i}", "sets": i + 1} for i in range(14)]
+    bare_workout = {
+        **cat,
+        "recentGroups": [],
+        "plan": [{k: v for k, v in r.items() if k not in ("lastWork", "prescription")} for r in cat["plan"]],
+        "foods": [],
+    }
+    floor_with_voice = url_len(bare_workout, max_len=10**6, voice_keys=VOICE_KEYS)[0]
+    floor_without_voice = url_len(bare_workout, max_len=10**6)[0]
+    assert floor_without_voice < floor_with_voice
+
+    # At floor_with_voice: wk, l, p, and foods are all trimmed BEFORE voice, and vu/vc/vx survive!
+    size, dropped, markup_kept = url_len(cat, max_len=floor_with_voice, voice_keys=VOICE_KEYS)
+    assert size <= floor_with_voice
+    assert dropped == ["wk", "l", "p", "foods"]
+    for btn in markup_kept["keyboard"][0]:
+        page = decode(btn["web_app"]["url"])
+        assert page["vu"] == VOICE_KEYS["vu"]
+        assert page["vc"] == VOICE_KEYS["vc"]
+        assert page["vx"] == VOICE_KEYS["vx"]
+
+    # Below floor_with_voice (down to floor_without_voice): voice is dropped as the last resort!
+    size2, dropped2, markup_dropped = url_len(cat, max_len=floor_without_voice, voice_keys=VOICE_KEYS)
+    assert size2 <= floor_without_voice
+    assert dropped2 == ["wk", "l", "p", "foods", "voice"]
+    w_dropped = decode(markup_dropped["keyboard"][0][0]["web_app"]["url"])
+    assert "vu" not in w_dropped and "vc" not in w_dropped and "vx" not in w_dropped
+
+    # Below floor_without_voice: even dropping voice is not enough -> CatalogTooLarge!
+    with pytest.raises(CatalogTooLarge):
+        keyboard_markup(URL, cat, max_len=floor_without_voice - 1, voice_keys=VOICE_KEYS)

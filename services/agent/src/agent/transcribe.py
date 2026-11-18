@@ -292,6 +292,7 @@ class Transcriber:
         kwargs: dict[str, Any] = {
             "temperature": 0,
             "max_tokens": MAX_TOKENS,
+            "drop_params": True,
             "timeout": s.TRANSCRIBE_TIMEOUT_S,
         }
         key = s.transcribe_api_key()

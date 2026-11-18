@@ -1,7 +1,12 @@
 .gcloudignore
 .git
+.github
 .venv/
 .env
+.env.*
+*.local
+*.local.*
+!.env.example
 tests/
 __pycache__/
 .pytest_cache/

@@ -38,6 +38,13 @@ ALL_KEYS = [
     "VOICE_DAILY_TOKENS",
     "VOICE_GLOBAL_DAILY_TOKENS",
     "VOICE_MIN_BITRATE_BPS",
+    "MINIAPP_URL",
+    "VOICE_API_URL",
+    "APP_AUTH_SECRET",
+    "APP_CODE_TTL_S",
+    "APP_SESSION_TTL_S",
+    "INITDATA_MAX_AGE_S",
+    "APP_SESSION_NOT_BEFORE",
 ]
 
 
@@ -419,4 +426,97 @@ def test_a_blank_sdk_variable_does_not_count_as_a_key(env, monkeypatch):
     monkeypatch.delenv("TRANSCRIBE_API_KEY")
     monkeypatch.setenv("GEMINI_API_KEY", "  ")
     with pytest.raises(ConfigError, match="TRANSCRIBE_API_KEY"):
+        Settings.load()
+
+
+# --- Mini App voice (voice spec §6.2, §7.1, §13 C7) --------------------------------------------
+
+VOICE_SECRET = "voice-auth-secret-sentinel-32bytes!"
+
+
+def test_miniapp_voice_is_off_when_both_are_absent(env):
+    s = Settings.load()
+    assert s.VOICE_API_URL == ""
+    assert s.APP_AUTH_SECRET is None
+    assert s.APP_CODE_TTL_S == 900
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://voice.example.com",
+        "https://voice.example.com:8443",
+        "  https://sub.voice-api.example.dev  ",
+    ],
+)
+def test_miniapp_voice_accepts_paired_origin_and_masks_secret(env, monkeypatch, origin):
+    from agent import logs
+
+    monkeypatch.setattr(logs, "_SECRETS", set())
+    monkeypatch.setenv("VOICE_API_URL", origin)
+    monkeypatch.setenv("APP_AUTH_SECRET", VOICE_SECRET)
+    s = Settings.load()
+    assert s.VOICE_API_URL == origin.strip()
+    assert s.APP_AUTH_SECRET is not None
+    assert s.APP_AUTH_SECRET.get_secret_value() == VOICE_SECRET
+    assert VOICE_SECRET not in repr(s)
+    assert VOICE_SECRET not in str(s)
+    assert VOICE_SECRET in logs._SECRETS
+
+
+def test_miniapp_voice_requires_both_or_neither(env, monkeypatch):
+    monkeypatch.setenv("VOICE_API_URL", "https://voice.example.com")
+    with pytest.raises(ConfigError, match="both or neither"):
+        Settings.load()
+
+    monkeypatch.setenv("APP_AUTH_SECRET", "   ")
+    with pytest.raises(ConfigError, match="both or neither"):
+        Settings.load()
+
+    monkeypatch.delenv("VOICE_API_URL")
+    monkeypatch.setenv("APP_AUTH_SECRET", VOICE_SECRET)
+    with pytest.raises(ConfigError, match="both or neither"):
+        Settings.load()
+
+    monkeypatch.setenv("VOICE_API_URL", "   ")
+    with pytest.raises(ConfigError, match="both or neither"):
+        Settings.load()
+
+
+def test_app_auth_secret_in_yaml_is_refused(env):
+    env.write_text(f"APP_AUTH_SECRET: {VOICE_SECRET}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="APP_AUTH_SECRET"):
+        Settings.load()
+
+
+def test_app_auth_secret_must_be_at_least_32_bytes_and_never_leaks_in_error(env, monkeypatch):
+    short_sentinel = "short-secret-sentinel-24b"
+    monkeypatch.setenv("VOICE_API_URL", "https://voice.example.com")
+    monkeypatch.setenv("APP_AUTH_SECRET", short_sentinel)
+    with pytest.raises(ConfigError, match="APP_AUTH_SECRET") as err:
+        Settings.load()
+    assert short_sentinel not in str(err.value)
+    assert short_sentinel not in repr(err.value)
+    assert short_sentinel not in str(err.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    "bad_origin",
+    [
+        "http://voice.example.com",
+        "https://voice.example.com/",
+        "https://voice.example.com/v1",
+        "https://voice.example.com?x=1",
+        "https://voice.example.com#frag",
+        "https://Voice.Example.com",
+        "https://user:pw@voice.example.com",
+        "https://bad..host",
+        "https://voice.example.com:0",
+        "https://voice.example.com:70000",
+    ],
+)
+def test_voice_api_url_must_be_a_strict_https_origin(env, monkeypatch, bad_origin):
+    monkeypatch.setenv("VOICE_API_URL", bad_origin)
+    monkeypatch.setenv("APP_AUTH_SECRET", VOICE_SECRET)
+    with pytest.raises(ConfigError, match="VOICE_API_URL"):
         Settings.load()

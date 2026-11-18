@@ -59,6 +59,7 @@ log = logging.getLogger(__name__)
 
 MAX_PAYLOAD_BYTES = 4096
 MINIAPP_URL_MAX = 4096
+VOICE_TEXT_MAX = 2000
 MIN_DATE = "2000-01-01"  # Dates.MIN_KEY
 MEASUREMENTS = ("Pesada", "Rótulo", "Estimada")
 WORKOUT_BUTTON = "🏋️ Treino"
@@ -70,6 +71,7 @@ DROPPED_LABELS = {
     "l": "últimas cargas",
     "p": "prescrições",
     "foods": "lista de alimentos",
+    "voice": "voz",
 }
 
 _STRICT = ConfigDict(extra="forbid", strict=True)
@@ -280,6 +282,20 @@ def _check_submission(value: str) -> str:
 SubmissionId = Annotated[str, AfterValidator(_check_submission)]
 
 
+def _check_voice_text(value: str) -> str:
+    if any(c != "\n" and unicodedata.category(c) == "Cc" for c in value):
+        raise ValueError("texto contém caracteres de controle inválidos")
+    trimmed = value.strip()
+    if not trimmed:
+        raise ValueError("texto vazio")
+    if len(trimmed) > VOICE_TEXT_MAX:
+        raise ValueError(f"máximo {VOICE_TEXT_MAX} caracteres, recebido {len(trimmed)}")
+    return trimmed
+
+
+VoiceText = Annotated[str, AfterValidator(_check_voice_text)]
+
+
 class WorkoutPayload(_Versioned):
     v: Literal[1]
     t: Literal["workout"]
@@ -294,18 +310,28 @@ class FoodPayload(_Versioned):
     args: FoodArgs
 
 
-Payload = WorkoutPayload | FoodPayload
+class TextPayload(_Versioned):
+    v: Literal[1]
+    t: Literal["text"]
+    id: SubmissionId
+    src: Literal["voice"]
+    text: VoiceText
+
+
+Payload = WorkoutPayload | FoodPayload | TextPayload
 
 
 def _payload_tag(value: Any) -> str | None:
     t = value.get("t") if isinstance(value, dict) else None
-    return t if t in ("workout", "food") else None
+    return t if t in ("workout", "food", "text") else None
 
 
 # Tagged by a function, not a field: the `t` field itself takes no before-validators.
 _PAYLOAD = TypeAdapter(
     Annotated[
-        Annotated[WorkoutPayload, Tag("workout")] | Annotated[FoodPayload, Tag("food")],
+        Annotated[WorkoutPayload, Tag("workout")]
+        | Annotated[FoodPayload, Tag("food")]
+        | Annotated[TextPayload, Tag("text")],
         Discriminator(_payload_tag),
     ]
 )
@@ -324,7 +350,7 @@ def _path(loc: tuple[int | str, ...]) -> str:
     for i, part in enumerate(loc):
         if isinstance(part, int):
             out += f"[{part}]"
-        elif (i == 0 and part in ("workout", "food")) or part == "float" or part.startswith("item_"):
+        elif (i == 0 and part in ("workout", "food", "text")) or part == "float" or part.startswith("item_"):
             continue  # union tags, not fields
         else:
             out += f".{part}" if out else part
@@ -353,7 +379,7 @@ def _message(error: Any) -> str:
         return f"quantidade de itens fora do permitido ({low if low is not None else 0} a {high})"
     if kind in ("literal_error", "union_tag_invalid", "union_tag_not_found"):
         if kind != "literal_error" and ctx.get("discriminator") == "_payload_tag()":
-            return "t deve ser workout ou food"
+            return "t deve ser workout, food ou text"
         if kind != "literal_error":
             return "cada item tem exatamente um de: food (+ qty), favorite ou description"
         return f"valor inválido {_show(error.get('input'))}; aceitos: {ctx.get('expected', '')}"
@@ -548,6 +574,8 @@ async def handle(
     payload, problems = parse_payload(raw, today)
     if payload is None:
         return Reply("\n".join([NOTHING_SAVED, *(f"• {p}" for p in problems)]))
+    if isinstance(payload, TextPayload):
+        raise ValueError("text payloads must be routed to the agent, not miniapp.handle")
     # What the page sent, now validated field by field (extra="forbid": nothing else is in there).
     args = json.loads(raw)["args"]
     op = "workout.upsert" if isinstance(payload, WorkoutPayload) else "food.add"
@@ -742,7 +770,10 @@ def encode_catalog(catalog: dict[str, Any]) -> str:
 
 
 def _trim(catalog: dict[str, Any], key: str) -> bool:
-    """Drops `key` (`l`/`p` of every plan row, or the top-level `wk`/`foods`); True if it changed."""
+    """Drops `key` (`l`/`p` of every plan row, top-level `fv`/`wk`/`foods`, or `voice`); True if changed."""
+    if key == "voice":
+        removed = [catalog.pop(k, None) is not None for k in ("vu", "vc", "vx")]
+        return any(removed)
     if key in ("fv", "wk", "foods"):
         if key in ("fv", "foods"):
             catalog.pop("fu", None)
@@ -756,7 +787,7 @@ def _trim(catalog: dict[str, Any], key: str) -> bool:
 
 
 class CatalogTooLarge(ValueError):
-    """Even without last works, prescriptions and foods the URL does not fit."""
+    """Even without last works, prescriptions, foods and voice the URL does not fit."""
 
     def __init__(self, length: int, max_len: int) -> None:
         super().__init__(f"link de {length} caracteres, máximo {max_len}")
@@ -765,14 +796,19 @@ class CatalogTooLarge(ValueError):
 
 
 def keyboard_markup(
-    miniapp_url: str, catalog_result: dict[str, Any], max_len: int = MINIAPP_URL_MAX
+    miniapp_url: str,
+    catalog_result: dict[str, Any],
+    max_len: int = MINIAPP_URL_MAX,
+    voice_keys: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Separate view catalogs in two buttons. Trim only an oversized view, in this order:
-    own values, week map, last works, prescriptions, own names. Raise if either still cannot fit.
-    The old page ignores the new keys and still has everything its launched view needs.
+    own values, week map, last works, prescriptions, own names, voice. Raise if either still cannot
+    fit. The old page ignores the new keys and still has everything its launched view needs.
     """
     catalog = catalog_v1(catalog_result)
     common = {k: v for k, v in catalog.items() if k in ("v", "today", "tz", "client")}
+    if voice_keys:
+        common.update({k: voice_keys[k] for k in ("vu", "vc", "vx") if k in voice_keys})
     workout = {
         **common,
         "view": "workout",
@@ -792,7 +828,7 @@ def keyboard_markup(
             f"{miniapp_url}#v=food&c={encode_catalog(food)}",
         )
 
-    for key in ("fv", "wk", "l", "p", "foods"):
+    for key in ("fv", "wk", "l", "p", "foods", "voice"):
         if max(len(u) for u in urls()) <= max_len:
             break
         changed = False

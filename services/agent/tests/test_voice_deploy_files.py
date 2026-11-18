@@ -158,6 +158,72 @@ def test_makefile_exposes_serve_voice() -> None:
     )
 
 
+def test_makefile_sync_reqs_and_test_miniapp() -> None:
+    makefile = REPO_ROOT / "Makefile"
+    assert makefile.is_file(), f"Expected {makefile} to exist"
+
+    content = makefile.read_text(encoding="utf-8")
+
+    # Both targets registered in .PHONY
+    phony_lines = []
+    in_phony = False
+    for line in content.splitlines():
+        if line.startswith(".PHONY:"):
+            in_phony = True
+            phony_lines.append(line.partition(".PHONY:")[2])
+        elif in_phony:
+            if line.startswith("\t"):
+                phony_lines.append(line)
+            else:
+                break
+    phony_targets = " ".join(phony_lines).split()
+    assert "sync-reqs" in phony_targets, "sync-reqs must be registered in .PHONY"
+    assert "test-miniapp" in phony_targets, "test-miniapp must be registered in .PHONY"
+
+    # Target definitions exist
+    assert "sync-reqs:" in content, "Makefile must declare sync-reqs target"
+    assert "test-miniapp:" in content, "Makefile must declare test-miniapp target"
+
+    # Recipes must use real TAB indentation
+    lines = content.splitlines()
+    for target in ("sync-reqs", "test-miniapp"):
+        target_indices = [i for i, line in enumerate(lines) if line.startswith(f"{target}:")]
+        assert target_indices, f"Target {target}: not found in Makefile"
+        idx = target_indices[0]
+        recipe_lines = []
+        for line in lines[idx + 1 :]:
+            if not line.strip():
+                break
+            recipe_lines.append(line)
+        assert recipe_lines, f"Recipe for {target} must contain command lines"
+        for rline in recipe_lines:
+            assert rline.startswith("\t"), f"Recipe for {target} must start with real TAB: {repr(rline)}"
+
+    # test-miniapp recipe checks
+    miniapp_block = content.partition("test-miniapp:")[2].partition("\n\n")[0]
+    assert "node --test apps/miniapp/test/*.test.js" in miniapp_block, (
+        "test-miniapp recipe must execute node --test apps/miniapp/test/*.test.js"
+    )
+
+    # sync-reqs recipe checks: must preserve the first 2 comment lines and invoke uv export
+    sync_block = content.partition("sync-reqs:")[2].partition("\n\n")[0]
+    assert (
+        "uv export --locked --no-dev --no-emit-project --no-hashes --no-header --format requirements-txt"
+        in sync_block
+    ), "sync-reqs must run uv export with locked flags matching CI"
+
+    # Verify that the 2 header lines generated/preserved match services/agent/requirements.txt
+    requirements_file = AGENT_DIR / "requirements.txt"
+    assert requirements_file.is_file(), f"Expected {requirements_file} to exist"
+    req_lines = requirements_file.read_text(encoding="utf-8").splitlines()
+    assert len(req_lines) >= 2, "requirements.txt must have at least 2 header lines"
+    expected_header_line2 = (
+        "#    uv export --no-dev --no-emit-project --no-hashes"
+        + " --format requirements-txt -o requirements.txt"
+    )
+    assert req_lines[1] == expected_header_line2
+
+
 def test_readme_voice_deploy_docs() -> None:
     readme = REPO_ROOT / "docs" / "setup" / "README.md"
     assert readme.is_file(), f"Expected {readme} to exist"

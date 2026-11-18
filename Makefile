@@ -13,7 +13,7 @@ CLASP ?= clasp
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install test test-sheet test-agent lint fmt e2e poll serve serve-voice \
+.PHONY: help install sync-reqs test test-sheet test-miniapp test-agent lint fmt e2e poll serve serve-voice \
 	webhook-set webhook-info webhook-delete commands push-sheet remind
 
 help: ## List the targets
@@ -22,10 +22,16 @@ help: ## List the targets
 install: ## Install the agent's dependencies from uv.lock (uv sync --locked)
 	cd $(AGENT) && uv sync --locked
 
+sync-reqs: ## Regenerate services/agent/requirements.txt preserving header (uv export)
+	cd $(AGENT) && (head -n 2 requirements.txt && uv export --locked --no-dev --no-emit-project --no-hashes --no-header --format requirements-txt) > requirements.txt.tmp && mv requirements.txt.tmp requirements.txt
+
 test: test-sheet test-agent ## Run both test suites (no network)
 
 test-sheet: ## Apps Script tests (npm test)
 	npm test
+
+test-miniapp: ## Mini App tests (node --test apps/miniapp/test/*.test.js)
+	node --test apps/miniapp/test/*.test.js
 
 test-agent: ## Agent tests (uv run pytest)
 	cd $(AGENT) && uv run pytest

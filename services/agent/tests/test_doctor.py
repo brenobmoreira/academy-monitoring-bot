@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import logging
@@ -15,9 +16,9 @@ import pytest
 from pydantic import SecretStr
 
 from agent import logs
-from agent.doctor import format_json, format_text, run_cli, run_doctor
+from agent.doctor import _check_settings, _positive_timeout, format_json, format_text, run_cli, run_doctor
 from agent.voice_api import HEALTHZ_PATH, TRANSCRIPTIONS_PATH
-from agent.voice_asgi import build_voice_service
+from agent.voice_asgi import CORS_ALLOW_HEADERS, build_voice_service
 from agent.voice_settings import VoiceSettings
 
 from .voice_fakes import FakeTranscriber
@@ -162,9 +163,11 @@ def _make_mock_client(
     telegram_exc: Callable[[httpx.Request], BaseException] | None = None,
     voice_health_status: int = 200,
     voice_cors_origin: str | None = MINIAPP_ORIGIN,
+    voice_cors_headers: str | None = ", ".join(CORS_ALLOW_HEADERS),
     voice_cors_status: int = 200,
     voice_exc: Callable[[httpx.Request], BaseException] | None = None,
     voice_transport: httpx.AsyncBaseTransport | None = None,
+    captured_requests: list[httpx.Request] | None = None,
 ) -> httpx.AsyncClient:
     effective_catalog = catalog_body if catalog_body is not None else _catalog_payload()
     effective_me = (
@@ -179,6 +182,9 @@ def _make_mock_client(
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if captured_requests is not None:
+            captured_requests.append(request)
+
         host = request.url.host
         path = request.url.path
 
@@ -205,11 +211,20 @@ def _make_mock_client(
                 headers: dict[str, str] = {}
                 if voice_cors_origin is not None:
                     headers["Access-Control-Allow-Origin"] = voice_cors_origin
+                if voice_cors_headers is not None:
+                    headers["Access-Control-Allow-Headers"] = voice_cors_headers
                 return httpx.Response(voice_cors_status, headers=headers)
 
         return httpx.Response(500, text="unexpected mock route")
 
-    mounts = {VOICE_API_URL: voice_transport} if voice_transport is not None else None
+    mounts = (
+        {
+            VOICE_API_URL: voice_transport,
+            "http://127.0.0.1:8081": voice_transport,
+        }
+        if voice_transport is not None
+        else None
+    )
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), mounts=mounts)
 
 
@@ -253,7 +268,7 @@ async def test_happy_path_all_checks_ok_and_json_contract(isolated_env: Path) ->
 
 
 # ---------------------------------------------------------------------------
-# 2. Mode conflict: --mode poll with active webhook & --mode webhook without webhook
+# 2. Mode conflict: --mode poll with active webhook & --mode webhook / auto
 # ---------------------------------------------------------------------------
 
 
@@ -290,7 +305,7 @@ async def test_poll_mode_fails_when_telegram_webhook_is_set(isolated_env: Path) 
 
 
 async def test_webhook_and_auto_modes_validate_webhook_readiness(isolated_env: Path) -> None:
-    # Auto mode with TELEGRAM_WEBHOOK_SECRET set requires webhook_set=true
+    # P2-6: Auto mode with TELEGRAM_WEBHOOK_SECRET set and webhook_set=false warns (exit 0) for pre-deploy
     env_with_secret = _write_env(
         isolated_env / ".env.prod",
         _base_env_values(TELEGRAM_WEBHOOK_SECRET=CANARY_WEBHOOK_SECRET),
@@ -298,11 +313,21 @@ async def test_webhook_and_auto_modes_validate_webhook_readiness(isolated_env: P
     async with _make_mock_client(
         webhook_info_body={"ok": True, "result": {"url": "", "pending_update_count": 0}}
     ) as client:
-        report_missing = await run_doctor(env_file=env_with_secret, mode="auto", http=client)
-        assert report_missing.exit_code == 1
-        tg_fail = {c.name: c for c in report_missing.checks}["telegram_api"]
-        assert tg_fail.status == "fail"
-        assert "webhook-set" in tg_fail.detail
+        report_auto_predeploy = await run_doctor(env_file=env_with_secret, mode="auto", http=client)
+        assert report_auto_predeploy.ok is True
+        assert report_auto_predeploy.exit_code == 0
+        tg_auto_warn = {c.name: c for c in report_auto_predeploy.checks}["telegram_api"]
+        assert tg_auto_warn.status == "warn"
+        assert "webhook_set=false" in tg_auto_warn.detail
+        assert "webhook-set" in tg_auto_warn.detail
+
+        # Explicit --mode webhook with webhook_set=false strictly fails (exit 1)
+        report_webhook_fail = await run_doctor(env_file=env_with_secret, mode="webhook", http=client)
+        assert report_webhook_fail.ok is False
+        assert report_webhook_fail.exit_code == 1
+        tg_webhook_fail = {c.name: c for c in report_webhook_fail.checks}["telegram_api"]
+        assert tg_webhook_fail.status == "fail"
+        assert "webhook-set" in tg_webhook_fail.detail
 
     # Explicit --mode webhook with webhook_set=true -> ok
     async with _make_mock_client(
@@ -378,19 +403,75 @@ async def test_voice_allowed_origins_rejects_paths_and_mismatched_miniapp_origin
         assert MINIAPP_ORIGIN in cfg_check.detail
 
 
-async def test_local_http_voice_api_url_warns_and_exits_zero(isolated_env: Path) -> None:
-    env_file = _write_env(
-        isolated_env / ".env.dev",
+async def test_p1_1_dotenv_http_voice_url_fails_settings_and_cli_voice_url_probes_local(
+    isolated_env: Path,
+) -> None:
+    # (1) VOICE_API_URL=http://127.0.0.1:8081 inside .env MUST fail Settings faithfully (exit 1)
+    env_http = _write_env(
+        isolated_env / ".env.bad_http",
         _base_env_values(VOICE_API_URL="http://127.0.0.1:8081"),
     )
     async with _make_mock_client() as client:
-        report = await run_doctor(env_file=env_file, mode="poll", http=client)
-        assert report.ok is True
-        assert report.exit_code == 0
-        by_name = {c.name: c for c in report.checks}
-        assert by_name["settings"].status == "ok"
-        assert by_name["miniapp_voice_config"].status == "warn"
-        assert by_name["voice_service"].status == "ok"
+        bad_report = await run_doctor(env_file=env_http, mode="poll", http=client)
+        assert bad_report.ok is False
+        assert bad_report.exit_code == 1
+        bad_by_name = {c.name: c for c in bad_report.checks}
+        assert bad_by_name["settings"].status == "fail"
+        assert "VOICE_API_URL" in bad_by_name["settings"].detail
+        assert bad_by_name["miniapp_voice_config"].status == "fail"
+
+        # Even if --voice-url is passed, broken .env still fails settings!
+        still_bad_out = io.StringIO()
+        assert (
+            await run_cli(
+                ["--env", str(env_http), "--mode", "poll", "--voice-url", "http://127.0.0.1:8081"],
+                http=client,
+                stdout=still_bad_out,
+            )
+            == 1
+        )
+
+    # (2) Valid .env + --voice-url http://127.0.0.1:8081 (or localhost) succeeds with explicit local HTTP note
+    env_valid = _write_env(isolated_env / ".env.valid", _base_env_values())
+    async with _make_mock_client() as client:
+        out_loopback = io.StringIO()
+        code = await run_cli(
+            ["--env", str(env_valid), "--mode", "poll", "--voice-url", "http://127.0.0.1:8081", "--json"],
+            http=client,
+            stdout=out_loopback,
+        )
+        assert code == 0
+        payload = json.loads(out_loopback.getvalue())
+        assert payload["ok"] is True
+        checks_by_name = {c["name"]: c for c in payload["checks"]}
+        assert checks_by_name["settings"]["status"] == "ok"
+        assert checks_by_name["miniapp_voice_config"]["status"] == "ok"
+        assert checks_by_name["voice_service"]["status"] == "ok"
+        assert "local http probe (http://127.0.0.1:8081)" in checks_by_name["voice_service"]["detail"]
+
+        report_localhost = await run_doctor(
+            env_file=env_valid,
+            mode="poll",
+            voice_url="http://localhost:8081",
+            http=client,
+        )
+        assert report_localhost.exit_code == 0
+        voice_localhost = {c.name: c for c in report_localhost.checks}["voice_service"]
+        assert voice_localhost.status == "ok"
+        assert "local http probe (http://localhost:8081)" in voice_localhost.detail
+
+        # (3) Non-loopback http:// in --voice-url strictly fails requiring HTTPS
+        report_remote_http = await run_doctor(
+            env_file=env_valid,
+            mode="poll",
+            voice_url="http://voice-internal.example.com:8081",
+            http=client,
+        )
+        assert report_remote_http.ok is False
+        assert report_remote_http.exit_code == 1
+        voice_remote = {c.name: c for c in report_remote_http.checks}["voice_service"]
+        assert voice_remote.status == "fail"
+        assert "https://" in voice_remote.detail
 
 
 async def test_voice_service_real_asgi_cors_and_routes(isolated_env: Path) -> None:
@@ -659,3 +740,289 @@ def test_pyproject_and_makefile_register_agent_doctor() -> None:
             else:
                 break
     assert "doctor" in " ".join(phony_lines).split()
+
+
+# ---------------------------------------------------------------------------
+# 8. Adversarial Review v3 Regression Suite (P2-1 through P2-8)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("multibyte_secret", "expect_ok"),
+    [
+        ("é" * 16, True),  # 16 chars, 32 UTF-8 bytes -> valid
+        ("🔑" * 8, True),  # 8 chars, 32 UTF-8 bytes -> valid
+        ("é" * 15, False),  # 15 chars, 30 UTF-8 bytes -> too short (<32 bytes)
+        ("🔑" * 7, False),  # 7 chars, 28 UTF-8 bytes -> too short (<32 bytes)
+    ],
+)
+async def test_p2_1_app_auth_secret_measured_in_utf8_bytes(
+    isolated_env: Path,
+    multibyte_secret: str,
+    expect_ok: bool,
+) -> None:
+    env_file = _write_env(
+        isolated_env / ".env.utf8secret",
+        _base_env_values(APP_AUTH_SECRET=multibyte_secret),
+    )
+    async with _make_mock_client() as client:
+        report = await run_doctor(env_file=env_file, mode="poll", http=client)
+        assert report.ok is expect_ok
+        assert report.exit_code == (0 if expect_ok else 1)
+
+        by_name = {c.name: c for c in report.checks}
+        expected_status = "ok" if expect_ok else "fail"
+        assert by_name["settings"].status == expected_status
+        assert by_name["miniapp_voice_config"].status == expected_status
+
+        assert multibyte_secret not in format_text(report)
+        assert multibyte_secret not in format_json(report)
+
+
+async def test_p2_2_unreadable_or_invalid_utf8_files_fail_cleanly_without_leak(
+    isolated_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # (1) .env containing invalid UTF-8 bytes + secret canary
+    bad_utf8_env = isolated_env / ".env.badutf8"
+    bad_utf8_env.write_bytes(b"TELEGRAM_BOT_TOKEN=utf8-env-SECRET-CANARY-99\nBROKEN=\xff\xfe\xfa\n")
+
+    async with _make_mock_client() as client:
+        r_env_utf8 = await run_doctor(env_file=bad_utf8_env, mode="poll", http=client)
+        assert r_env_utf8.ok is False
+        assert r_env_utf8.exit_code == 1
+        settings_res = {c.name: c for c in r_env_utf8.checks}["settings"]
+        assert settings_res.status == "fail"
+        assert "UnicodeDecodeError" in settings_res.detail
+        assert "utf8-env-SECRET-CANARY-99" not in format_text(r_env_utf8)
+        assert "utf8-env-SECRET-CANARY-99" not in format_json(r_env_utf8)
+
+        # (2) settings.yaml containing invalid UTF-8 bytes
+        valid_env = _write_env(isolated_env / ".env.good", _base_env_values())
+        bad_yaml = isolated_env / "bad_settings.yaml"
+        bad_yaml.write_bytes(b"LLM_MODEL: gemini/gemini-3.8-flash\n# yaml-SECRET-CANARY \xff\xfe\n")
+        monkeypatch.setenv("SETTINGS_FILE", str(bad_yaml))
+
+        r_yaml_utf8 = await run_doctor(env_file=valid_env, mode="poll", http=client)
+        assert r_yaml_utf8.ok is False
+        assert r_yaml_utf8.exit_code == 1
+        yaml_res = {c.name: c for c in r_yaml_utf8.checks}["settings"]
+        assert yaml_res.status == "fail"
+        assert "UnicodeDecodeError" in yaml_res.detail
+        assert "yaml-SECRET-CANARY" not in format_text(r_yaml_utf8)
+
+        # (3) OSError / PermissionError reading .env (must cite only exception class name, never message)
+        good_yaml = isolated_env / "good_settings.yaml"
+        good_yaml.write_text("LLM_MODEL: gemini/gemini-3.8-flash\n", encoding="utf-8")
+        monkeypatch.setenv("SETTINGS_FILE", str(good_yaml))
+
+        orig_read_text = Path.read_text
+        blocked_env = isolated_env / ".env.locked"
+        blocked_env.write_text("TELEGRAM_BOT_TOKEN=locked-SECRET-CANARY\n", encoding="utf-8")
+
+        def fake_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+            if self == blocked_env:
+                raise PermissionError("OS-ERROR-SECRET-CANARY-MESSAGE")
+            return orig_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fake_read_text)
+        r_perm = await run_doctor(env_file=blocked_env, mode="poll", http=client)
+        assert r_perm.ok is False
+        assert r_perm.exit_code == 1
+        perm_res = {c.name: c for c in r_perm.checks}["settings"]
+        assert perm_res.status == "fail"
+        assert "PermissionError" in perm_res.detail
+        assert "OS-ERROR-SECRET-CANARY-MESSAGE" not in format_text(r_perm)
+        assert "locked-SECRET-CANARY" not in format_text(r_perm)
+
+    # (4) Direct _check_settings call when Settings(...) itself raises UnicodeDecodeError / PermissionError
+    check_utf8_direct, loaded_utf8_direct = _check_settings(bad_utf8_env, pre_error=None)
+    assert loaded_utf8_direct is None
+    assert check_utf8_direct.status == "fail"
+    assert "UnicodeDecodeError" in check_utf8_direct.detail
+    assert "utf8-env-SECRET-CANARY-99" not in check_utf8_direct.detail
+
+    import builtins
+
+    orig_open = builtins.open
+
+    def fake_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(file) == blocked_env:
+            raise PermissionError("OS-ERROR-SECRET-CANARY-MESSAGE")
+        return orig_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    check_direct, loaded_direct = _check_settings(blocked_env, pre_error=None)
+    assert loaded_direct is None
+    assert check_direct.status == "fail"
+    assert "PermissionError" in check_direct.detail
+    assert "OS-ERROR-SECRET-CANARY-MESSAGE" not in check_direct.detail
+
+
+@pytest.mark.parametrize(
+    "bad_timeout",
+    [
+        "nan",
+        "NaN",
+        "inf",
+        "+inf",
+        "-inf",
+        "Infinity",
+        "0",
+        "-0.0",
+        "-1.5",
+        "not-a-number",
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        0.0,
+        -5.0,
+        True,
+    ],
+)
+def test_p2_3_positive_timeout_rejects_non_finite_and_non_positive(bad_timeout: Any) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        _positive_timeout(bad_timeout)
+
+
+@pytest.mark.parametrize("cli_timeout", ["nan", "inf", "-inf", "0", "-3"])
+async def test_p2_3_cli_rejects_nan_and_inf_timeout(cli_timeout: str) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        await run_cli(["--timeout", cli_timeout])
+    assert exc_info.value.code == 2
+    assert _positive_timeout("2.5") == 2.5
+
+
+async def test_p2_4_lowercase_dotenv_keys_are_normalized_and_scrubbed(isolated_env: Path) -> None:
+    lowercase_values = {k.lower(): v for k, v in _base_env_values().items()}
+    env_lower = _write_env(isolated_env / ".env.lower", lowercase_values)
+
+    async with _make_mock_client() as client:
+        report = await run_doctor(env_file=env_lower, mode="poll", http=client)
+        assert report.ok is True
+        assert report.exit_code == 0
+
+        by_name = {c.name: c for c in report.checks}
+        assert list(by_name) == [
+            "settings",
+            "miniapp_voice_config",
+            "sheet_api",
+            "telegram_api",
+            "voice_service",
+        ]
+        assert all(c.status == "ok" for c in report.checks)
+        _assert_no_canaries(format_text(report))
+        _assert_no_canaries(format_json(report))
+
+
+async def test_p2_5_unmapped_llm_provider_without_llm_api_key_emits_warn(isolated_env: Path) -> None:
+    # Unmapped provider (e.g. bedrock/*) without LLM_API_KEY -> warn (exit 0)
+    env_unmapped = _write_env(
+        isolated_env / ".env.bedrock",
+        _base_env_values(
+            LLM_MODEL="bedrock/anthropic.claude-3-5-sonnet",
+            LLM_API_KEY="",
+            MEDIA_ENABLED="false",
+        ),
+    )
+    # Known provider (openai/*) without LLM_API_KEY or OPENAI_API_KEY -> fail (exit 1)
+    env_known_missing = _write_env(
+        isolated_env / ".env.openai",
+        _base_env_values(
+            LLM_MODEL="openai/gpt-5.6",
+            LLM_API_KEY="",
+            MEDIA_ENABLED="false",
+        ),
+    )
+
+    async with _make_mock_client() as client:
+        r_warn = await run_doctor(env_file=env_unmapped, mode="poll", http=client)
+        assert r_warn.ok is True
+        assert r_warn.exit_code == 0
+        settings_warn = {c.name: c for c in r_warn.checks}["settings"]
+        assert settings_warn.status == "warn"
+        assert "bedrock" in settings_warn.detail
+
+        r_fail = await run_doctor(env_file=env_known_missing, mode="poll", http=client)
+        assert r_fail.ok is False
+        assert r_fail.exit_code == 1
+        settings_fail = {c.name: c for c in r_fail.checks}["settings"]
+        assert settings_fail.status == "fail"
+        assert "OPENAI_API_KEY" in settings_fail.detail
+
+
+async def test_p2_7_voice_preflight_sends_request_headers_and_validates_allow_headers(
+    isolated_env: Path,
+) -> None:
+    env_file = _write_env(isolated_env / ".env", _base_env_values())
+
+    # (1) Verify OPTIONS request sends Access-Control-Request-Headers matching CORS_ALLOW_HEADERS
+    seen: list[httpx.Request] = []
+    async with _make_mock_client(captured_requests=seen) as client:
+        ok_report = await run_doctor(env_file=env_file, mode="poll", http=client)
+        assert ok_report.exit_code == 0
+
+    options_reqs = [r for r in seen if r.method == "OPTIONS" and r.url.path == TRANSCRIPTIONS_PATH]
+    assert len(options_reqs) == 1
+    sent_acrh = options_reqs[0].headers.get("Access-Control-Request-Headers", "")
+    sent_tokens = {h.strip().lower() for h in sent_acrh.split(",") if h.strip()}
+    assert sent_tokens == {h.lower() for h in CORS_ALLOW_HEADERS}
+
+    # (2) Missing or incomplete Access-Control-Allow-Headers fails voice_service
+    for bad_allow_headers in (None, "Authorization, Content-Type"):
+        async with _make_mock_client(voice_cors_headers=bad_allow_headers) as client:
+            fail_report = await run_doctor(env_file=env_file, mode="poll", http=client)
+            assert fail_report.ok is False
+            assert fail_report.exit_code == 1
+            v_check = {c.name: c for c in fail_report.checks}["voice_service"]
+            assert v_check.status == "fail"
+            assert "Access-Control-Allow-Headers" in v_check.detail
+
+    # (3) Wildcard '*' or lowercase full header list in Access-Control-Allow-Headers succeeds
+    for valid_allow_headers in ("*", ", ".join(h.lower() for h in CORS_ALLOW_HEADERS)):
+        async with _make_mock_client(voice_cors_headers=valid_allow_headers) as client:
+            pass_report = await run_doctor(env_file=env_file, mode="poll", http=client)
+            assert pass_report.ok is True
+            assert pass_report.exit_code == 0
+            assert {c.name: c for c in pass_report.checks}["voice_service"].status == "ok"
+
+
+async def test_p2_8_google_workspace_apps_script_url_accepted_and_masked(isolated_env: Path) -> None:
+    ws_domain = "empresa-secreta-canary.com.br"
+    ws_deploy_id = "AKfycb-WORKSPACE-CANARY-777"
+    ws_exec_url = f"https://script.google.com/a/macros/{ws_domain}/s/{ws_deploy_id}/exec"
+    ws_dev_url = f"https://script.google.com/a/macros/{ws_domain}/s/{ws_deploy_id}/dev"
+
+    env_exec = _write_env(isolated_env / ".env.ws.exec", _base_env_values(SHEET_API_URL=ws_exec_url))
+    env_dev = _write_env(isolated_env / ".env.ws.dev", _base_env_values(SHEET_API_URL=ws_dev_url))
+
+    async with _make_mock_client() as client:
+        r_exec = await run_doctor(env_file=env_exec, mode="poll", http=client)
+        assert r_exec.ok is True
+        assert r_exec.exit_code == 0
+        by_name = {c.name: c for c in r_exec.checks}
+        assert by_name["settings"].status == "ok"
+        assert "script.google.com (/a/macros/.../s/.../exec)" in by_name["settings"].detail
+        assert by_name["sheet_api"].status == "ok"
+        assert "script.google.com (/a/macros/.../s/.../exec)" in by_name["sheet_api"].detail
+        _assert_no_canaries(format_text(r_exec), extra=(ws_domain, ws_deploy_id, ws_exec_url))
+        _assert_no_canaries(format_json(r_exec), extra=(ws_domain, ws_deploy_id, ws_exec_url))
+
+        r_dev = await run_doctor(env_file=env_dev, mode="poll", http=client)
+        assert r_dev.ok is True
+        assert r_dev.exit_code == 0
+        assert {c.name: c for c in r_dev.checks}["settings"].status == "warn"
+        assert (
+            "script.google.com (/a/macros/.../s/.../dev"
+            in {c.name: c for c in r_dev.checks}["settings"].detail
+        )
+        _assert_no_canaries(format_text(r_dev), extra=(ws_domain, ws_deploy_id, ws_dev_url))
+
+    # Even if transport exception echoes full Workspace URL, domain + deploymentId are scrubbed
+    async with _make_mock_client(
+        sheet_exc=lambda req: httpx.ConnectError(f"failed connecting to {req.url}", request=req)
+    ) as err_client:
+        r_err = await run_doctor(env_file=env_exec, mode="poll", http=err_client)
+        assert r_err.exit_code == 1
+        _assert_no_canaries(format_text(r_err), extra=(ws_domain, ws_deploy_id, ws_exec_url))
+        _assert_no_canaries(format_json(r_err), extra=(ws_domain, ws_deploy_id, ws_exec_url))

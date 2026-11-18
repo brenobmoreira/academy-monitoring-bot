@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -29,6 +31,7 @@ from pydantic import ValidationError
 from agent import logs
 from agent.auth import MIN_SECRET_BYTES, derive_keys
 from agent.settings import (
+    _HOST,
     PROVIDER_KEY_VARIABLES,
     ConfigError,
     Settings,
@@ -42,6 +45,7 @@ from agent.settings import (
 )
 from agent.sheet_client import SheetClient
 from agent.voice_api import HEALTHZ_PATH, TRANSCRIPTIONS_PATH
+from agent.voice_asgi import CORS_ALLOW_HEADERS
 from agent.voice_settings import _normalize_origin
 
 CheckStatus = Literal["ok", "warn", "fail"]
@@ -51,7 +55,10 @@ _BOT_USERNAME_RE = re.compile(r"[A-Za-z0-9_]{3,64}")
 _CLASS_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,60}")
 _APPS_SCRIPT_EXEC_RE = re.compile(r"^/macros/s/([^/\s]+)/exec$")
 _APPS_SCRIPT_DEV_RE = re.compile(r"^/macros/s/([^/\s]+)/dev$")
-_APPS_SCRIPT_DEPLOYMENT_RE = re.compile(r"/macros/s/([^/?#\s]+)")
+_APPS_SCRIPT_WS_EXEC_RE = re.compile(r"^/a/macros/([^/\s]+)/s/([^/\s]+)/exec$")
+_APPS_SCRIPT_WS_DEV_RE = re.compile(r"^/a/macros/([^/\s]+)/s/([^/\s]+)/dev$")
+_APPS_SCRIPT_WS_DOMAIN_RE = re.compile(r"/a/macros/([^/?#\s]+)")
+_APPS_SCRIPT_DEPLOYMENT_RE = re.compile(r"/(?:a/macros/[^/?#\s]+|macros)/s/([^/?#\s]+)")
 _SHEET_HTTP_STATUS_RE = re.compile(r"^planilha respondeu HTTP ([1-5][0-9]{2})$")
 _SHEET_NET_ERR_RE = re.compile(r"^falha de rede ao chamar a planilha: ([A-Za-z_][A-Za-z0-9_]{0,60})\(")
 
@@ -64,7 +71,6 @@ _PROVIDER_ENV_VARS: dict[str, tuple[str, ...]] = {
     "openrouter": ("OPENROUTER_API_KEY",),
 }
 _KEYLESS_PROVIDERS = frozenset({"vertex_ai", "ollama"})
-_VOICE_CONFIG_FIELDS = frozenset({"MINIAPP_URL", "VOICE_API_URL", "APP_AUTH_SECRET", "settings"})
 
 
 @dataclass(frozen=True)
@@ -116,8 +122,13 @@ def _configure_doctor_logging() -> None:
     logs.install()
 
 
+def _safe_exc_type(err: BaseException, default: str = "Error") -> str:
+    name = type(err).__name__
+    return name if _CLASS_IDENT_RE.fullmatch(name) else default
+
+
 def _valid_local_http_origin(value: str) -> bool:
-    """True only for `http://127.0.0.1[:port]` or `http://localhost[:port]` without path/query."""
+    """True only for `http://127.0.0.1[:port]`, `http://localhost[:port]`, or `http://[::1][:port]`."""
     if "#" in value or any(c.isspace() for c in value):
         return False
     try:
@@ -130,7 +141,7 @@ def _valid_local_http_origin(value: str) -> bool:
     host = (parts.hostname or "").lower()
     return (
         parts.scheme == "http"
-        and host in ("127.0.0.1", "localhost")
+        and host in ("127.0.0.1", "localhost", "::1")
         and parts.username is None
         and parts.password is None
         and not parts.netloc.endswith(":")
@@ -153,7 +164,7 @@ def _extract_https_origin(url: str) -> str | None:
 
 
 def _describe_sheet_url(raw_url: str) -> tuple[CheckStatus, str]:
-    """Validates `SHEET_API_URL` and returns `(status, safe_label)` without exposing deployment IDs."""
+    """Validates `SHEET_API_URL` and returns `(status, safe_label)` masking domains and deployment IDs."""
     candidate = raw_url.strip()
     if not candidate or "#" in candidate or any(c.isspace() for c in candidate):
         return "fail", "invalid SHEET_API_URL (must be an https:// URL)"
@@ -174,7 +185,18 @@ def _describe_sheet_url(raw_url: str) -> tuple[CheckStatus, str]:
                 return "ok", "script.google.com (/macros/s/.../exec)"
             if _APPS_SCRIPT_DEV_RE.fullmatch(parts.path):
                 return "warn", "script.google.com (/macros/s/.../dev — expected /exec)"
-            return "fail", "script.google.com (expected /macros/s/<deploymentId>/exec)"
+            if (m_ws := _APPS_SCRIPT_WS_EXEC_RE.fullmatch(parts.path)) and _HOST.fullmatch(
+                m_ws.group(1).lower()
+            ):
+                return "ok", "script.google.com (/a/macros/.../s/.../exec)"
+            if (m_ws_dev := _APPS_SCRIPT_WS_DEV_RE.fullmatch(parts.path)) and _HOST.fullmatch(
+                m_ws_dev.group(1).lower()
+            ):
+                return "warn", "script.google.com (/a/macros/.../s/.../dev — expected /exec)"
+            return (
+                "fail",
+                "script.google.com (expected /macros/s/<id>/exec or /a/macros/<domain>/s/<id>/exec)",
+            )
         return "ok", f"{host}:{port}" if port not in (None, 443) else host
 
     if parts.scheme == "http" and host in ("127.0.0.1", "localhost"):
@@ -188,46 +210,66 @@ def _collect_raw_sources(
     env_file: str | Path | None,
 ) -> tuple[Path, dict[str, Any], _Sanitizer, str | None]:
     """Reads merged raw config (`os.environ` > `.env` > `settings.yaml`) and builds a sanitizer."""
-    dotenv_path = Path(env_file) if env_file is not None else Path(os.environ.get("ENV_FILE") or ".env")
-    missing_explicit_env = env_file is not None and not dotenv_path.is_file()
+    env_map: dict[str, str] = {str(k).upper(): v for k, v in os.environ.items() if k}
+    dotenv_path = Path(env_file) if env_file is not None else Path(env_map.get("ENV_FILE") or ".env")
+    pre_error: str | None = None
 
     dotenv_map: dict[str, str] = {}
-    if dotenv_path.is_file():
-        loaded_dotenv = dotenv_values(dotenv_path, encoding="utf-8")
-        dotenv_map = {str(k): v for k, v in loaded_dotenv.items() if k and v is not None}
+    try:
+        raw_env_text = dotenv_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if env_file is not None:
+            pre_error = "--env file does not exist"
+    except (UnicodeDecodeError, OSError) as exc:
+        pre_error = f"cannot read .env file ({_safe_exc_type(exc)})"
+    else:
+        loaded_dotenv = dotenv_values(stream=io.StringIO(raw_env_text))
+        dotenv_map = {str(k).upper(): v for k, v in loaded_dotenv.items() if k and v is not None}
 
     yaml_path = settings_file()
-    yaml_error: str | None = None
     yaml_map: dict[str, Any] = {}
     try:
-        check_no_secrets(yaml_path, Settings.SECRETS)
-        if yaml_path.is_file():
-            raw_yaml = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
-            if isinstance(raw_yaml, dict):
-                yaml_map = {str(k): v for k, v in raw_yaml.items()}
-            else:
-                yaml_error = "YAML root must be a mapping"
-    except ConfigError as err:
-        msg = str(err)
-        if "must not contain secrets;" in msg:
-            tail = msg.partition("must not contain secrets;")[2].strip()
-            yaml_error = f"settings YAML must not contain secrets; {tail}"
-        elif "YAML root must be a mapping" in msg:
-            yaml_error = "settings YAML root must be a mapping"
-        else:
-            yaml_error = "invalid YAML in settings file"
+        raw_yaml_text = yaml_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raw_yaml_text = None
+    except (UnicodeDecodeError, OSError) as exc:
+        raw_yaml_text = None
+        if pre_error is None:
+            pre_error = f"cannot read settings YAML ({_safe_exc_type(exc)})"
 
-    merged: dict[str, Any] = dict(yaml_map)
-    for key, val in dotenv_map.items():
-        merged[key] = val
-    for key, val in os.environ.items():
-        merged[key] = val
+    if raw_yaml_text is not None:
+        try:
+            check_no_secrets(yaml_path, Settings.SECRETS)
+            raw_yaml = yaml.safe_load(raw_yaml_text) or {}
+            if isinstance(raw_yaml, dict):
+                yaml_map = {str(k).upper(): v for k, v in raw_yaml.items() if k}
+            elif pre_error is None:
+                pre_error = "YAML root must be a mapping"
+        except (UnicodeDecodeError, OSError) as exc:
+            if pre_error is None:
+                pre_error = f"cannot read settings YAML ({_safe_exc_type(exc)})"
+        except ConfigError as err:
+            if pre_error is None:
+                msg = str(err)
+                if "must not contain secrets;" in msg:
+                    tail = msg.partition("must not contain secrets;")[2].strip()
+                    pre_error = f"settings YAML must not contain secrets; {tail}"
+                elif "YAML root must be a mapping" in msg:
+                    pre_error = "settings YAML root must be a mapping"
+                else:
+                    pre_error = "invalid YAML in settings file"
+        except yaml.YAMLError:
+            if pre_error is None:
+                pre_error = "invalid YAML in settings file"
+
+    merged: dict[str, Any] = {**yaml_map, **dotenv_map, **env_map}
 
     secret_names = Settings.SECRETS | frozenset(PROVIDER_KEY_VARIABLES)
     secret_values: list[str] = []
     for name in secret_names:
-        for source in (os.environ, dotenv_map):
-            raw_val = source.get(name)
+        upper_name = name.upper()
+        for source in (env_map, dotenv_map):
+            raw_val = source.get(upper_name)
             if isinstance(raw_val, str) and raw_val.strip():
                 secret_values.append(raw_val.strip())
 
@@ -235,29 +277,39 @@ def _collect_raw_sources(
     _configure_doctor_logging()
 
     forbidden = list(secret_values)
-    for source in (os.environ, dotenv_map, yaml_map):
+    for source in (env_map, dotenv_map, yaml_map):
         raw_sheet = source.get("SHEET_API_URL")
         if isinstance(raw_sheet, str) and raw_sheet.strip():
             cleaned_sheet = raw_sheet.strip()
             forbidden.append(cleaned_sheet)
-            if m := _APPS_SCRIPT_DEPLOYMENT_RE.search(cleaned_sheet):
-                forbidden.append(m.group(1))
+            if m_dom := _APPS_SCRIPT_WS_DOMAIN_RE.search(cleaned_sheet):
+                forbidden.append(m_dom.group(1))
+            if m_dep := _APPS_SCRIPT_DEPLOYMENT_RE.search(cleaned_sheet):
+                forbidden.append(m_dep.group(1))
 
-    if missing_explicit_env:
-        return dotenv_path, merged, _Sanitizer(forbidden), "--env file does not exist"
-    return dotenv_path, merged, _Sanitizer(forbidden), yaml_error
+    return dotenv_path, merged, _Sanitizer(forbidden), pre_error
 
 
-def _has_llm_key(settings: Settings) -> bool:
+def _check_llm_credentials(settings: Settings) -> tuple[CheckStatus, str | None]:
     if settings.LLM_API_KEY is not None:
-        return True
-    provider = _provider(settings.LLM_MODEL)
+        return "ok", None
+    provider = _provider(settings.LLM_MODEL).lower()
     if provider in _KEYLESS_PROVIDERS:
-        return True
-    env_vars = _PROVIDER_ENV_VARS.get(provider, ())
-    if any((os.environ.get(var) or "").strip() for var in env_vars):
-        return True
-    return bool(settings.LLM_API_BASE and not env_vars and not provider)
+        return "ok", None
+    if provider in _PROVIDER_ENV_VARS:
+        env_vars = _PROVIDER_ENV_VARS[provider]
+        if any((os.environ.get(var) or "").strip() for var in env_vars):
+            return "ok", None
+        hint = f" or {' / '.join(env_vars)}"
+        return "fail", f"missing LLM key for model {settings.LLM_MODEL} (set LLM_API_KEY{hint})"
+    if settings.LLM_API_BASE and not provider:
+        return "ok", None
+    prov_label = provider or "unprefixed"
+    return (
+        "warn",
+        f"LLM_API_KEY is not set for unmapped provider '{prov_label}' ({settings.LLM_MODEL}); "
+        "provider-specific credentials are not statically mapped",
+    )
 
 
 def _has_transcribe_key(settings: Settings) -> bool:
@@ -270,59 +322,36 @@ def _has_transcribe_key(settings: Settings) -> bool:
 
 def _check_settings(
     dotenv_path: Path,
-    raw: dict[str, Any],
     pre_error: str | None,
 ) -> tuple[CheckResult, Settings | None]:
     if pre_error is not None:
         return CheckResult("settings", "fail", pre_error), None
 
-    raw_voice_url = str(raw.get("VOICE_API_URL") or "").strip()
-    raw_auth_secret = str(raw.get("APP_AUTH_SECRET") or "").strip()
-    local_http_voice = bool(raw_voice_url) and _valid_local_http_origin(raw_voice_url)
-
-    loaded: Settings | None = None
-    validation_errors: list[str] = []
-
     try:
-        if local_http_voice and len(raw_auth_secret.encode("utf-8")) >= MIN_SECRET_BYTES:
-            loaded = Settings(_env_file=dotenv_path, VOICE_API_URL="", APP_AUTH_SECRET=None)  # type: ignore[call-arg]
-        else:
-            loaded = Settings(_env_file=dotenv_path)  # type: ignore[call-arg]
+        loaded = Settings(_env_file=dotenv_path)  # type: ignore[call-arg]
     except ValidationError as err:
         problems = validation_problems(err)
-        validation_errors.extend(problems)
-        # Try loading core bot fields without Mini App / Voice pair so core settings and network
-        # checks can still be diagnosed in the same run if only Mini App / Voice config is broken.
-        error_locs = {str(p["loc"][0]) if p["loc"] else "settings" for p in err.errors(include_input=False)}
-        if error_locs <= _VOICE_CONFIG_FIELDS:
-            try:
-                loaded = Settings(  # type: ignore[call-arg]
-                    _env_file=dotenv_path,
-                    MINIAPP_URL="",
-                    VOICE_API_URL="",
-                    APP_AUTH_SECRET=None,
-                )
-            except ValidationError:
-                loaded = None
-
-    if loaded is not None:
-        logs.register_secrets(loaded.secret_values())
-
-    if loaded is None:
-        detail = "; ".join(validation_errors) if validation_errors else "invalid settings"
+        detail = "; ".join(problems) if problems else "invalid settings"
         return CheckResult("settings", "fail", detail), None
+    except (UnicodeDecodeError, OSError) as exc:
+        return CheckResult("settings", "fail", f"cannot load settings ({_safe_exc_type(exc)})"), None
+    except (ConfigError, yaml.YAMLError):
+        return CheckResult("settings", "fail", "invalid settings configuration"), None
 
-    issues: list[str] = list(validation_errors)
+    logs.register_secrets(loaded.secret_values())
+
+    issues: list[str] = []
     warnings: list[str] = []
 
     chat_count = len(loaded.ALLOWED_CHAT_IDS)
     if chat_count == 0:
         issues.append("ALLOWED_CHAT_IDS must contain at least 1 chat_id (count=0)")
 
-    if not _has_llm_key(loaded):
-        provider = _provider(loaded.LLM_MODEL) or "configured"
-        hint = " or GEMINI_API_KEY" if provider == "gemini" else ""
-        issues.append(f"missing LLM key for model {loaded.LLM_MODEL} (set LLM_API_KEY{hint})")
+    llm_status, llm_detail = _check_llm_credentials(loaded)
+    if llm_status == "fail" and llm_detail is not None:
+        issues.append(llm_detail)
+    elif llm_status == "warn" and llm_detail is not None:
+        warnings.append(llm_detail)
 
     if not _has_transcribe_key(loaded):
         issues.append(
@@ -355,7 +384,8 @@ def _check_miniapp_voice_config(raw: dict[str, Any]) -> tuple[CheckResult | None
     """
     raw_miniapp = str(raw.get("MINIAPP_URL") or "").strip()
     raw_voice = str(raw.get("VOICE_API_URL") or "").strip()
-    raw_secret = str(raw.get("APP_AUTH_SECRET") or "").strip()
+    raw_secret_obj = raw.get("APP_AUTH_SECRET")
+    raw_secret = raw_secret_obj if isinstance(raw_secret_obj, str) and raw_secret_obj.strip() else ""
     raw_origins = raw.get("VOICE_ALLOWED_ORIGINS")
 
     has_origins = (
@@ -366,11 +396,10 @@ def _check_miniapp_voice_config(raw: dict[str, Any]) -> tuple[CheckResult | None
         else False
     )
 
-    if not raw_miniapp and not raw_voice:
+    if not raw_miniapp and not raw_voice and not raw_secret:
         return None, None, None
 
     failures: list[str] = []
-    warnings: list[str] = []
     notes: list[str] = []
 
     miniapp_origin: str | None = None
@@ -389,27 +418,25 @@ def _check_miniapp_voice_config(raw: dict[str, Any]) -> tuple[CheckResult | None
         if _valid_https_origin(raw_voice):
             voice_base_url = raw_voice.rstrip("/")
             notes.append(f"voice_api={voice_base_url}")
-        elif _valid_local_http_origin(raw_voice):
-            voice_base_url = raw_voice.rstrip("/")
-            warnings.append(
-                f"VOICE_API_URL ({voice_base_url}) uses local http:// (dev only; production requires https://)"
-            )
-            notes.append(f"voice_api={voice_base_url}")
         else:
             failures.append(
                 "VOICE_API_URL must be an https://host[:port] origin without path or query "
-                "(or http://127.0.0.1 / http://localhost in local dev)"
+                "(use --voice-url http://127.0.0.1:8081 to probe a local voice server)"
             )
 
         if not raw_secret:
             failures.append("APP_AUTH_SECRET is missing (required when VOICE_API_URL is set)")
-        elif len(raw_secret) < MIN_SECRET_BYTES or len(raw_secret.encode("utf-8")) < MIN_SECRET_BYTES:
-            failures.append(f"APP_AUTH_SECRET must be at least {MIN_SECRET_BYTES} characters/bytes")
+    elif raw_secret:
+        failures.append("VOICE_API_URL is missing (VOICE_API_URL and APP_AUTH_SECRET must be set together)")
+
+    if raw_secret:
+        if len(raw_secret.encode("utf-8")) < MIN_SECRET_BYTES:
+            failures.append(f"APP_AUTH_SECRET must be at least {MIN_SECRET_BYTES} UTF-8 bytes")
         else:
             try:
                 derive_keys(raw_secret)
             except ValueError:
-                failures.append(f"APP_AUTH_SECRET must be at least {MIN_SECRET_BYTES} bytes")
+                failures.append(f"APP_AUTH_SECRET must be at least {MIN_SECRET_BYTES} UTF-8 bytes")
             else:
                 notes.append("auth_secret=ok")
 
@@ -454,9 +481,6 @@ def _check_miniapp_voice_config(raw: dict[str, Any]) -> tuple[CheckResult | None
             miniapp_origin,
             voice_base_url,
         )
-    if warnings:
-        detail = "; ".join([*notes, *warnings])
-        return CheckResult("miniapp_voice_config", "warn", detail), miniapp_origin, voice_base_url
     return CheckResult("miniapp_voice_config", "ok", ", ".join(notes)), miniapp_origin, voice_base_url
 
 
@@ -530,11 +554,6 @@ async def _check_sheet_api(
     return CheckResult("sheet_api", "ok", detail)
 
 
-def _safe_exc_type(err: BaseException) -> str:
-    name = type(err).__name__
-    return name if _CLASS_IDENT_RE.fullmatch(name) else "HTTPError"
-
-
 async def _telegram_get(
     client: httpx.AsyncClient,
     token: str,
@@ -549,7 +568,7 @@ async def _telegram_get(
     except TimeoutError:
         return None, f"{method}: TimeoutError"
     except httpx.HTTPError as err:
-        return None, f"{method}: {_safe_exc_type(err)}"
+        return None, f"{method}: {_safe_exc_type(err, 'HTTPError')}"
     except Exception as err:
         return None, f"{method}: {logs.describe(err)}"
 
@@ -634,13 +653,12 @@ async def _check_telegram_api(
         parts.append("mode=webhook requires an active webhook; run `make webhook-set`")
         return CheckResult("telegram_api", "fail", f"{', '.join(parts)} ({elapsed_ms}ms)")
 
-    if mode == "auto" and has_webhook_secret and not webhook_set:
-        parts.append(
-            "TELEGRAM_WEBHOOK_SECRET is set (webhook mode) but webhook_set=false; run `make webhook-set`"
-        )
-        return CheckResult("telegram_api", "fail", f"{', '.join(parts)} ({elapsed_ms}ms)")
-
     warnings: list[str] = []
+    if mode == "auto" and has_webhook_secret and not webhook_set:
+        warnings.append(
+            "TELEGRAM_WEBHOOK_SECRET is set but webhook_set=false "
+            "(pre-deploy? run `make webhook-set` / `scripts/set-webhook.sh set`)"
+        )
     if mode == "auto" and not has_webhook_secret and webhook_set:
         warnings.append(
             "webhook is active (local polling would fail with 409 Conflict; "
@@ -658,19 +676,60 @@ async def _check_telegram_api(
     return CheckResult("telegram_api", "ok", f"{', '.join(parts)} ({elapsed_ms}ms)")
 
 
+def _parse_voice_probe_url(
+    raw_url: str,
+    *,
+    allow_local_http: bool,
+) -> tuple[str | None, bool, str | None]:
+    candidate = raw_url.strip()
+    if (
+        candidate.endswith("/")
+        and candidate.count("/") == 3
+        and "?" not in candidate
+        and "#" not in candidate
+    ):
+        candidate = candidate[:-1]
+    if _valid_https_origin(candidate):
+        return candidate, False, None
+    if allow_local_http and _valid_local_http_origin(candidate):
+        return candidate, True, None
+    if _valid_local_http_origin(candidate):
+        return (
+            None,
+            False,
+            "VOICE_API_URL must use https:// (use --voice-url http://127.0.0.1:8081 to probe local HTTP)",
+        )
+    return (
+        None,
+        False,
+        "voice URL must be an https://host[:port] origin without path/query "
+        "(http:// is only allowed for 127.0.0.1 or localhost via --voice-url)",
+    )
+
+
 async def _check_voice_service(
-    voice_base_url: str | None,
+    target_url: str | None,
     miniapp_origin: str | None,
     client: httpx.AsyncClient,
     timeout_s: float,
+    *,
+    allow_local_http: bool = False,
 ) -> CheckResult:
-    if not voice_base_url:
+    if target_url is None or not target_url.strip():
         return CheckResult(
             "voice_service",
             "fail",
             "VOICE_API_URL is missing or invalid (cannot probe standalone voice service)",
         )
 
+    voice_base_url, is_local_http, url_err = _parse_voice_probe_url(
+        target_url,
+        allow_local_http=allow_local_http,
+    )
+    if url_err is not None or voice_base_url is None:
+        return CheckResult("voice_service", "fail", url_err or "invalid voice URL")
+
+    local_note = f", local http probe ({voice_base_url})" if is_local_http else ""
     started = time.perf_counter()
     health_url = f"{voice_base_url}{HEALTHZ_PATH}"
     try:
@@ -681,7 +740,9 @@ async def _check_voice_service(
         return CheckResult("voice_service", "fail", f"healthz: TimeoutError ({elapsed_ms}ms)")
     except httpx.HTTPError as err:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        return CheckResult("voice_service", "fail", f"healthz: {_safe_exc_type(err)} ({elapsed_ms}ms)")
+        return CheckResult(
+            "voice_service", "fail", f"healthz: {_safe_exc_type(err, 'HTTPError')} ({elapsed_ms}ms)"
+        )
     except Exception as err:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         return CheckResult("voice_service", "fail", f"healthz: {logs.describe(err)} ({elapsed_ms}ms)")
@@ -697,13 +758,16 @@ async def _check_voice_service(
     if miniapp_origin is None:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         return CheckResult(
-            "voice_service", "ok", f"healthz=200, cors=skipped (no MINIAPP_URL) ({elapsed_ms}ms)"
+            "voice_service",
+            "ok",
+            f"healthz=200, cors=skipped (no MINIAPP_URL){local_note} ({elapsed_ms}ms)",
         )
 
     preflight_url = f"{voice_base_url}{TRANSCRIPTIONS_PATH}"
     headers = {
         "Origin": miniapp_origin,
         "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": ", ".join(CORS_ALLOW_HEADERS),
     }
     try:
         async with asyncio.timeout(timeout_s):
@@ -713,7 +777,11 @@ async def _check_voice_service(
         return CheckResult("voice_service", "fail", f"cors preflight: TimeoutError ({elapsed_ms}ms)")
     except httpx.HTTPError as err:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        return CheckResult("voice_service", "fail", f"cors preflight: {_safe_exc_type(err)} ({elapsed_ms}ms)")
+        return CheckResult(
+            "voice_service",
+            "fail",
+            f"cors preflight: {_safe_exc_type(err, 'HTTPError')} ({elapsed_ms}ms)",
+        )
     except Exception as err:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         return CheckResult("voice_service", "fail", f"cors preflight: {logs.describe(err)} ({elapsed_ms}ms)")
@@ -732,10 +800,22 @@ async def _check_voice_service(
             f"check VOICE_ALLOWED_ORIGINS on voice service) ({elapsed_ms}ms)",
         )
 
+    raw_allow_headers = ", ".join(cors_resp.headers.get_list("access-control-allow-headers"))
+    allowed_headers = {h.strip().lower() for h in raw_allow_headers.split(",") if h.strip()}
+    if "*" not in allowed_headers:
+        missing_headers = [h for h in CORS_ALLOW_HEADERS if h.lower() not in allowed_headers]
+        if missing_headers:
+            return CheckResult(
+                "voice_service",
+                "fail",
+                f"healthz=200, cors=fail (HTTP {cors_resp.status_code}, "
+                f"missing Access-Control-Allow-Headers: {', '.join(missing_headers)}) ({elapsed_ms}ms)",
+            )
+
     return CheckResult(
         "voice_service",
         "ok",
-        f"healthz=200, cors=ok (Origin={miniapp_origin}) ({elapsed_ms}ms)",
+        f"healthz=200, cors=ok (Origin={miniapp_origin}){local_note} ({elapsed_ms}ms)",
     )
 
 
@@ -744,15 +824,19 @@ async def run_doctor(
     env_file: str | Path | None = None,
     mode: DoctorMode = "auto",
     voice: bool = False,
+    voice_url: str | None = None,
     timeout: float = 10.0,  # noqa: ASYNC109
     http: httpx.AsyncClient | None = None,
     now: Callable[[], float] = time.time,
 ) -> DoctorReport:
     """Runs all pre-flight checks and returns a sanitized `DoctorReport`."""
+    if isinstance(timeout, bool) or not (math.isfinite(timeout) and timeout > 0):
+        raise ValueError("--timeout must be a finite number greater than 0")
+
     dotenv_path, raw, sanitizer, pre_error = _collect_raw_sources(env_file)
 
     checks: list[CheckResult] = []
-    settings_check, loaded_settings = _check_settings(dotenv_path, raw, pre_error)
+    settings_check, loaded_settings = _check_settings(dotenv_path, pre_error)
     checks.append(settings_check)
 
     miniapp_check, miniapp_origin, voice_base_url = _check_miniapp_voice_config(raw)
@@ -760,7 +844,9 @@ async def run_doctor(
         checks.append(miniapp_check)
 
     raw_voice_configured = bool(str(raw.get("VOICE_API_URL") or "").strip())
-    should_probe_voice = voice or raw_voice_configured
+    has_voice_override = voice_url is not None
+    probe_url = voice_url if has_voice_override else voice_base_url
+    should_probe_voice = voice or has_voice_override or raw_voice_configured
 
     async def _run_network_checks(client: httpx.AsyncClient) -> None:
         if loaded_settings is not None:
@@ -775,7 +861,15 @@ async def run_doctor(
                 )
             )
         if should_probe_voice:
-            checks.append(await _check_voice_service(voice_base_url, miniapp_origin, client, timeout))
+            checks.append(
+                await _check_voice_service(
+                    probe_url,
+                    miniapp_origin,
+                    client,
+                    timeout,
+                    allow_local_http=has_voice_override,
+                )
+            )
 
     if loaded_settings is not None or should_probe_voice:
         if http is not None:
@@ -804,6 +898,18 @@ def format_json(report: DoctorReport) -> str:
     return json.dumps(report.to_dict(), ensure_ascii=False, indent=2)
 
 
+def _positive_timeout(raw: str | float) -> float:
+    if isinstance(raw, bool):
+        raise argparse.ArgumentTypeError("must be a finite number greater than 0")
+    try:
+        val = float(raw)
+    except (TypeError, ValueError) as err:
+        raise argparse.ArgumentTypeError("must be a finite number greater than 0") from err
+    if not (math.isfinite(val) and val > 0):
+        raise argparse.ArgumentTypeError("must be a finite number greater than 0")
+    return val
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-doctor",
@@ -827,8 +933,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force standalone VOICE_API_URL /healthz and CORS preflight checks",
     )
     parser.add_argument(
+        "--voice-url",
+        dest="voice_url",
+        default=None,
+        metavar="URL",
+        help=(
+            "Override URL probed by voice_service check "
+            "(allows http://127.0.0.1[:port] or http://localhost[:port] for local dev)"
+        ),
+    )
+    parser.add_argument(
         "--timeout",
-        type=float,
+        type=_positive_timeout,
         default=10.0,
         help="Per-request network timeout in seconds (default: 10.0)",
     )
@@ -841,12 +957,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _positive_timeout(value: float) -> float:
-    if value <= 0:
-        raise ValueError("--timeout must be greater than 0")
-    return value
-
-
 async def run_cli(
     argv: list[str] | None = None,
     *,
@@ -855,16 +965,13 @@ async def run_cli(
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    try:
-        timeout = _positive_timeout(args.timeout)
-    except ValueError as err:
-        parser.error(str(err))
 
     report = await run_doctor(
         env_file=args.env_file,
         mode=args.mode,
         voice=args.voice,
-        timeout=timeout,
+        voice_url=args.voice_url,
+        timeout=args.timeout,
         http=http,
     )
     out = stdout if stdout is not None else sys.stdout

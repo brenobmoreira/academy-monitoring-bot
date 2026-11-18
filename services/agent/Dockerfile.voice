@@ -7,24 +7,27 @@ ENV PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
+# Create non-root user early to avoid large chown layers over the virtualenv
+RUN useradd -u 1000 -s /bin/bash -m appuser
+
 WORKDIR /app
+RUN chown appuser:appuser /app
+
+# Run and install directly as appuser
+USER appuser
 
 # Install dependencies first for optimal layer caching
-COPY pyproject.toml uv.lock README.md ./
+COPY --chown=appuser:appuser pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy application source code and settings
-COPY . .
+COPY --chown=appuser:appuser . .
 
 # Install project package into the virtualenv
 RUN uv sync --frozen --no-dev
 
 # Use virtual environment binaries
 ENV PATH="/app/.venv/bin:$PATH"
-
-# Run as non-root user
-RUN useradd -u 1000 -s /bin/bash appuser && chown -R appuser:appuser /app
-USER appuser
 
 EXPOSE 8080
 

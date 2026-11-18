@@ -50,7 +50,8 @@ serve: ## Serve the ASGI webhook app with uvicorn (HOST=127.0.0.1 PORT=8080)
 	cd $(AGENT) && uv run uvicorn agent.asgi:app --host $(HOST) --port $(PORT)
 
 serve-voice: ## Serve the standalone voice ASGI app with uvicorn (HOST=127.0.0.1 VOICE_PORT=8081)
-	cd $(AGENT) && uv run uvicorn agent.voice_asgi:app --reload --host $(HOST) --port $(VOICE_PORT)
+	# Spec §5.1: single worker (--workers 1) is mandatory for in-memory budgets, rate limits and deduplication.
+	cd $(AGENT) && uv run uvicorn agent.voice_asgi:app --workers 1 --host $(HOST) --port $(VOICE_PORT)
 
 remind: ## POST /remind to the local server (KIND=daily|weekly; REMINDER_TOKEN from env or services/agent/.env)
 	@token="$${REMINDER_TOKEN:-$$(sed -n 's/^REMINDER_TOKEN=//p' $(AGENT)/.env 2>/dev/null)}"; \

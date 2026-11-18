@@ -1,0 +1,13 @@
+# Build and push container image for the standalone voice ASGI service (spec §5.1)
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'Dockerfile.voice'
+      - '-t'
+      - '$_IMAGE'
+      - '.'
+
+images:
+  - '$_IMAGE'

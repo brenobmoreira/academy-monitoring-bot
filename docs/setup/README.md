@@ -159,32 +159,39 @@ A voz no **chat Telegram funciona sem este serviço** (basta configurar `TRANSCR
 
 ### 1. Requisitos e Alertas de Custo (§5.1)
 
-1. **Spend Cap no Gemini (AI Studio):** Configure um teto de gastos (*spend cap*) no projeto Google Cloud/Gemini da chave de transcrição, além de um alerta de orçamento por e-mail abaixo desse teto. Como o teto pode levar cerca de 10 minutos para cortar chamadas após ser atingido, o alerta antecipado previne surpresas na fatura.
-2. **`--max-instances 1`:** Limites de taxa, orçamentos diários de tokens e cache de idempotência residem na memória do processo por instância. Manter no máximo 1 instância reduz janelas de estouro de orçamento durante picos de tráfego.
-3. **`--allow-unauthenticated`:** Necessário pois as requisições partem do navegador do usuário (Mini App). A autenticação é feita via `Bearer` session token (emitido com validação de `initData` do Telegram ou link code) e política de `CORS` estrita aos domínios autorizados em `VOICE_ALLOWED_ORIGINS`.
+1. **`--max-instances 1` (ou `2`):** Limites de taxa, orçamentos diários de tokens e cache de idempotência residem na memória do processo por instância. Manter no máximo 1 a 2 instâncias reduz janelas de estouro de orçamento durante picos de tráfego. O Cloud Run trata esse valor como alvo e pode rodar brevemente mais instâncias em picos; cada instância extra inicia com contadores limpos.
+2. **Spend Cap no Gemini (AI Studio):** Configure um teto de gastos (*spend cap*) no projeto Google Cloud/Gemini da chave de transcrição. Como o teto pode levar cerca de 10 minutos para cortar chamadas após ser atingido, os gastos continuam durante essa janela.
+3. **Billing Budget com alerta por e-mail:** Configure obrigatoriamente um orçamento de faturamento (*Billing Budget*) com alerta por e-mail abaixo do teto de gasto (*spend cap*) antes de habilitar tráfego público, completando todos os 5 itens de §5.1 e prevenindo surpresas na fatura.
+4. **Segredos via Secret Manager:** Carregue `APP_AUTH_SECRET`, `TRANSCRIBE_API_KEY` e `TELEGRAM_BOT_TOKEN` exclusivamente a partir do Secret Manager (`--set-secrets`). Nunca versionar nem manter segredos em texto puro.
+5. **Scale to zero:** Escala a zero é permitida e esperada; cold starts resetam contadores em memória e conjuntos de uso único conformes §5.6 e §6.8 da especificação.
+6. **`--allow-unauthenticated`:** Necessário pois as requisições partem do navegador do usuário (Mini App). A autenticação é feita via `Bearer` session token (emitido com validação de `initData` do Telegram ou link code) e política de `CORS` estrita aos domínios autorizados em `VOICE_ALLOWED_ORIGINS`.
 
 ### 2. Deploy do serviço standalone
 
 Crie o segredo `APP_AUTH_SECRET` (mínimo de 32 caracteres gerados via `openssl rand -hex 32`) no Secret Manager e conceda acesso à service account:
 
 ```bash
-PROJECT=<project-id>; REGION=us-central1
+PROJECT=PROJECT_ID; REGION=REGION; REPO=REPO
 CLIENT=<client-slug>                      # e.g. breno ou zoio (um serviço por cliente)
-SERVICE_VOICE=fitness-voice-${CLIENT}
+SERVICE_VOICE=fitness-voice               # ou fitness-voice-${CLIENT}
 SA=fitness-agent@$PROJECT.iam.gserviceaccount.com
 
 # Criação do segredo compartilhado (caso ainda não exista)
 openssl rand -hex 32 | tr -d '\n' | gcloud secrets create APP_AUTH_SECRET_${CLIENT} --data-file=-
 gcloud secrets add-iam-policy-binding APP_AUTH_SECRET_${CLIENT} --member=serviceAccount:$SA --role=roles/secretmanager.secretAccessor
 
-# Deploy do container do serviço de voz a partir da raiz do repositório
-gcloud run deploy "$SERVICE_VOICE" \
-  --source services/agent \
-  --dockerfile services/agent/Dockerfile.voice \
+# 1. Build e push da imagem isolada com Cloud Build (a partir da raiz do repositório)
+gcloud builds submit services/agent \
+  --config services/agent/cloudbuild.voice.yaml \
+  --substitutions=_IMAGE=REGION-docker.pkg.dev/PROJECT_ID/REPO/fitness-voice:latest
+
+# 2. Deploy do container no Cloud Run a partir da imagem gerada
+gcloud run deploy fitness-voice \
+  --image REGION-docker.pkg.dev/PROJECT_ID/REPO/fitness-voice:latest \
   --region $REGION \
   --service-account $SA \
   --allow-unauthenticated \
-  --max-instances 1 \
+  --max-instances=2 \
   --set-env-vars ALLOWED_CHAT_IDS="<chat_id>",VOICE_ALLOWED_ORIGINS="https://<seu-usuario>.github.io" \
   --set-secrets APP_AUTH_SECRET=APP_AUTH_SECRET_${CLIENT}:latest,TRANSCRIBE_API_KEY=TRANSCRIBE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN_${CLIENT}:latest
 ```
@@ -195,7 +202,7 @@ Após o deploy do serviço de voz:
 
 1. Obtenha a URL do serviço gerado:
    ```bash
-   VOICE_URL=$(gcloud run services describe "$SERVICE_VOICE" --region $REGION --format 'value(status.url)')
+   VOICE_URL=$(gcloud run services describe fitness-voice --region $REGION --format 'value(status.url)')
    ```
 2. Configure o bot do cliente (`SERVICE=fitness-agent-${CLIENT}`) com a URL e o mesmo segredo:
    ```bash

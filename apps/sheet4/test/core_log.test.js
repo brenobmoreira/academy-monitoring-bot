@@ -303,3 +303,271 @@ test('undo of an action that wrote the same cells twice checks only the latest w
   trimRows(ctx, 'Diário');
   assert.equal(snapshot(ctx, ['Diário']), before);
 });
+
+test('action.committed listener errors are isolated in ChangeLog.run and Undo.apply_, preserving existing warnings', () => {
+  const ctx = boot({ tabs: { diary: diaryRows() } });
+  const errs = [];
+  const origErr = ctx.console.error;
+  ctx.console.error = (...a) => { errs.push(a); origErr(...a); };
+  ctx.Core.on('action.committed', () => {
+    throw new Error('derived refresh exploded');
+  });
+
+  const res1 = ctx.ChangeLog.run('Com aviso prévio', () => {
+    ctx.Tabs.update('diary', 6, { weightKg: 68.2 });
+    return { saved: true, warnings: ['existing_warning'] };
+  });
+  assert.equal(ctx.Tabs.readRow('diary', 6).weightKg, 68.2);
+  eq(res1, { saved: true, warnings: ['existing_warning', 'derived_refresh_failed'] });
+  assert.equal(errs.length, 1);
+
+  const undone = ctx.Undo.last();
+  assert.equal(ctx.Tabs.readRow('diary', 6).weightKg, 67.4);
+  eq(undone.warnings, ['derived_refresh_failed']);
+  assert.equal(errs.length, 2);
+});
+
+test('partial update, restored: rollback restores written cells when a later setValue throws, and proves restoration by re-read', () => {
+  const ctx = boot({ tabs: { diary: diaryRows() } });
+  const s = sheet(ctx, 'Diário');
+  const beforeSnap = snapshot(ctx, ['Diário']);
+  const origGetRange = s.getRange.bind(s);
+  const sleepCol = ctx.Tabs.headerMap('diary').sleepH;
+  const weightCol = ctx.Tabs.headerMap('diary').weightKg;
+  let sleepWrites = 0;
+  let weightWrites = 0;
+  let observedApplied = null;
+  const origRestore = ctx.Undo.restore_.bind(ctx.Undo);
+  ctx.Undo.restore_ = (c) => {
+    observedApplied = ctx.Undo.applied_(c);
+    return origRestore(c);
+  };
+  s.getRange = (r, c, ...rest) => {
+    const rng = origGetRange(r, c, ...rest);
+    if (rest.length === 0 && r === 6 && c === weightCol) {
+      const realSet = rng.setValue.bind(rng);
+      rng.setValue = (v) => { weightWrites++; return realSet(v); };
+    }
+    if (rest.length === 0 && r === 6 && c === sleepCol) {
+      const realSet = rng.setValue.bind(rng);
+      rng.setValue = (v) => {
+        sleepWrites++;
+        if (sleepWrites === 1) throw new Error('second cell failed');
+        return realSet(v);
+      };
+    }
+    return rng;
+  };
+
+  assert.throws(
+    () => ctx.ChangeLog.run('Update parcial', () => ctx.Tabs.update('diary', 6, { weightKg: 70.1, sleepH: 8 })),
+    /second cell failed/,
+  );
+  assert.equal(observedApplied, false, 'applied_ was false on the half-written row');
+  assert.equal(weightWrites, 2, 'first cell written then restored');
+  assert.equal(sleepWrites, 1, 'unwritten second cell already matched before and needed no restore write');
+  assert.equal(ctx.ChangeLog.lastRunState_, 'rolled_back');
+  assert.equal(snapshot(ctx, ['Diário']), beforeSnap);
+  assert.ok(ctx.ChangeLog.entries().every((e) => e.undone instanceof Date));
+});
+
+test('proven rollback covers update, append, delete and cells when an action throws midway', () => {
+  const ctx = boot({ tabs: { diary: diaryRows() } });
+  ctx.Tabs.ensure('today');
+  const todaySheet = sheet(ctx, 'Hoje');
+  todaySheet.getRange('B5').setValue('antes');
+  todaySheet.getRange('B6').setFormula('=1+1');
+  const beforeSnap = snapshot(ctx, ['Diário', 'Hoje']);
+
+  // Partial setCells on Hoje (second cell throws) after append + delete + update on Diário
+  const origTodayRange = todaySheet.getRange.bind(todaySheet);
+  let b6Calls = 0;
+  todaySheet.getRange = (a, ...rest) => {
+    const rng = origTodayRange(a, ...rest);
+    if (a === 'B6') {
+      const realSet = rng.setValue.bind(rng);
+      rng.setValue = (v) => {
+        b6Calls++;
+        if (b6Calls === 1) throw new Error('layout cell failed');
+        return realSet(v);
+      };
+    }
+    return rng;
+  };
+
+  assert.throws(() => ctx.ChangeLog.run('Tudo junto', () => {
+    ctx.Tabs.update('diary', 6, { weightKg: 68 });
+    ctx.Tabs.remove('diary', 7);
+    ctx.Tabs.append('diary', { date: '2026-09-29', weightKg: 66.5 });
+    ctx.Tabs.setCells('today', { B5: 'depois', B6: 'texto' });
+  }), /layout cell failed/);
+
+  todaySheet.getRange = origTodayRange;
+  trimRows(ctx, 'Diário');
+  assert.equal(snapshot(ctx, ['Diário', 'Hoje']), beforeSnap);
+  assert.equal(ctx.ChangeLog.lastRunState_, 'rolled_back');
+});
+
+test('partial update, not proven: restore throw, re-read throw, or re-read mismatch throws rollback_failed after trying earlier changes', () => {
+  const sleepColOf = (ctx) => ctx.Tabs.headerMap('diary').sleepH;
+  const weightColOf = (ctx) => ctx.Tabs.headerMap('diary').weightKg;
+
+  // Case 1: restoring write throws, and an earlier change in the same action is still reverted first
+  {
+    const ctx = boot({ tabs: { diary: diaryRows(), goals: [] } });
+    const s = sheet(ctx, 'Diário');
+    const origGetRange = s.getRange.bind(s);
+    const weightCol = weightColOf(ctx);
+    const sleepCol = sleepColOf(ctx);
+    let weightCalls = 0;
+    s.getRange = (r, c, ...rest) => {
+      const rng = origGetRange(r, c, ...rest);
+      if (rest.length === 0 && r === 6 && c === weightCol) {
+        const realSet = rng.setValue.bind(rng);
+        rng.setValue = (v) => {
+          weightCalls++;
+          if (weightCalls === 2) throw new Error('restore write failed');
+          return realSet(v);
+        };
+      }
+      if (rest.length === 0 && r === 6 && c === sleepCol) {
+        rng.setValue = () => { throw new Error('second cell failed'); };
+      }
+      return rng;
+    };
+    assert.throws(() => ctx.ChangeLog.run('Falha na restauração', () => {
+      ctx.Tabs.append('goals', { id: 'M001', kcal: 2200 });
+      ctx.Tabs.update('diary', 6, { weightKg: 70, sleepH: 8 });
+    }), (err) => err.code === 'rollback_failed' && err.writeState === 'unknown');
+    assert.equal(ctx.ChangeLog.lastRunState_, 'rollback_failed');
+    assert.equal(ctx.Tabs.read('goals').length, 0, 'earlier change on Goals was still reverted after Diário failed');
+  }
+
+  // Case 2: restoring write succeeds, but re-read throws
+  {
+    const ctx = boot({ tabs: { diary: diaryRows() } });
+    const s = sheet(ctx, 'Diário');
+    const origGetRange = s.getRange.bind(s);
+    const weightCol = weightColOf(ctx);
+    const sleepCol = sleepColOf(ctx);
+    let calls = 0;
+    let restoredWriteDone = false;
+    s.getRange = (r, c, ...rest) => {
+      const rng = origGetRange(r, c, ...rest);
+      if (rest.length === 0 && r === 6 && c === weightCol) {
+        const realSet = rng.setValue.bind(rng);
+        rng.setValue = (v) => {
+          calls++;
+          const out = realSet(v);
+          if (calls === 2) restoredWriteDone = true;
+          return out;
+        };
+        const realGet = rng.getValue.bind(rng);
+        rng.getValue = () => {
+          if (restoredWriteDone) throw new Error('re-read failed');
+          return realGet();
+        };
+      }
+      if (rest.length === 0 && r === 6 && c === sleepCol) {
+        rng.setValue = () => { throw new Error('second cell failed'); };
+      }
+      return rng;
+    };
+    assert.throws(
+      () => ctx.ChangeLog.run('Falha na releitura', () => ctx.Tabs.update('diary', 6, { weightKg: 70, sleepH: 8 })),
+      (err) => err.code === 'rollback_failed' && err.writeState === 'unknown',
+    );
+    assert.equal(ctx.ChangeLog.lastRunState_, 'rollback_failed');
+  }
+
+  // Case 3: restoring setValue silently drops the write (no exception), caught only by Undo.restored_ re-read
+  {
+    const ctx = boot({ tabs: { diary: diaryRows() } });
+    const s = sheet(ctx, 'Diário');
+    const origGetRange = s.getRange.bind(s);
+    const weightCol = weightColOf(ctx);
+    const sleepCol = sleepColOf(ctx);
+    let weightCalls = 0;
+    s.getRange = (r, c, ...rest) => {
+      const rng = origGetRange(r, c, ...rest);
+      if (rest.length === 0 && r === 6 && c === weightCol) {
+        const realSet = rng.setValue.bind(rng);
+        rng.setValue = (v) => {
+          weightCalls++;
+          if (weightCalls === 2) return rng; // silent no-op during restore
+          return realSet(v);
+        };
+      }
+      if (rest.length === 0 && r === 6 && c === sleepCol) {
+        rng.setValue = () => { throw new Error('second cell failed'); };
+      }
+      return rng;
+    };
+    assert.throws(
+      () => ctx.ChangeLog.run('Releitura divergente', () => ctx.Tabs.update('diary', 6, { weightKg: 70, sleepH: 8 })),
+      (err) => err.code === 'rollback_failed' && err.writeState === 'unknown',
+    );
+    assert.equal(ctx.ChangeLog.lastRunState_, 'rollback_failed');
+  }
+});
+
+test('skipped or unverifiable change (legacy formula or unknown change kind) throws rollback_failed', () => {
+  // 1. A partial change with a legacy formula in `before` (which old applied_ returned false for and skipped)
+  const ctx = boot({ tabs: { diary: diaryRows() } });
+  const legacyBefore = ctx.Tabs.snapCell('=60+7.4', '=60+7.4');
+  legacyBefore.legacy = true;
+  const weightCol = ctx.Tabs.headerMap('diary').weightKg;
+  assert.throws(() => ctx.ChangeLog.run('Legado', () => {
+    ctx.ChangeLog.pending_.push({
+      change: { kind: 'update', tab: 'Diário', row: 6, before: { 'Peso kg': legacyBefore, 'Sono h': '' }, after: { 'Peso kg': 70, 'Sono h': 8 } },
+      logRow: 6,
+    });
+    sheet(ctx, 'Diário').setCell_(6, weightCol, 70);
+    assert.equal(ctx.Undo.applied_(ctx.ChangeLog.pending_[0].change), false);
+    throw new Error('abort');
+  }), (err) => err.code === 'rollback_failed' && err.writeState === 'unknown');
+
+  // 2. Unknown change kind without a restored_ check is never proven
+  const ctx2 = boot({ tabs: { diary: diaryRows() } });
+  assert.equal(ctx2.Undo.restored_({ kind: 'move', tab: 'Diário', row: 6, before: {}, after: {} }), false);
+  assert.throws(() => ctx2.ChangeLog.run('Desconhecido', () => {
+    ctx2.ChangeLog.pending_.push({ change: { kind: 'move', tab: 'Diário', row: 6, before: {}, after: {} }, logRow: 6 });
+    throw new Error('abort');
+  }), (err) => err.code === 'rollback_failed' && err.writeState === 'unknown');
+});
+
+test('failed revert in Undo throws rollback_failed both on exception and on silent mismatch', () => {
+  // 1. Exception inside Undo.revert_
+  {
+    const ctx = boot({ tabs: { diary: diaryRows() } });
+    ctx.ChangeLog.run('Salvar', () => ctx.Tabs.update('diary', 6, { weightKg: 68.5 }));
+    const s = sheet(ctx, 'Diário');
+    const origGetRange = s.getRange.bind(s);
+    const weightCol = ctx.Tabs.headerMap('diary').weightKg;
+    s.getRange = (r, c, ...rest) => {
+      const rng = origGetRange(r, c, ...rest);
+      if (rest.length === 0 && r === 6 && c === weightCol) {
+        rng.setValue = () => { throw new Error('sheet locked'); };
+      }
+      return rng;
+    };
+    assert.throws(() => ctx.Undo.last(), (err) => err.code === 'rollback_failed' && err.writeState === 'unknown');
+  }
+
+  // 2. Silent no-op setValue inside Undo.revert_ caught by Undo.restored_
+  {
+    const ctx = boot({ tabs: { diary: diaryRows() } });
+    ctx.ChangeLog.run('Salvar', () => ctx.Tabs.update('diary', 6, { weightKg: 68.5 }));
+    const s = sheet(ctx, 'Diário');
+    const origGetRange = s.getRange.bind(s);
+    const weightCol = ctx.Tabs.headerMap('diary').weightKg;
+    s.getRange = (r, c, ...rest) => {
+      const rng = origGetRange(r, c, ...rest);
+      if (rest.length === 0 && r === 6 && c === weightCol) {
+        rng.setValue = () => rng;
+      }
+      return rng;
+    };
+    assert.throws(() => ctx.Undo.last(), (err) => err.code === 'rollback_failed' && err.writeState === 'unknown');
+  }
+});

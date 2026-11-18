@@ -808,15 +808,16 @@
     create: function (mood, progressOrForm, maybeForm) {
       var doc = typeof document !== 'undefined' ? document : docOf(host);
       injectStyle(doc);
+      var defaultProgress = (mood === 'happy' || mood === 'understood' || mood === 'record') ? 1 : 0;
       var p, f;
       if (typeof progressOrForm === 'string' && FORMS.indexOf(progressOrForm) >= 0) {
         f = progressOrForm;
-        p = (mood === 'happy' || mood === 'understood' || mood === 'record') ? 1 : 0;
+        p = defaultProgress;
       } else if (progressOrForm && typeof progressOrForm === 'object') {
-        p = progressOrForm.progress === undefined ? (mood === 'happy' ? 1 : 0) : progressOrForm.progress;
+        p = progressOrForm.progress === undefined ? defaultProgress : progressOrForm.progress;
         f = progressOrForm.form;
       } else {
-        p = progressOrForm === undefined ? (mood === 'happy' ? 1 : 0) : progressOrForm;
+        p = progressOrForm === undefined ? defaultProgress : progressOrForm;
         f = maybeForm;
       }
       return draw(doc.createElement('div'), mood, p, f);

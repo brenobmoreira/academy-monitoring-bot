@@ -8,6 +8,7 @@ Four stages, in order. Each one ends with a check, so you know it works before m
 | [2. Telegram bot](#2-telegram-bot) | ~5 min | bot token and your chat id |
 | [3. Agent on your machine](#3-agent-on-your-machine) | ~10 min | bot answering through local polling |
 | [4. Cloud Run](#4-cloud-run) | ~30 min | bot answering through the webhook, deployed from GitHub |
+| [Voz Mini App (Opcional)](#serviço-de-voz-da-mini-app-opcional--cloud-run) | ~10 min | gravação de voz ativa na Mini App via Cloud Run (`Dockerfile.voice`) |
 
 > **Deployment model (one deploy per client):** Each client spreadsheet has its own bound Apps Script deployment (`apps/sheet4`) and its own agent instance (e.g. `fitness-agent-breno`, `fitness-agent-zoio`), each configured with that client's `SHEET_API_URL`, `SHEET_API_KEY`, `ALLOWED_CHAT_IDS`, and `TELEGRAM_BOT_TOKEN`.
 
@@ -21,6 +22,7 @@ Keep these values at hand as you go; none of them belongs in the repo:
 | chat id (`ALLOWED_CHAT_IDS`) | `getUpdates` | the agent |
 | `TELEGRAM_WEBHOOK_SECRET` | `openssl rand -hex 24` | Cloud Run and `set-webhook.sh` |
 | `REMINDER_TOKEN` (optional) | `openssl rand -hex 24` | Cloud Run and the Cloud Scheduler jobs |
+| `APP_AUTH_SECRET` (optional) | `openssl rand -hex 32` | Cloud Run (bot e serviço de voz da Mini App) |
 
 ## 1. Apps Script in the spreadsheet
 
@@ -150,3 +152,60 @@ Each client spreadsheet has its own Cloud Run service (`SERVICE=fitness-agent-<c
 the function's **Logs**, and Apps Script → **Executions** for `doPost`. With the reminders:
 `gcloud scheduler jobs run ${SERVICE}-remind-weekly --location us-central1` → the week's summary in
 the chat.
+
+## Serviço de Voz da Mini App (Opcional — Cloud Run)
+
+A voz no **chat Telegram funciona sem este serviço** (basta configurar `TRANSCRIBE_API_KEY` ou `GEMINI_API_KEY` no bot). Este deploy isolado (`services/agent/Dockerfile.voice`) só é necessário para habilitar o botão de microfone e gravação de áudio dentro da **Mini App**.
+
+### 1. Requisitos e Alertas de Custo (§5.1)
+
+1. **Spend Cap no Gemini (AI Studio):** Configure um teto de gastos (*spend cap*) no projeto Google Cloud/Gemini da chave de transcrição, além de um alerta de orçamento por e-mail abaixo desse teto. Como o teto pode levar cerca de 10 minutos para cortar chamadas após ser atingido, o alerta antecipado previne surpresas na fatura.
+2. **`--max-instances 1`:** Limites de taxa, orçamentos diários de tokens e cache de idempotência residem na memória do processo por instância. Manter no máximo 1 instância reduz janelas de estouro de orçamento durante picos de tráfego.
+3. **`--allow-unauthenticated`:** Necessário pois as requisições partem do navegador do usuário (Mini App). A autenticação é feita via `Bearer` session token (emitido com validação de `initData` do Telegram ou link code) e política de `CORS` estrita aos domínios autorizados em `VOICE_ALLOWED_ORIGINS`.
+
+### 2. Deploy do serviço standalone
+
+Crie o segredo `APP_AUTH_SECRET` (mínimo de 32 caracteres gerados via `openssl rand -hex 32`) no Secret Manager e conceda acesso à service account:
+
+```bash
+PROJECT=<project-id>; REGION=us-central1
+CLIENT=<client-slug>                      # e.g. breno ou zoio (um serviço por cliente)
+SERVICE_VOICE=fitness-voice-${CLIENT}
+SA=fitness-agent@$PROJECT.iam.gserviceaccount.com
+
+# Criação do segredo compartilhado (caso ainda não exista)
+openssl rand -hex 32 | tr -d '\n' | gcloud secrets create APP_AUTH_SECRET_${CLIENT} --data-file=-
+gcloud secrets add-iam-policy-binding APP_AUTH_SECRET_${CLIENT} --member=serviceAccount:$SA --role=roles/secretmanager.secretAccessor
+
+# Deploy do container do serviço de voz a partir da raiz do repositório
+gcloud run deploy "$SERVICE_VOICE" \
+  --source services/agent \
+  --dockerfile services/agent/Dockerfile.voice \
+  --region $REGION \
+  --service-account $SA \
+  --allow-unauthenticated \
+  --max-instances 1 \
+  --set-env-vars ALLOWED_CHAT_IDS="<chat_id>",VOICE_ALLOWED_ORIGINS="https://<seu-usuario>.github.io" \
+  --set-secrets APP_AUTH_SECRET=APP_AUTH_SECRET_${CLIENT}:latest,TRANSCRIBE_API_KEY=TRANSCRIBE_API_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN_${CLIENT}:latest
+```
+
+### 3. Conectar ao Bot e Testar
+
+Após o deploy do serviço de voz:
+
+1. Obtenha a URL do serviço gerado:
+   ```bash
+   VOICE_URL=$(gcloud run services describe "$SERVICE_VOICE" --region $REGION --format 'value(status.url)')
+   ```
+2. Configure o bot do cliente (`SERVICE=fitness-agent-${CLIENT}`) com a URL e o mesmo segredo:
+   ```bash
+   gcloud run services update "$SERVICE" --region $REGION \
+     --update-env-vars VOICE_API_URL="$VOICE_URL" \
+     --update-secrets APP_AUTH_SECRET=APP_AUTH_SECRET_${CLIENT}:latest
+   ```
+3. **Teste com `/app`:**
+   - Envie `/app` no chat do Telegram com o bot.
+   - Abra o link gerado para a Mini App.
+   - Verifique que o botão de microfone aparece no formulário.
+   - Grave uma mensagem de voz, confira a transcrição exibida e confirme o envio.
+

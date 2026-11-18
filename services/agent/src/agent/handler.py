@@ -434,6 +434,7 @@ class Handler:
                 update_id,
                 scope_key=text_scope_key(chat_id, payload.id),
                 use_reply_context=False,
+                uncertain_on_error=True,
             )
         except BaseException:
             self._text_submissions.finish(chat_id, payload.id, cut=True)
@@ -449,10 +450,11 @@ class Handler:
             cut=cut,
         )
         if cut:
+            no_writes = reply.write_outcome in (None, "not_committed")
             return Reply(
-                miniapp.WRITE_UNCERTAIN if reply.write_outcome is None else reply.text,
-                html=reply.html,
-                reply_markup=reply.reply_markup,
+                miniapp.WRITE_UNCERTAIN if no_writes else reply.text,
+                html=False if no_writes else reply.html,
+                reply_markup=None if no_writes else reply.reply_markup,
                 failed=True,
                 transient=False,
                 write_outcome="uncertain",
@@ -468,6 +470,7 @@ class Handler:
         *,
         scope_key: str | None = None,
         use_reply_context: bool = True,
+        uncertain_on_error: bool = False,
     ) -> Reply:
         chat_id = message["chat"]["id"]
         typing = asyncio.create_task(self._keep_typing(chat_id, strict_int(update_id)))
@@ -494,6 +497,13 @@ class Handler:
             )
         except Exception as error:
             log.warning("bot failed on update %s: %s", update_id, describe(error))
+            if uncertain_on_error:
+                return Reply(
+                    miniapp.WRITE_UNCERTAIN,
+                    failed=True,
+                    transient=False,
+                    write_outcome="uncertain",
+                )
             return Reply(FAILURE, failed=True, transient=True)
         finally:
             typing.cancel()
@@ -879,6 +889,7 @@ def build_handler(
         sheet,
         build_model(settings),
         timezone=settings.TIMEZONE,
+        clock=clock,
         max_llm_calls=settings.MAX_LLM_CALLS,
         deadline_s=settings.MESSAGE_DEADLINE_S,
     )
@@ -894,7 +905,12 @@ def build_handler(
                 timezone=settings.TIMEZONE,
             )
         )
-        resolved_transcriber = build_transcriber(settings, resolved_budget)
+        resolved_transcriber = build_transcriber(settings, resolved_budget, clock=clock)
+    resolved_confirmations = (
+        confirmations
+        if confirmations is not None
+        else (VoiceConfirmations(clock=clock) if clock is not None else None)
+    )
     return Handler(
         settings.ALLOWED_CHAT_IDS,
         bot,
@@ -909,7 +925,7 @@ def build_handler(
         miniapp_url=settings.MINIAPP_URL,
         voice_link=resolved_voice_link,
         text_submissions=text_submissions,
-        confirmations=confirmations,
+        confirmations=resolved_confirmations,
         transcriber=resolved_transcriber,
         voice_max_seconds=settings.VOICE_MAX_SECONDS,
     )

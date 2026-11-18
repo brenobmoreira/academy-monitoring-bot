@@ -9,7 +9,6 @@ submitted text — the raw text is never stored anywhere in memory.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import math
 import threading
@@ -185,11 +184,8 @@ class TextSubmissions:
             return decision.reply
         try:
             reply = await work()
-        except (TimeoutError, asyncio.CancelledError):
-            self.finish(principal, submission_id, cut=True)
-            raise
         except BaseException:
-            self.finish(principal, submission_id, outcome="not_committed")
+            self.finish(principal, submission_id, cut=True)
             raise
         self.finish(
             principal,

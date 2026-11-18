@@ -452,10 +452,14 @@ async def test_app_with_and_without_voice_link_and_end_to_end_tg_link_exchange()
         Sessions,
         SignIn,
         TelegramDirectory,
+        b64url_decode,
         derive_keys,
+        strict_json_object,
+        telegram_principal,
     )
     from agent.commands import VoiceLink
 
+    chat_id = 987650042
     miniapp_url = "https://example.github.io/app/"
     voice_origin = "https://voice.example.com"
     secret = "voice-auth-secret-sentinel-32bytes!"
@@ -463,7 +467,13 @@ async def test_app_with_and_without_voice_link_and_end_to_end_tg_link_exchange()
 
     # 1. Without VoiceLink: buttons have no vu/vc/vx.
     plain_reply = await COMMANDS["app"].run(
-        Context(sheet=FakeSheet(catalog=[catalog()]), today=TODAY, chat_id=42, miniapp_url=miniapp_url), ""
+        Context(
+            sheet=FakeSheet(catalog=[catalog()]),
+            today=TODAY,
+            chat_id=chat_id,
+            miniapp_url=miniapp_url,
+        ),
+        "",
     )
     assert plain_reply.reply_markup is not None
     for btn in plain_reply.reply_markup["keyboard"][0]:
@@ -472,8 +482,8 @@ async def test_app_with_and_without_voice_link_and_end_to_end_tg_link_exchange()
 
     # 2. With VoiceLink: /app issues ONE code for ctx.chat_id and embeds vu/vc/vx in both buttons.
     keys = derive_keys(secret)
-    directory = TelegramDirectory(keys, {42, 7})
-    allowed = AllowedChats({42, 7})
+    directory = TelegramDirectory(keys, {chat_id, 7})
+    allowed = AllowedChats({chat_id, 7})
     codes = LinkCodes(keys, directory, allowed, ttl_s=900)
     voice = VoiceLink(api_url=voice_origin, codes=codes, clock=lambda: t0)
 
@@ -481,7 +491,7 @@ async def test_app_with_and_without_voice_link_and_end_to_end_tg_link_exchange()
         Context(
             sheet=FakeSheet(catalog=[catalog()]),
             today=TODAY,
-            chat_id=42,
+            chat_id=chat_id,
             miniapp_url=miniapp_url,
             voice=voice,
         ),
@@ -493,14 +503,35 @@ async def test_app_with_and_without_voice_link_and_end_to_end_tg_link_exchange()
     assert w_cat["vu"] == f_cat["vu"] == voice_origin
     assert w_cat["vc"] == f_cat["vc"]  # one code issued per /app
     assert w_cat["vx"] == f_cat["vx"] == int(t0.timestamp()) + 900
-    assert str(42) not in w_cat["vc"]  # opaque ref, never raw chat_id
+
+    expected_ref = directory.ref(telegram_principal(chat_id))
+    assert str(chat_id) not in expected_ref
+    extra_tokens: list[str] = []
+    for _ in range(32):
+        issued = voice.issue_keys(chat_id)
+        assert issued is not None
+        extra_tokens.append(issued["vc"])
+    for token in (w_cat["vc"], *extra_tokens):
+        prefix, body_b64, mac_b64 = token.split(".")
+        assert prefix == "c1" and mac_b64
+        body_raw = b64url_decode(body_b64).decode("utf-8")
+        body = strict_json_object(body_raw)
+        assert set(body) == {"r", "j", "e"}
+        assert body["r"] == expected_ref
+        assert body["e"] == w_cat["vx"]
+        assert str(chat_id) not in token
+        assert str(chat_id) not in body_raw
 
     # 3. End-to-end verification on the voice service's tg_link provider:
-    # A service directory/authorizer that only knows chat 7 refuses chat 42's code:
+    # A service directory/authorizer that only knows chat 7 refuses chat_id's code:
     only_7_codes = LinkCodes(keys, TelegramDirectory(keys, {7}), AllowedChats({7}), ttl_s=900)
     with pytest.raises(AuthError) as forbidden_err:
         only_7_codes.verify(w_cat["vc"], t0)
     assert forbidden_err.value.code == "forbidden"
+
+    # Direct LinkCodes.verify recovers principal with chat_id == 987650042:
+    verified = LinkCodes(keys, directory, allowed, ttl_s=900).verify(w_cat["vc"], t0)
+    assert verified.chat_id == chat_id and verified.subject == str(chat_id)
 
     # At vx (expired): refused with auth_expired before burning single-use nonce:
     service_codes = LinkCodes(keys, directory, allowed, ttl_s=900)
@@ -510,11 +541,11 @@ async def test_app_with_and_without_voice_link_and_end_to_end_tg_link_exchange()
         sign_in.exchange("tg_link", w_cat["vc"], datetime.fromtimestamp(w_cat["vx"], UTC))
     assert exp_err.value.code == "auth_expired"
 
-    # Just before vx: exchanges cleanly for chat 42 ONLY, and single-use blocks replay:
+    # Just before vx: exchanges cleanly for chat_id ONLY, and single-use blocks replay:
     grant = sign_in.exchange("tg_link", w_cat["vc"], t0 + timedelta(seconds=899))
     principal = sessions.verify(grant.session, VOICE, t0 + timedelta(seconds=900))
-    assert principal.chat_id == 42
-    assert principal.subject == "42"
+    assert principal.chat_id == chat_id
+    assert principal.subject == str(chat_id)
     with pytest.raises(AuthError) as replay_err:
         sign_in.exchange("tg_link", w_cat["vc"], t0 + timedelta(seconds=899))
     assert replay_err.value.code == "credential_used"

@@ -590,7 +590,7 @@ async def test_miniapp_text_submission_logs_no_submitted_text_on_failures(captur
             update_id=22,
         )
     )
-    assert tg1.sent == [(CHAT, FAILURE)]
+    assert tg1.sent == [(CHAT, WRITE_UNCERTAIN)]
 
     # 2. Sending the reply fails with a leaky error on a reply carrying the sentinel.
     h2 = Handler({CHAT}, FakeBot(secret_text), FakeTelegram(error=leaky()), clock=miniapp_clock())

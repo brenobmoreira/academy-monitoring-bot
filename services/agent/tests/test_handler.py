@@ -921,8 +921,10 @@ async def test_build_handler_app_command_without_and_with_voice_settings():
     import httpx
 
     from agent.auth import AllowedChats, AuthError, LinkCodes, TelegramDirectory, derive_keys
+    from agent.bot import Bot
     from agent.handler import build_handler
     from agent.settings import Settings
+    from agent.transcribe import Transcriber
 
     now = datetime(2026, 11, 14, 15, 0, tzinfo=UTC)
     secret = "s" * 40
@@ -982,7 +984,13 @@ async def test_build_handler_app_command_without_and_with_voice_settings():
                 "APP_CODE_TTL_S": 600,
             }
         )
-        h_voice = build_handler(with_voice, http, clock=lambda: now)
+        fixed_clock = lambda: now  # noqa: E731
+        h_voice = build_handler(with_voice, http, clock=fixed_clock)
+        assert isinstance(h_voice._bot, Bot) and h_voice._bot._clock is fixed_clock
+        assert isinstance(h_voice._transcriber, Transcriber) and h_voice._transcriber.clock is fixed_clock
+        assert h_voice._voice_link is not None and h_voice._voice_link.clock is fixed_clock
+        assert h_voice._text_submissions._clock is fixed_clock
+        assert h_voice._confirmations._clock is fixed_clock
         await h_voice.handle_update(update("/app", chat_id=42, update_id=602))
         assert len(sent_payloads) == 1
         voice_urls = [b["web_app"]["url"] for b in sent_payloads[0]["reply_markup"]["keyboard"][0]]
@@ -1269,7 +1277,8 @@ async def test_miniapp_text_not_committed_removes_entry_so_resend_runs_again():
     assert subs2.begin(42, sid_val, "almoço 150 g arroz").reason == "done"
     assert len(sheet2.calls) == 2
 
-    # 3. Model fails before any write (`outcome=None, failed=True` or exception) -> removed, resend runs.
+    # 3. Proven pre-write model failure (`Bot.reply` catches provider error via `on_model_error`
+    # before any write is attempted -> `Answer(..., failed=True, outcome=None)`) -> removed, resend runs.
     sid_llm = "4" * 32
     subs3 = TextSubmissions()
     dedup = UpdateDeduplicator()
@@ -1283,21 +1292,114 @@ async def test_miniapp_text_not_committed_removes_entry_so_resend_runs_again():
     ).handle_update(_miniapp_text_update("peso 82,4", sid=sid_llm, update_id=554))
     assert len(subs3) == 0
 
+    sheet3 = FakeSheet(diary_upsert=[OK_DIARY])
+    llm3 = ScriptedLlm(
+        model="scripted",
+        script=[
+            RuntimeError("provider down before tool"),
+            call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+            say("Ok"),
+        ],
+    )
+    bot3 = Bot(sheet3, llm3, timezone="America/Sao_Paulo")
     await Handler(
         {42},
-        FakeBot(error=RuntimeError("llm down")),
+        bot3,
         tg3,
+        sheet=sheet3,
         deduplicator=dedup,
         text_submissions=subs3,
+        clock=lambda: datetime(2026, 9, 21, 12, 0),
     ).handle_update(_miniapp_text_update("peso 82,4", sid=sid_llm, update_id=555))
     assert len(subs3) == 0
+    assert len(sheet3.calls) == 0
+    assert tg3.sent[-1] == (42, MODEL_FAILED_NOTHING_WRITTEN)
 
-    ok_bot = FakeBot(Answer("<b>21/09</b> · Peso kg 82,4", ("w1",), wrote=True, outcome="committed"))
-    await Handler({42}, ok_bot, tg3, deduplicator=dedup, text_submissions=subs3).handle_update(
-        _miniapp_text_update("peso 82,4", sid=sid_llm, update_id=556)
-    )
+    await Handler(
+        {42},
+        bot3,
+        tg3,
+        sheet=sheet3,
+        deduplicator=dedup,
+        text_submissions=subs3,
+        clock=lambda: datetime(2026, 9, 21, 12, 0),
+    ).handle_update(_miniapp_text_update("peso 82,4", sid=sid_llm, update_id=556))
     assert subs3.begin(42, sid_llm, "peso 82,4").reason == "done"
-    assert ok_bot.texts == [("peso 82,4", "42")]
+    assert len(sheet3.calls) == 1
+    assert "82,4" in tg3.sent[-1][1]
+
+
+async def test_miniapp_text_unhandled_bot_exception_marks_uncertain_and_blocks_resend():
+    from agent.bot import WRITE_UNCERTAIN, Bot
+    from agent.text_submissions import UNCERTAIN_REPLY, TextSubmissions
+
+    from .fakes import OK_DIARY, ScriptedLlm, call, say
+
+    # 1. Real `Bot.reply` where the sheet write succeeds (`journal.writes` populated) and then an
+    # unhandled exception escapes `confirmation(...)` (missing `"date"` in result -> `KeyError`).
+    sid_post_write = "4a" * 16
+    subs_post = TextSubmissions()
+    malformed_ok_diary = {"ok": True, "result": {"writeId": "w1", "fields": {"weightKg": 82.4}}}
+    sheet = FakeSheet(diary_upsert=[malformed_ok_diary, OK_DIARY])
+    llm = ScriptedLlm(
+        model="scripted",
+        script=[
+            call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+            say("Ok"),
+            call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+            say("Não deveria rodar."),
+        ],
+    )
+    tg = FakeTelegram()
+    handler = Handler(
+        {42},
+        Bot(sheet, llm, timezone="America/Sao_Paulo"),
+        tg,
+        sheet=sheet,
+        text_submissions=subs_post,
+        clock=lambda: datetime(2026, 9, 21, 12, 0),
+    )
+    await handler.handle_update(_miniapp_text_update("peso 82,4", sid=sid_post_write, update_id=557))
+    assert len(sheet.calls) == 1
+    assert subs_post.begin(42, sid_post_write, "peso 82,4").reason == "uncertain"
+    assert tg.sent == [(42, WRITE_UNCERTAIN)]
+
+    # Resending in a brand-new update_id never runs the agent or writes a second time.
+    await handler.handle_update(_miniapp_text_update("peso 82,4", sid=sid_post_write, update_id=558))
+    assert len(sheet.calls) == 1
+    assert tg.sent == [(42, WRITE_UNCERTAIN), (42, UNCERTAIN_REPLY)]
+
+    # 2. Direct `RuntimeError` or `TimeoutError` escaping `self._bot.reply(...)` also marks `uncertain`
+    # (`transient=False`, `write_outcome="uncertain"`), completing `update_id` even if send fails.
+    for idx, err in enumerate((RuntimeError("unexpected crash"), TimeoutError("direct timeout"))):
+        sid_err = f"{idx + 10:032x}"
+        subs_err = TextSubmissions()
+        dedup_err = UpdateDeduplicator()
+        crashing = FakeBot(error=err)
+        await Handler(
+            {42},
+            crashing,
+            FakeTelegram(error=RuntimeError("send down")),
+            deduplicator=dedup_err,
+            text_submissions=subs_err,
+        ).handle_update(_miniapp_text_update("peso 82,4", sid=sid_err, update_id=580 + idx * 2))
+        assert subs_err.begin(42, sid_err, "peso 82,4").reason == "uncertain"
+        assert len(crashing.texts) == 1
+
+        # Same update_id redelivered after failed send -> ignored by deduplicator.
+        tg_ok = FakeTelegram()
+        await Handler({42}, crashing, tg_ok, deduplicator=dedup_err, text_submissions=subs_err).handle_update(
+            _miniapp_text_update("peso 82,4", sid=sid_err, update_id=580 + idx * 2)
+        )
+        assert len(crashing.texts) == 1
+        assert tg_ok.sent == []
+
+        # New update_id with same payload -> answered with UNCERTAIN_REPLY without calling bot.
+        await Handler({42}, crashing, tg_ok, deduplicator=dedup_err, text_submissions=subs_err).handle_update(
+            _miniapp_text_update("peso 82,4", sid=sid_err, update_id=581 + idx * 2)
+        )
+        assert len(crashing.texts) == 1
+        assert tg_ok.sent == [(42, UNCERTAIN_REPLY)]
 
 
 async def test_miniapp_text_cut_by_message_deadline_and_hard_limit_marks_uncertain():
@@ -1376,6 +1478,98 @@ async def test_miniapp_text_cut_by_message_deadline_and_hard_limit_marks_uncerta
     await h_hard.handle_update(_miniapp_text_update("peso 82,4", sid=sid_hard, update_id=563))
     assert len(hard_bot.texts) == 1
     assert tg_hard.sent == [(42, CUT), (42, UNCERTAIN_REPLY)]
+
+
+async def test_miniapp_text_cut_with_not_committed_outcome_replies_write_uncertain():
+    """When 1st tool ends `not_committed` (e.g. `not_in_catalog` or `unavailable`) and the turn then
+    hits `MESSAGE_DEADLINE_AT`, `TextSubmissions` locks the id as `uncertain`, so the reply must be
+    `WRITE_UNCERTAIN` rather than claiming nothing was saved / inviting a retry."""
+    from agent.bot import MESSAGE_DEADLINE_AT, WRITE_UNCERTAIN, Bot
+    from agent.text_submissions import UNCERTAIN_REPLY, TextSubmissions
+
+    from .fakes import ScriptedLlm, call
+
+    invalid_food = {
+        "ok": False,
+        "errors": [{"path": "args.items[0].food", "code": "not_in_catalog", "message": "não achei"}],
+    }
+    unavailable = {
+        "ok": False,
+        "errors": [{"path": "", "code": "unavailable", "message": "locked"}],
+    }
+
+    class ExpireDeadlineAfterTurnBot(Bot):
+        async def reply(self, text: str, user_id: str = "telegram", **kwargs):
+            answer = await super().reply(text, user_id=user_id, **kwargs)
+            MESSAGE_DEADLINE_AT.set(asyncio.get_running_loop().time())
+            return answer
+
+    # 1. Pre-write validation refusal (`not_in_catalog` -> `outcome="not_committed"`) followed by
+    # deadline timeout on the 2nd LLM call -> `WRITE_UNCERTAIN` and locked as `uncertain`.
+    sid = "c7" * 16
+    subs = TextSubmissions()
+    sheet = FakeSheet(food_add=[invalid_food])
+    llm = ScriptedLlm(
+        model="scripted",
+        script=[
+            call(
+                "save_food",
+                date="2026-09-21",
+                meal="Almoço",
+                items=[{"food": "Arroz", "qty": 150, "unit": "g"}],
+            ),
+            TimeoutError("message deadline reached"),
+        ],
+    )
+    tg = FakeTelegram()
+    handler = Handler(
+        {42},
+        ExpireDeadlineAfterTurnBot(sheet, llm, timezone="America/Sao_Paulo"),
+        tg,
+        sheet=sheet,
+        text_submissions=subs,
+        clock=lambda: datetime(2026, 9, 21, 12, 0),
+        message_deadline_s=30.0,
+        send_reserve_s=30.0,
+    )
+
+    await handler.handle_update(_miniapp_text_update("almoço 150 g arroz", sid=sid, update_id=590))
+    assert MESSAGE_DEADLINE_AT.get() is None
+    assert len(sheet.calls) == 1
+    assert subs.begin(42, sid, "almoço 150 g arroz").reason == "uncertain"
+    assert tg.sent == [(42, WRITE_UNCERTAIN)]
+
+    await handler.handle_update(_miniapp_text_update("almoço 150 g arroz", sid=sid, update_id=591))
+    assert len(sheet.calls) == 1
+    assert tg.sent == [(42, WRITE_UNCERTAIN), (42, UNCERTAIN_REPLY)]
+
+    # 2. Same invariant when 1st tool returned `unavailable` (`SHEET_FAILED`, `outcome="not_committed"`)
+    # and the turn then hit `MESSAGE_DEADLINE_AT`: must NOT invite a retry with `SHEET_FAILED`.
+    sid2 = "d8" * 16
+    subs2 = TextSubmissions()
+    sheet2 = FakeSheet(diary_upsert=[unavailable])
+    llm2 = ScriptedLlm(
+        model="scripted",
+        script=[
+            call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+            TimeoutError("message deadline reached"),
+        ],
+    )
+    tg2 = FakeTelegram()
+    h2 = Handler(
+        {42},
+        ExpireDeadlineAfterTurnBot(sheet2, llm2, timezone="America/Sao_Paulo"),
+        tg2,
+        sheet=sheet2,
+        text_submissions=subs2,
+        clock=lambda: datetime(2026, 9, 21, 12, 0),
+        message_deadline_s=30.0,
+        send_reserve_s=30.0,
+    )
+    await h2.handle_update(_miniapp_text_update("peso 82,4", sid=sid2, update_id=592))
+    assert len(sheet2.calls) == 1
+    assert subs2.begin(42, sid2, "peso 82,4").reason == "uncertain"
+    assert tg2.sent == [(42, WRITE_UNCERTAIN)]
 
 
 async def test_miniapp_workout_and_food_forms_stay_model_free_and_invalid_text_is_rejected():

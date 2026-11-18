@@ -215,22 +215,24 @@ async def test_written_answer_lost_uncertain_outcome_keeps_entry_and_blocks_seco
     assert runs == 1
 
 
-@pytest.mark.parametrize("exc_type", [TimeoutError, asyncio.CancelledError])
-async def test_deadline_cut_marks_entry_uncertain_so_resend_does_not_duplicate(exc_type):
+@pytest.mark.parametrize("exc_type", [TimeoutError, asyncio.CancelledError, RuntimeError, KeyError])
+async def test_deadline_cut_or_unhandled_exception_marks_entry_uncertain_so_resend_does_not_duplicate(
+    exc_type,
+):
     store = TextSubmissions()
     runs = 0
 
-    async def cut_work() -> Reply:
+    async def failing_work() -> Reply:
         nonlocal runs
         runs += 1
-        raise exc_type()
+        raise exc_type("unhandled failure")
 
     with pytest.raises(exc_type):
-        await store.run(42, SID, "agachamento 120x5", cut_work)
+        await store.run(42, SID, "agachamento 120x5", failing_work)
     assert runs == 1
     assert len(store) == 1
 
-    resend = await store.run(42, SID, "agachamento 120x5", cut_work)
+    resend = await store.run(42, SID, "agachamento 120x5", failing_work)
     assert resend == Reply(UNCERTAIN_REPLY, failed=False, transient=False)
     assert runs == 1
 
@@ -245,21 +247,21 @@ async def test_not_committed_and_pre_write_failures_remove_entry_allowing_retry(
         if attempts == 1:
             return Reply("planilha fora", failed=True, transient=True, write_outcome="not_committed")
         if attempts == 2:
-            # Model failed before any tool call attempted a write (outcome=None, failed=True).
-            return Reply("modelo fora", failed=True, transient=True, write_outcome=None)
+            # Pre-write validation refusal answered cleanly by the model (`outcome="not_committed"`).
+            return Reply("fora do catálogo", failed=False, transient=False, write_outcome="not_committed")
         if attempts == 3:
-            raise RuntimeError("unexpected crash before write")
+            # Model failed before any tool call attempted a write (`outcome=None, failed=True`).
+            return Reply("modelo fora", failed=True, transient=True, write_outcome=None)
         return Reply("<b>Salvo</b>", html=True, write_outcome="committed")
 
     r1 = await store.run(42, SID, "dormi 7h30", sheet_down_then_ok)
     assert r1.write_outcome == "not_committed" and len(store) == 0
 
     r2 = await store.run(42, SID, "dormi 7h30", sheet_down_then_ok)
-    assert r2.failed and len(store) == 0
+    assert r2.write_outcome == "not_committed" and len(store) == 0
 
-    with pytest.raises(RuntimeError, match="unexpected crash"):
-        await store.run(42, SID, "dormi 7h30", sheet_down_then_ok)
-    assert len(store) == 0
+    r3 = await store.run(42, SID, "dormi 7h30", sheet_down_then_ok)
+    assert r3.failed and r3.write_outcome is None and len(store) == 0
 
     r4 = await store.run(42, SID, "dormi 7h30", sheet_down_then_ok)
     assert r4.text == "<b>Salvo</b>" and attempts == 4 and len(store) == 1

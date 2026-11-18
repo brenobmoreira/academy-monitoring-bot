@@ -72,3 +72,9 @@ VOICE_GLOBAL_DAILY_TOKENS: 500000
 # Lowest bitrate an accepted audio format can have; sizes a reservation from the body size when the
 # duration cannot be trusted.
 VOICE_MIN_BITRATE_BPS: 6000
+
+# --- Mini App voice (voice spec, §6.2, §7.1 and §13) -------------------------------------------
+# HTTPS origin of the voice service (no path or trailing slash), paired with APP_AUTH_SECRET in the
+# environment (at least 32 bytes; both set or both unset).
+# VOICE_API_URL: https://voice.example.com
+# APP_CODE_TTL_S: 900

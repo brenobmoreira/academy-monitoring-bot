@@ -326,6 +326,7 @@ async def probe_prompt_tokens(model: str, inner: LiteLLMClient) -> int | None:
             None,
             temperature=0,
             max_tokens=MAX_TOKENS,
+            drop_params=True,
             timeout=30,
             num_retries=0,
             max_retries=0,
@@ -777,7 +778,12 @@ def sent_config(model: str, level: str) -> dict[str, Any]:
     try:
         return dict(
             get_optional_params(
-                model=bare, custom_llm_provider=provider, temperature=0, max_tokens=MAX_TOKENS, **extra
+                model=bare,
+                custom_llm_provider=provider,
+                temperature=0,
+                max_tokens=MAX_TOKENS,
+                drop_params=True,
+                **extra,
             )
         )
     except Exception as err:
@@ -1020,8 +1026,8 @@ def checks_section(report: Report) -> list[str]:
         )
     lines += [
         (
-            "- O LiteLLM 1.102 avisa que `temperature`, `top_p` e `top_k` seguem funcionando "
-            "no Gemini 3+, mas serão removidos numa versão futura."
+            "- No LiteLLM >= 1.110, `drop_params=True` descarta `temperature` nos modelos "
+            "Gemini 3+ (`supports_sampling_params=False`) mantendo `temperature=0` nos demais."
         ),
         "",
         f"### 3. max_tokens = {MAX_TOKENS}",

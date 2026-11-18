@@ -358,3 +358,84 @@ async def test_update_with_no_write_keeps_existing_rule_when_send_fails():
     await handler.handle_update(copy.deepcopy(read_update))
     assert len(sheet.calls) == 2
     assert tg.sent == [(42, "Nada registrado em 21/09.")]
+
+
+# ---- 7. Mini App `t: "text"` terminal write + `send_message` fails (§4.2 + §4.3.4) -----------------
+
+
+def miniapp_text_update(
+    text: str = "peso 82,4",
+    *,
+    sid: str = "fedcba9876543210fedcba9876543210",
+    update_id: int = 600,
+) -> dict[str, Any]:
+    payload = {"v": 1, "t": "text", "id": sid, "src": "voice", "text": text}
+    return {
+        "update_id": update_id,
+        "message": {"chat": {"id": 42}, "web_app_data": {"data": json.dumps(payload)}},
+    }
+
+
+@pytest.mark.parametrize("sheet_answer", [OK_DIARY, UNCERTAIN])
+async def test_miniapp_text_terminal_write_is_not_rerun_when_send_message_fails(
+    sheet_answer: dict[str, Any],
+):
+    from agent.text_submissions import DONE_REPLY, UNCERTAIN_REPLY, TextSubmissions
+
+    sheet = FakeSheet(diary_upsert=[sheet_answer, OK_DIARY])
+    bot, llm = scripted_bot(
+        sheet,
+        [
+            call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+            say("Ok"),
+            call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+            say("Não deveria rodar."),
+        ],
+    )
+    tg = FlakyTelegram(fail_sends=1)
+    submissions = TextSubmissions()
+    handler = Handler({42}, bot, tg, sheet=sheet, clock=clock, text_submissions=submissions)
+
+    same_update = miniapp_text_update(update_id=601)
+    await handler.handle_update(copy.deepcopy(same_update))
+    assert tg.sent == []  # first reply failed to send
+    assert [op for op, _ in sheet.calls] == ["diary.upsert"]
+    assert len(llm.requests) == 2
+
+    # (a) Exact same `update_id` re-delivered by Telegram: ignored by deduplicator, zero second run.
+    await handler.handle_update(copy.deepcopy(same_update))
+    assert [op for op, _ in sheet.calls] == ["diary.upsert"]
+    assert len(llm.requests) == 2
+    assert tg.sent == []
+
+    # (b) Even a new `update_id` with the same `t: "text"` payload is stopped by TextSubmissions.
+    await handler.handle_update(miniapp_text_update(update_id=602))
+    assert [op for op, _ in sheet.calls] == ["diary.upsert"]
+    assert len(llm.requests) == 2
+    expected = DONE_REPLY if sheet_answer is OK_DIARY else UNCERTAIN_REPLY
+    assert tg.sent == [(42, expected)]
+
+
+async def test_miniapp_text_not_committed_transient_reruns_on_same_update_redelivery_after_failed_send():
+    sheet = FakeSheet(diary_upsert=[DOWN, OK_DIARY])
+    bot, _ = scripted_bot(
+        sheet,
+        [
+            call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+            say("Planilha fora."),
+            call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+            say("Ok"),
+        ],
+    )
+    tg = FlakyTelegram(fail_sends=1)
+    handler = Handler({42}, bot, tg, sheet=sheet, clock=clock)
+
+    same_update = miniapp_text_update(update_id=603)
+    await handler.handle_update(copy.deepcopy(same_update))
+    assert tg.sent == []
+    assert [op for op, _ in sheet.calls] == ["diary.upsert"]
+
+    await handler.handle_update(copy.deepcopy(same_update))
+    assert [op for op, _ in sheet.calls] == ["diary.upsert", "diary.upsert"]
+    assert len(tg.sent) == 1
+    assert tg.sent[0][1] != SHEET_FAILED and "82,4" in tg.sent[0][1]

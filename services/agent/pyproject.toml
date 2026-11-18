@@ -6,14 +6,14 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "functions-framework>=3.10.2",
-    "google-adk>=2.9.2",
+    "google-adk>=2.14.1",
     "httpx>=0.28.1",
-    "litellm>=1.102.0",
+    "litellm>=1.109.1",
     "pydantic-settings[yaml]>=2.15.0",
-    "python-dotenv>=1.2.3",
-    "starlette>=1.6.0",
+    "python-dotenv>=1.2.4",
+    "starlette>=1.10.0",
     "tzdata>=2025.1",
-    "uvicorn>=0.53.0",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]

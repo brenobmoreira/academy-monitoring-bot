@@ -27,6 +27,7 @@ from agent.settings import (
 from agent.voice_limits import (
     EXCHANGE_RATE_PER_DAY,
     EXCHANGE_RATE_PER_MIN,
+    IDEMPOTENCY_MAX_ENTRIES,
     IDEMPOTENCY_TTL_S,
     VOICE_MAX_CONCURRENT,
     VOICE_RATE_PER_DAY,
@@ -77,6 +78,7 @@ class VoiceSettings(LoadedSettings, AuthSettings, TranscribeSettings):
     VOICE_RATE_PER_DAY: int = Field(VOICE_RATE_PER_DAY, ge=1)
     VOICE_MAX_CONCURRENT: int = Field(VOICE_MAX_CONCURRENT, ge=1)
     VOICE_IDEMPOTENCY_TTL_S: float = Field(IDEMPOTENCY_TTL_S, gt=0)
+    VOICE_IDEMPOTENCY_MAX_ENTRIES: int = Field(IDEMPOTENCY_MAX_ENTRIES, ge=1)
     EXCHANGE_RATE_PER_MIN: int = Field(EXCHANGE_RATE_PER_MIN, ge=1)
     EXCHANGE_RATE_PER_DAY: int = Field(EXCHANGE_RATE_PER_DAY, ge=1)
 

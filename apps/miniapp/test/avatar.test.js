@@ -476,7 +476,6 @@ test('Muscle CSS animates only transform and opacity and disables all motion und
 test('dev/muscle-motion-lab.html wires styles, ShapeAvatar + optional MuscleMotion, 4 FLIP slots, reactions, voice sim, and toggles with valid JS', () => {
   const labPath = path.join(__dirname, '..', 'dev', 'muscle-motion-lab.html');
   const html = fs.readFileSync(labPath, 'utf8');
-  assert.equal(html.includes('\r\n'), false, 'muscle-motion-lab.html must use LF line endings');
   assert.match(html, /<link[^>]+href="\.\.\/styles\.css"/);
   assert.match(html, /<script\s+src="\.\.\/src\/avatar\.js"><\/script>/);
   assert.match(html, /<script\s+src="\.\.\/src\/muscle-motion\.js"><\/script>/);

@@ -374,9 +374,7 @@
           <div class="stage-cards">
             <div id="slot-card-empty" class="stage-box is-current" data-slot-card="empty" role="button" tabindex="0" aria-label="Viajar para slot empty">
               <span class="stage-box-label">empty</span>
-              <div id="slot-empty" class="stage-slot stage-slot-empty" data-slot="empty" data-slot-placeholder="112×112">
-                <button id="shape" class="shape" type="button" data-state="idle" data-form="base" aria-label="Muscle: toque para reagir"></button>
-              </div>
+              <div id="slot-empty" class="stage-slot stage-slot-empty" data-slot="empty" data-slot-placeholder="112×112"><button id="shape" class="shape" type="button" data-state="idle" data-form="base" aria-label="Muscle: toque para reagir"></button></div>
               <span class="stage-box-meta">Ficha / prato vazio · 112px</span>
             </div>
 
@@ -587,17 +585,49 @@
       }
       themeBtn.addEventListener('click', function () { applyTheme(!isDark); });
 
+      function stopAllMotionForReduced() {
+        if (activeTravel && typeof activeTravel.cancel === 'function') activeTravel.cancel();
+        activeTravel = null;
+        if (stopBlinkFn) { stopBlinkFn(); stopBlinkFn = null; }
+        if (stopBreathFn) { stopBreathFn(); stopBreathFn = null; }
+        if (stopFootFn) { stopFootFn(); stopFootFn = null; }
+        var blinkBtn = $('toggle-blink-loop');
+        var breathBtn = $('toggle-breath');
+        var footBtn = $('toggle-foottap');
+        if (blinkBtn) blinkBtn.setAttribute('aria-pressed', 'false');
+        if (breathBtn) breathBtn.setAttribute('aria-pressed', 'false');
+        if (footBtn) footBtn.setAttribute('aria-pressed', 'false');
+        muscleEl.querySelectorAll('.dt-breath, .dt-foot, .dt-anim').forEach(function (el) {
+          if (el.getAnimations) el.getAnimations().forEach(function (a) { a.cancel(); });
+        });
+        if (curveRaf) { cancelAnimationFrame(curveRaf); curveRaf = null; }
+        if (MM && typeof MM.glance === 'function') MM.glance(muscleEl, null);
+        else Avatar.glance(null);
+      }
+
       reducedBtn.addEventListener('click', function () {
         var nextOff = muscleEl.getAttribute('data-motion') !== 'off';
         if (nextOff) {
           muscleEl.setAttribute('data-motion', 'off');
-          if (activeTravel && activeTravel.cancel) activeTravel.cancel();
+          stopAllMotionForReduced();
         } else {
           muscleEl.removeAttribute('data-motion');
         }
         reducedBtn.setAttribute('aria-pressed', nextOff ? 'true' : 'false');
         syncUi();
       });
+
+      if (window.matchMedia) {
+        var reducedMQ = window.matchMedia('(prefers-reduced-motion: reduce)');
+        var onReducedChange = function (mq) {
+          if (mq.matches) stopAllMotionForReduced();
+        };
+        if (reducedMQ.addEventListener) {
+          reducedMQ.addEventListener('change', onReducedChange);
+        } else if (reducedMQ.addListener) {
+          reducedMQ.addListener(onReducedChange);
+        }
+      }
 
       /* Curve Inspector ------------------------------------------------------------------------ */
 
@@ -870,7 +900,7 @@
         if (preset && preset.say) Avatar.say(preset.say);
 
         if (MM && typeof MM.travelTo === 'function') {
-          MM.travelTo(muscleEl, target, opts);
+          activeTravel = MM.travelTo(muscleEl, target, opts);
         } else {
           standaloneTravelTo(target, opts);
         }
@@ -938,6 +968,7 @@
           btn.setAttribute('aria-pressed', 'false');
           return;
         }
+        if (isReduced()) return;
         if (MM && typeof MM.startBlinkLoop === 'function') {
           stopBlinkFn = MM.startBlinkLoop(muscleEl);
         } else {
@@ -962,6 +993,7 @@
           btn.setAttribute('aria-pressed', 'false');
           return;
         }
+        if (isReduced()) return;
         if (MM && typeof MM.startIdleBreath === 'function') {
           stopBreathFn = MM.startIdleBreath(muscleEl) || function () {};
         } else {
@@ -984,6 +1016,7 @@
           btn.setAttribute('aria-pressed', 'false');
           return;
         }
+        if (isReduced()) return;
         if (MM && typeof MM.startFootTap === 'function') {
           stopFootFn = MM.startFootTap(muscleEl);
         } else {
@@ -1120,13 +1153,20 @@
       function createStandaloneMicMeter(stream) {
         var AudioCtx = window.AudioContext || window.webkitAudioContext;
         if (!AudioCtx) return { level: function () { return 0; }, stop: function () {} };
-        var ctx = new AudioCtx();
-        var analyser = ctx.createAnalyser();
-        analyser.fftSize = 256;
-        analyser.smoothingTimeConstant = 0;
-        var source = ctx.createMediaStreamSource(stream);
-        source.connect(analyser);
-        var buf = new Uint8Array(analyser.frequencyBinCount);
+        var ctx, source, analyser, buf;
+        try {
+          ctx = new AudioCtx();
+          source = ctx.createMediaStreamSource(stream);
+          analyser = ctx.createAnalyser();
+          analyser.fftSize = 256;
+          analyser.smoothingTimeConstant = 0;
+          source.connect(analyser);
+          buf = new Uint8Array(analyser.frequencyBinCount);
+        } catch (err) {
+          try { if (ctx) ctx.close(); } catch (_) {}
+          stream.getTracks().forEach(function (t) { t.stop(); });
+          throw err;
+        }
         var current = 0;
         var rafId = null;
         var stopped = false;
@@ -1211,7 +1251,7 @@
           };
           voiceStatus.textContent = 'Microfone real conectado (zero retenção · fecha ao parar).';
           syncUi();
-        }, function (err) {
+        }).catch(function (err) {
           if (activeVoice === pendingStop) activeVoice = null;
           syncVoiceButtons('');
           voiceStatus.textContent = 'Microfone não autorizado (' + (err && err.name ? err.name : 'erro') + ').';

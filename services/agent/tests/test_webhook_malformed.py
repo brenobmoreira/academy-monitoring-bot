@@ -56,7 +56,7 @@ def world(monkeypatch) -> World:
     """The real webhook and the real Handler, over fakes."""
     world = World()
 
-    def build(settings, http, *, deduplicator=None):
+    def build(settings, http, *, deduplicator=None, confirmations=None, budget=None):
         world.built += 1
         return Handler(ALLOWED, world.bot, world.telegram, sheet=world.sheet)
 
@@ -281,11 +281,15 @@ def test_strict_int_takes_integers_only():
     assert [strict_int(v) for v in (True, False, 1.0, "1", None, [1])] == [None] * 6
 
 
-def test_a_boolean_file_size_is_an_unknown_size():
-    voice = {"voice": {"file_id": "v1", "file_size": True}}
+def test_a_boolean_file_size_or_duration_is_treated_as_unknown():
+    voice = {"voice": {"file_id": "v1", "file_size": True, "duration": True}}
     photo = {"photo": [{"file_id": "p1", "file_size": True}, {"file_id": "p2", "file_size": 10}]}
-    assert media_ref(voice, 100) == ("v1", None, "audio/ogg")
-    assert media_ref(photo, 100) == ("p2", 10, "image/jpeg")
+    assert media_ref(voice, 100) == ("v1", None, "audio/ogg", None)
+    assert media_ref(photo, 100) == ("p2", 10, "image/jpeg", None)
+    assert media_ref({"voice": {"file_id": "v1", "duration": -1}}, 100) == ("v1", None, "audio/ogg", None)
+    assert media_ref({"audio": {"file_id": "a1", "duration": "9"}}, 100) == ("a1", None, "audio/mpeg", None)
+    assert media_ref({"voice": {"file_id": "v1", "duration": 0}}, 100) == ("v1", None, "audio/ogg", 0)
+    assert media_ref({"audio": {"file_id": "a1", "duration": 45}}, 100) == ("a1", None, "audio/mpeg", 45)
 
 
 # optional fields of the wrong type --------------------------------------------------------------
@@ -363,7 +367,7 @@ def test_an_exception_of_the_processing_is_answered_200_and_logged_by_its_class(
 def test_a_handler_that_cannot_be_built_is_answered_200_and_logged_by_its_class(
     world, output, monkeypatch, call
 ):
-    def build(settings, http, *, deduplicator=None):
+    def build(settings, http, *, deduplicator=None, confirmations=None, budget=None):
         raise leaky()
 
     monkeypatch.setattr(webhook, "build_handler", build)

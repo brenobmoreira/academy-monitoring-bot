@@ -8,7 +8,8 @@ Covers the real `Handler`, `Transcriber`, `MemoryBudget`, `VoiceConfirmations` a
   each `TranscribeError` maps to its §8 Portuguese reply, and `duration > VOICE_MAX_SECONDS` is
   refused before `getFile`;
 - `caption + transcript` is formatted and SHA-256-verified bit-for-bit on `vok:<vid>` and `vfix:<vid>`;
-- `build_handler` and `webhook.process` share the process `MemoryBudget` and `VoiceConfirmations`.
+- `build_handler`, `webhook.handle_update` and `webhook.process` share the process `MemoryBudget`,
+  `VoiceConfirmations` and `TextSubmissions`.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from agent.budget import MemoryBudget
 from agent.handler import DOWNLOAD_FAILED, Handler, build_handler, too_large
 from agent.llm import build_model
 from agent.settings import Settings, TranscribeSettings
+from agent.text_submissions import DONE_REPLY, TextSubmissions
 from agent.transcribe import MIN_BODY_BYTES, Transcriber
 from agent.voice_confirm import VOICE_REGISTERING, VoiceConfirmations, sha256_hex
 
@@ -504,7 +506,7 @@ async def test_real_transcriber_errors_produce_exact_section_8_replies():
     assert llm.requests == []
 
 
-# ---- 5. Process-level Budget & VoiceConfirmations in build_handler and webhook.process ------------
+# ---- 5. Process-level Budget, VoiceConfirmations & TextSubmissions in webhook ---------------------
 
 
 async def test_build_handler_and_webhook_share_budget_and_confirmations_across_requests(monkeypatch):
@@ -605,6 +607,79 @@ async def test_build_handler_and_webhook_share_budget_and_confirmations_across_r
     ) == ("ok", 200)
     assert sent_payloads[-1]["text"] == VOICE_BUDGET
     webhook._get_budget.cache_clear()
+
+
+async def test_webhook_handle_update_shares_text_submissions_across_requests(monkeypatch):
+    s = settings(MEDIA_ENABLED=False)
+    monkeypatch.setattr(webhook, "_DEDUPLICATOR", webhook.UpdateDeduplicator())
+    monkeypatch.setattr(webhook, "_CONFIRMATIONS", VoiceConfirmations())
+    monkeypatch.setattr(webhook, "_TEXT_SUBMISSIONS", TextSubmissions())
+
+    sent_payloads: list[dict[str, Any]] = []
+
+    def telegram_transport(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("/sendChatAction"):
+            return httpx.Response(200, json={"ok": True, "result": True})
+        if url.endswith("/sendMessage"):
+            body = json.loads(request.content)
+            sent_payloads.append(body)
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "message_id": len(sent_payloads),
+                        "chat": {"id": body["chat_id"]},
+                        "text": body["text"],
+                    },
+                },
+            )
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    sheet = FakeSheet(diary_upsert=[OK_DIARY])
+    llm = ScriptedLlm(
+        model="scripted",
+        script=[call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}), say("ok")],
+        requests=[],
+    )
+    real_build = build_handler
+
+    def patched_build(cfg: Settings, _http: httpx.AsyncClient, **kwargs: Any) -> Handler:
+        assert kwargs.get("text_submissions") is webhook._TEXT_SUBMISSIONS
+        mock_http = httpx.AsyncClient(transport=httpx.MockTransport(telegram_transport))
+        h = real_build(cfg, mock_http, **kwargs)
+        h._bot = Bot(sheet, llm, timezone=cfg.TIMEZONE)
+        return h
+
+    monkeypatch.setattr(webhook, "build_handler", patched_build)
+
+    submission_id = "0123456789abcdef0123456789abcdef"
+    web_app_data = {
+        "button_text": "🎙️ Voz",
+        "data": json.dumps(
+            {"v": 1, "t": "text", "id": submission_id, "src": "voice", "text": "peso 82,4"},
+            ensure_ascii=False,
+        ),
+    }
+
+    await webhook.handle_update(
+        s,
+        {"update_id": 1, "message": {"message_id": 10, "chat": {"id": 42}, "web_app_data": web_app_data}},
+    )
+    assert len(llm.requests) == 2
+    assert sheet.calls == [("diary.upsert", {"date": "2026-09-21", "fields": {"weightKg": 82.4}})]
+    assert len(sent_payloads) == 1
+    assert "Peso kg 82,4" in sent_payloads[0]["text"]
+
+    await webhook.handle_update(
+        s,
+        {"update_id": 2, "message": {"message_id": 11, "chat": {"id": 42}, "web_app_data": web_app_data}},
+    )
+    assert len(sent_payloads) == 2
+    assert sent_payloads[1]["text"] == DONE_REPLY == "Esse envio já foi registrado. Confira com /hoje."
+    assert len(llm.requests) == 2
+    assert len(sheet.calls) == 1
 
 
 # ---- 6. Telegram file/getFile errors (preserved from C1) ------------------------------------------

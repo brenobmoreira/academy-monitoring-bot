@@ -6,7 +6,7 @@ hop. No Telegram, no Google account, no network (unless `--real`).
 
 ```
 fake webhook ─▶ main.telegram_webhook | asgi.app ─▶ webhook.process / handle_update
-                                                         │  (shared Dedup, VoiceConfirmations, Budget)
+                                                         │  (shared Dedup, VoiceConfirmations, TextSubmissions, Budget)
                                                          ▼
                                                       Handler ─┬─▶ Transcriber ─▶ LiteLLM (scripted | real)
                                                                └─▶ ADK Bot ─▶ LiteLLM ─▶ provider (scripted | real)

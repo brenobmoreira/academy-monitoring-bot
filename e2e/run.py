@@ -8,9 +8,9 @@
 
 What is real: the chosen HTTP entry point (Functions Framework or ASGI) with its secret check,
 `webhook.process` / `webhook.handle_update` with its process-wide state (`UpdateDeduplicator`,
-`VoiceConfirmations`, `MemoryBudget`), `Handler`, `Transcriber`, `Bot`/ADK runner, tools, the
-LiteLLM adapter, `SheetClient` over HTTP, and the sheet 4.0 Apps Script code (`apps/sheet4/src`)
-running in Node.
+`VoiceConfirmations`, `TextSubmissions`, `MemoryBudget`), `Handler`, `Transcriber`, `Bot`/ADK
+runner, tools, the LiteLLM adapter, `SheetClient` over HTTP, and the sheet 4.0 Apps Script code
+(`apps/sheet4/src`) running in Node.
 
 What is mocked: the Telegram Bot API and file download endpoint (replies and callbacks are captured
 locally), the spreadsheet (in-memory fake built by `e2e/sheet_server.js` with a synthetic client),
@@ -798,6 +798,7 @@ def main_run() -> None:
         webhook._get_budget.cache_clear()
         webhook._DEDUPLICATOR = UpdateDeduplicator()
         webhook._CONFIRMATIONS = VoiceConfirmations()
+        webhook._TEXT_SUBMISSIONS = TextSubmissions()
         settings = webhook.get_settings()
         if args.real:
             require_model_credentials(settings)
@@ -805,9 +806,6 @@ def main_run() -> None:
         telegram_state = TelegramState()
         provider = None if args.real else ScriptedProvider(scripted_turns(today))
         transcribe_provider = None if args.real else ScriptedTranscribeClient(scripted_transcriptions())
-        # Shared across requests while webhook.py on origin/main does not yet pass text_submissions;
-        # setdefault below yields immediately if webhook.handle_update passes its own instance.
-        shared_text_submissions = TextSubmissions()
 
         def build_e2e_model(cfg: Settings) -> Any:
             inner = build_model(cfg, client=provider)
@@ -817,13 +815,13 @@ def main_run() -> None:
             if not args.real:
                 assert kwargs.get("deduplicator") is webhook._DEDUPLICATOR
                 assert kwargs.get("confirmations") is webhook._CONFIRMATIONS
+                assert kwargs.get("text_submissions") is webhook._TEXT_SUBMISSIONS
                 expected_budget = webhook._get_budget(
                     cfg.VOICE_DAILY_TOKENS, cfg.VOICE_GLOBAL_DAILY_TOKENS, cfg.TIMEZONE
                 )
                 assert kwargs.get("budget") is expected_budget
                 assert transcribe_provider is not None
                 kwargs["transcriber"] = build_transcriber(cfg, expected_budget, client=transcribe_provider)
-                kwargs.setdefault("text_submissions", shared_text_submissions)
             return orig_webhook_build_handler(cfg, http, **kwargs)
 
         webhook.httpx = _WebhookHttpx(telegram_state)  # ty: ignore[invalid-assignment]

@@ -18,6 +18,7 @@ from agent.budget import MemoryBudget
 from agent.handler import UpdateDeduplicator, build_handler, strict_int
 from agent.logs import describe
 from agent.settings import Settings
+from agent.text_submissions import TextSubmissions
 from agent.voice_confirm import VoiceConfirmations
 
 log = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ log = logging.getLogger(__name__)
 SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 _DEDUPLICATOR = UpdateDeduplicator()
 _CONFIRMATIONS = VoiceConfirmations()
+_TEXT_SUBMISSIONS = TextSubmissions()
 
 
 @functools.cache
@@ -64,6 +66,7 @@ async def handle_update(settings: Settings, update: dict[str, Any]) -> None:
                 http,
                 deduplicator=_DEDUPLICATOR,
                 confirmations=_CONFIRMATIONS,
+                text_submissions=_TEXT_SUBMISSIONS,
                 budget=budget,
             )
         except Exception as error:

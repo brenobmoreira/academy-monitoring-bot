@@ -1,0 +1,35 @@
+# Version control
+.git/
+.github/
+
+# Environment files and secrets
+.env
+.env.*
+*.local
+*.local.*
+!.env.example
+
+# Python virtual environment and bytecode
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing, linting, and coverage caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+e2e/out/
+
+# Node / frontend tooling
+node_modules/
+dist/
+coverage/
+
+# Test suites
+services/agent/tests/
+apps/sheet4/test/

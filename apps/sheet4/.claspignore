@@ -1,0 +1,24 @@
+# Clasp ignore rules for apps/sheet4
+# Clasp matches patterns relative to rootDir ("src") when defined in .clasp.json.
+
+# Ignore everything by default
+**/**
+
+# Whitelist production Apps Script files
+!appsscript.json
+!**/appsscript.json
+!*.js
+!**/*.js
+!*.html
+!**/*.html
+
+# Blacklist tests, test fixtures, node_modules, and secrets
+**/*.test.js
+**/*.spec.js
+**/test/**
+**/tests/**
+**/fixtures/**
+node_modules/**
+.git/**
+.env*
+*.local

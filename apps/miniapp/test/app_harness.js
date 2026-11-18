@@ -22,6 +22,16 @@ class FakeNode {
     this.childNodes.push(c);
     return c;
   }
+  insertBefore(next, ref) {
+    if (!ref) return this.appendChild(next);
+    if (next === ref) return next;
+    if (next.parentNode) next.parentNode.removeChild(next);
+    const i = this.childNodes.indexOf(ref);
+    if (i < 0) return this.appendChild(next);
+    next.parentNode = this;
+    this.childNodes.splice(i, 0, next);
+    return next;
+  }
   removeChild(c) {
     const i = this.childNodes.indexOf(c);
     if (i >= 0) this.childNodes.splice(i, 1);
@@ -66,6 +76,9 @@ function matchesSimple(el, part) {
 }
 
 function matches(el, selector) {
+  if (selector.includes(',')) {
+    return selector.split(',').some((s) => matches(el, s.trim()));
+  }
   if (selector.includes(' > ')) {
     const [parent, child] = selector.split(' > ');
     return matchesSimple(el, child) && el.parentNode instanceof FakeElement && matches(el.parentNode, parent);
@@ -79,6 +92,29 @@ function matches(el, selector) {
   return i < 0;
 }
 
+function parseMarkup(parent, html) {
+  parent.textContent = '';
+  if (!html) return;
+  const stack = [parent];
+  const tagRe = /<\/?([a-zA-Z0-9-]+)([^>]*?)(\/?)>/g;
+  let m;
+  while ((m = tagRe.exec(String(html))) !== null) {
+    const full = m[0];
+    if (full.startsWith('</')) {
+      if (stack.length > 1) stack.pop();
+      continue;
+    }
+    const el = new FakeElement(parent.ownerDocument, m[1]);
+    const attrRe = /([a-zA-Z0-9_:-]+)(?:="([^"]*)")?/g;
+    let am;
+    while ((am = attrRe.exec(m[2] || '')) !== null) {
+      el.setAttribute(am[1], am[2] !== undefined ? am[2] : '');
+    }
+    stack[stack.length - 1].appendChild(el);
+    if (m[3] !== '/') stack.push(el);
+  }
+}
+
 class FakeElement extends FakeNode {
   constructor(doc, tag) {
     super(doc);
@@ -90,6 +126,9 @@ class FakeElement extends FakeNode {
     this.value = '';
     this.disabled = false;
     this.checked = false;
+    this.offsetWidth = 40;
+    this._animations = [];
+    this._rect = null;
     const cls = () => (this.attrs.class || '').split(/\s+/).filter(Boolean);
     const set = (list) => { this.attrs.class = list.join(' '); };
     this.classList = {
@@ -106,11 +145,12 @@ class FakeElement extends FakeNode {
   get className() { return this.attrs.class || ''; }
   set className(v) { this.attrs.class = String(v); }
   get id() { return this.attrs.id || ''; }
+  set id(v) { this.attrs.id = String(v); }
   setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'hidden') this.hidden = true; }
   getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; }
   removeAttribute(k) { delete this.attrs[k]; }
   hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); }
-  set innerHTML(v) { this.textContent = ''; this.appendChild(new FakeElement(this.ownerDocument, 'svg')); }
+  set innerHTML(v) { parseMarkup(this, v); }
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
   removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] || []).filter((f) => f !== fn); }
   dispatchEvent(ev) {
@@ -124,7 +164,20 @@ class FakeElement extends FakeNode {
   focus() { this.ownerDocument.activeElement = this; }
   blur() {}
   scrollIntoView() {}
-  getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
+  getBoundingClientRect() { return this._rect || { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
+  animate(frames, options) {
+    const anim = {
+      frames,
+      options: typeof options === 'number' ? { duration: options } : (options || {}),
+      playState: 'running',
+      onfinish: null,
+      oncancel: null,
+      finish() { this.playState = 'finished'; if (typeof this.onfinish === 'function') this.onfinish(); },
+      cancel() { this.playState = 'idle'; if (typeof this.oncancel === 'function') this.oncancel(); },
+    };
+    this._animations.push(anim);
+    return anim;
+  }
   matches(selector) { return matches(this, selector); }
   closest(selector) {
     for (let el = this; el instanceof FakeElement; el = el.parentNode) if (matches(el, selector)) return el;
@@ -147,8 +200,10 @@ class FakeDocument extends FakeElement {
   constructor() {
     super(null, '#document');
     this.ownerDocument = this;
+    this.defaultView = null;
     this.activeElement = null;
     this.documentElement = this.appendChild(new FakeElement(this, 'html'));
+    this.head = this.documentElement.appendChild(new FakeElement(this, 'head'));
     this.body = this.documentElement.appendChild(new FakeElement(this, 'body'));
   }
   createElement(tag) { return new FakeElement(this, tag); }
@@ -165,8 +220,11 @@ function page(doc) {
     return e;
   };
   el('p', { id: 'preview-banner' }).hidden = true;
-  el('button', { id: 'shape', type: 'button', 'aria-label': 'Pulso: toque para uma dica', 'aria-describedby': 'say' });
-  el('p', { id: 'say' });
+  const coach = el('header', { class: 'coach' });
+  el('button', { id: 'shape', class: 'shape', type: 'button', 'aria-label': 'Muscle: toque para uma dica', 'aria-describedby': 'say' }, coach);
+  const bubble = el('div', { class: 'bubble' }, coach);
+  el('span', { class: 'bubble-name' }, bubble).textContent = 'Muscle';
+  el('p', { class: 'bubble-text', id: 'say' }, bubble);
   const nav = el('nav', { class: 'tabs' });
   el('button', { class: 'tab', id: 'tab-workout', 'data-view': 'workout' }, nav);
   el('button', { class: 'tab', id: 'tab-food', 'data-view': 'food' }, nav);
@@ -181,11 +239,14 @@ function page(doc) {
   el('div', { id: 'sheet' }).hidden = true;
 }
 
+const AVATAR = fs.readFileSync(path.join(__dirname, '..', 'src', 'avatar.js'), 'utf8');
+
 function fakeTimers() {
   let now = 0;
   let next = 1;
   const queue = new Map();
   return {
+    now() { return now; },
     setTimeout(fn, ms) { const id = next++; queue.set(id, { at: now + (ms || 0), fn }); return id; },
     clearTimeout(id) { queue.delete(id); },
     /** Runs every timer due within `ms`, in time order (the 8 s catalog timeout stays pending). */
@@ -257,7 +318,7 @@ function blob(catalog) {
 }
 
 /**
- * Starts the page inside "Telegram". opts: {view: 'workout'|'food', storage, catalog, globals}
+ * Starts the page inside "Telegram". opts: {view: 'workout'|'food', storage, catalog, globals, loadAvatar}
  * (`globals`: extra page globals, or a function of the page context returning them).
  * Resolves once the catalog is decoded and the form rendered.
  */
@@ -288,9 +349,11 @@ async function boot(opts = {}) {
     ShapeCore: C,
     Telegram: tg ? { WebApp: tg } : undefined,
   };
+  doc.defaultView = ctx;
   Object.assign(ctx, typeof opts.globals === 'function' ? opts.globals(ctx) : opts.globals || {});
   ctx.window = ctx;
   vm.createContext(ctx);
+  if (opts.loadAvatar) vm.runInContext(AVATAR, ctx, { filename: 'avatar.js' });
   vm.runInContext(APP, ctx, { filename: 'app.js' });
   // DecompressionStream completes off-thread. Count elapsed time rather than event-loop turns:
   // 500 immediates could elapse before zlib got CPU when the sheet suite ran concurrently.
@@ -303,6 +366,7 @@ async function boot(opts = {}) {
   if (!started()) throw new Error(`the page did not start: ${doc.getElementById('say').textContent}`);
   return {
     doc,
+    ctx,
     tg,
     timers,
     storage,
@@ -341,4 +405,4 @@ function foodDraft(date, extra) {
   return { [`shape-miniapp:v2:f:${encodeURIComponent(SAMPLE.client)}`]: Object.assign({ v: 1, savedAt: 1, date, meal: 'Almoço', items: [item] }, extra || {}) };
 }
 
-module.exports = { boot, storageWith, doneWorkoutDraft, foodDraft, today, SAMPLE, C };
+module.exports = { boot, storageWith, doneWorkoutDraft, foodDraft, today, SAMPLE, C, FakeDocument, FakeElement, fakeTimers };

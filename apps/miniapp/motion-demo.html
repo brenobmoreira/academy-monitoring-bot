@@ -255,8 +255,8 @@
       return function () { row.children[(cur + 1) % names.length].click(); };
     }, 'Escolher o próximo');
 
-    demo('Pulso e o progresso', 'Barra: 450 ms. Cada marca nova acende e Pulso pulsa (300 ms + anel 420 ms). Anel completo: uma volta de 700 ms. "Anotei": aceno de 260 ms. "Corrija": tremor de 320 ms.', function (stage) {
-      var coach = el('<header class="coach"><div class="shape" data-state="idle" aria-hidden="true"></div><div class="bubble"><span class="bubble-name">Shape</span><p class="bubble-text">Upper A: registre série por série.</p></div></header>');
+    demo('Muscle e o progresso', 'Barra: 450 ms. Cada passo novo pulsa o Muscle (260 ms) e o plano completo dá um salto (400 ms). "Anotei": aceno de 240 ms. "Corrija": tremor de 320 ms.', function (stage) {
+      var coach = el('<header class="coach"><div class="shape" data-state="idle" data-form="treino" aria-hidden="true"></div><div class="bubble"><span class="bubble-name">Muscle</span><p class="bubble-text">Upper A: registre série por série.</p></div></header>');
       stage.appendChild(coach);
       A.mount(coach.firstChild, coach.querySelector('.bubble-text'));
       var p = 0;
@@ -280,7 +280,7 @@
     function reviewBlock() {
       var box = el('<section class="review"></section>');
       var scene = el('<div class="mascot-scene"><p>Validado aqui. A confirmação vem do bot.</p></div>');
-      scene.insertBefore(A.create('happy'), scene.firstChild);
+      scene.insertBefore(A.create('happy', 'revisao'), scene.firstChild);
       box.append(scene,
         el('<div class="view-head" style="margin-top:12px"><h1 class="view-title">Confira o envio</h1><p class="view-sub">É exatamente isto que vai para o bot.</p></div>'),
         el('<dl class="facts"><dt>Data</dt><dd>Hoje, seg 09/11</dd><dt>Sessão</dt><dd>Upper A</dd><dt>Status</dt><dd>parcial</dd></dl>'),
@@ -289,13 +289,13 @@
       return box;
     }
 
-    demo('Entrando na revisão', 'Os blocos sobem 12 px em cascata (220 ms + 20 ms cada), Pulso cresce com mola (320 ms) e o medidor enche (420 ms).', function (stage) {
+    demo('Entrando na revisão', 'Os blocos sobem 12 px em cascata (220 ms + 20 ms cada), Muscle cresce com mola (320 ms) e o medidor enche (420 ms).', function (stage) {
       var box = reviewBlock();
       stage.appendChild(box);
       return function () { M.review(box); };
     });
 
-    demo('Entrega ao Telegram', 'A revisão sobe 10 px e esmaece para 35% (260 ms, acelerando) enquanto Pulso "pensa". Sem check, sem "salvo": quem confirma é a resposta do bot. Aqui ela volta sozinha depois de 1,2 s.', function (stage) {
+    demo('Entrega ao Telegram', 'A revisão sobe 10 px e esmaece para 35% (260 ms, acelerando) enquanto Muscle "pensa". Sem check, sem "salvo": quem confirma é a resposta do bot. Aqui ela volta sozinha depois de 1,2 s.', function (stage) {
       var box = reviewBlock();
       stage.appendChild(box);
       var big = box.querySelector('.shape'), timer = null, lift = null;
@@ -308,7 +308,7 @@
       };
     }, 'Enviar');
 
-    demo('Campo com erro', 'O cartão que precisa de ajuste treme uma vez (300 ms) e Pulso entra em alerta. Nada trava: dá para corrigir na hora.', function (stage) {
+    demo('Campo com erro', 'O cartão que precisa de ajuste treme uma vez (300 ms) e Muscle entra em alerta. Nada trava: dá para corrigir na hora.', function (stage) {
       var c = card('Supino reto', 'Peito', false, [80], 'error');
       stage.appendChild(c);
       return function () { M.shake(c); };

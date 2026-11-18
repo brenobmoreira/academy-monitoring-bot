@@ -649,3 +649,66 @@ test('M10: favorite chips render SVG star with aria-hidden and workout card erro
   assert.ok(svg, 'favorite chip renders an inline SVG star');
   assert.equal(svg.getAttribute('aria-hidden'), 'true');
 });
+
+test('Muscle integration: header displays Muscle, tabs morph treino <-> refeicao, review morphs to revisao, and 45s sleep morphs to descanso and wakes back to active tab form', async () => {
+  const entries = Object.assign({}, doneWorkoutDraft(today(), SAMPLE.next), foodDraft(today()));
+  const p = await boot({ loadAvatar: true, storage: storageWith(entries) });
+  const shape = p.doc.getElementById('shape');
+  const nameEl = p.doc.querySelector('.bubble-name');
+
+  // 1) Official name Muscle in header and ShapeAvatar API
+  assert.equal(p.ctx.ShapeAvatar.NAME, 'Muscle');
+  assert.equal(nameEl.textContent, 'Muscle');
+  assert.equal(shape.getAttribute('aria-label'), 'Muscle: toque para uma dica');
+
+  // 2) Booted on Treino -> form is 'treino'; empty workout plan scene uses 'base'
+  assert.equal(shape.getAttribute('data-form'), 'treino');
+  assert.equal(p.doc.querySelector('#view .empty-plan .shape').getAttribute('data-form'), 'base');
+
+  // 3) Switching Treino <-> Alimentação morphs form 'treino' <-> 'refeicao'
+  p.tab('food');
+  assert.equal(shape.getAttribute('data-form'), 'refeicao');
+  p.tab('workout');
+  assert.equal(shape.getAttribute('data-form'), 'treino');
+
+  // 4) Entering Review morphs header avatar AND static scene avatar to 'revisao'; Back restores active tab form
+  p.tab('food');
+  assert.equal(shape.getAttribute('data-form'), 'refeicao');
+  p.press();
+  p.timers.run(400);
+  assert.equal(p.review.hidden, false);
+  assert.equal(shape.getAttribute('data-form'), 'revisao');
+  assert.equal(p.review.querySelector('.mascot-scene .shape').getAttribute('data-form'), 'revisao');
+
+  p.tg.BackButton.handler();
+  assert.equal(p.review.hidden, true);
+  assert.equal(shape.getAttribute('data-form'), 'refeicao');
+
+  // 5) Dozing after 45s idle morphs to 'descanso' and waking restores the active tab form ('refeicao' and 'treino')
+  p.timers.run(45000);
+  assert.equal(p.ctx.ShapeAvatar.dozing(), true);
+  assert.equal(shape.getAttribute('data-dozing'), 'true');
+  assert.equal(shape.getAttribute('data-form'), 'descanso');
+
+  shape.click();
+  assert.equal(p.ctx.ShapeAvatar.dozing(), false);
+  assert.equal(shape.getAttribute('data-form'), 'refeicao');
+
+  p.tab('workout');
+  assert.equal(shape.getAttribute('data-form'), 'treino');
+  p.timers.run(45000);
+  assert.equal(p.ctx.ShapeAvatar.dozing(), true);
+  assert.equal(shape.getAttribute('data-form'), 'descanso');
+
+  shape.click();
+  assert.equal(p.ctx.ShapeAvatar.dozing(), false);
+  assert.equal(shape.getAttribute('data-form'), 'treino');
+
+  // 6) Fatal catalog error resets header and static scene to 'base' + 'alert'
+  const zlib = require('node:zlib');
+  const badBlob = zlib.deflateRawSync(Buffer.from('{broken', 'utf8')).toString('base64url');
+  const pf = await boot({ loadAvatar: true, hash: `#v=workout&c=${badBlob}`, expectFatal: true });
+  assert.equal(pf.doc.getElementById('shape').getAttribute('data-state'), 'alert');
+  assert.equal(pf.doc.getElementById('shape').getAttribute('data-form'), 'base');
+  assert.equal(pf.doc.querySelector('#view .empty-plan .shape').getAttribute('data-form'), 'base');
+});

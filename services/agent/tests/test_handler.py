@@ -661,3 +661,32 @@ async def test_command_outage_releases_a_read_but_a_permanent_refusal_or_an_undo
     await Handler({42}, FakeBot(), tg, sheet=sheet, deduplicator=dedup).handle_update(u)
     await Handler({42}, FakeBot(), tg, sheet=sheet, deduplicator=dedup).handle_update(u)  # ignored
     assert len(sheet.calls) == 1
+
+
+@pytest.mark.parametrize("outcome", ["committed", "uncertain"])
+async def test_terminal_write_outcomes_complete_update_even_when_send_fails(outcome):
+    dedup = UpdateDeduplicator()
+    u = update("peso 82", update_id=91)
+    first_bot = FakeBot(Answer("status", failed=(outcome == "uncertain"), outcome=outcome))
+    await Handler({42}, first_bot, FakeTelegram(error=RuntimeError("net")), deduplicator=dedup).handle_update(
+        u
+    )
+
+    second_bot = FakeBot("ok")
+    await Handler({42}, second_bot, FakeTelegram(), deduplicator=dedup).handle_update(u)
+    assert first_bot.texts == [("peso 82", "42")]
+    assert second_bot.texts == []
+
+
+async def test_a_reply_to_the_voice_fix_prompt_passes_no_reply_context():
+    from agent.buttons import VOICE_FIX_PROMPT
+
+    replied = {
+        "message_id": 10,
+        "from": {"id": 1, "is_bot": True},
+        "text": f"{VOICE_FIX_PROMPT}\n\nsupino 80 por 8",
+    }
+    bot = FakeBot()
+    await Handler({42}, bot, FakeTelegram()).handle_update(replying("supino 82 por 8", replied))
+    assert bot.texts == [("supino 82 por 8", "42")]
+    assert bot.contexts == [None]

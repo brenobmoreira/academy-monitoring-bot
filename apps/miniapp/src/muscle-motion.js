@@ -116,19 +116,58 @@
     return v >= 1 ? 1 : v;
   }
 
+  function cancelNodeAnimations(node) {
+    if (!node) return;
+    if (typeof node.getAnimations === 'function') {
+      var live = null;
+      try { live = node.getAnimations(); } catch (e) { live = null; }
+      if (live) {
+        for (var i = 0; i < live.length; i++) {
+          if (live[i] && typeof live[i].cancel === 'function') {
+            try { live[i].cancel(); } catch (e) { /* ignore */ }
+          }
+        }
+      }
+      return;
+    }
+    if (Array.isArray(node._animations)) {
+      for (var j = 0; j < node._animations.length; j++) {
+        var a = node._animations[j];
+        if (a && a.playState === 'running' && typeof a.cancel === 'function') {
+          try { a.cancel(); } catch (e) { /* ignore */ }
+        }
+      }
+    }
+  }
+
   function applyAvatarForm(el, form, opts) {
     if (!el || !form) return;
+    var win = winOf(el, opts);
     var avatar = resolveAvatar(el, opts);
+    var isShapeAvatar = !!(
+      avatar &&
+      ((win && avatar === win.ShapeAvatar) ||
+        (global && avatar === global.ShapeAvatar) ||
+        Array.isArray(avatar.FORMS))
+    );
+    if (isShapeAvatar) {
+      var validForms = Array.isArray(avatar.FORMS) && avatar.FORMS.length > 0 ? avatar.FORMS : null;
+      var next = validForms
+        ? (validForms.indexOf(form) >= 0
+          ? form
+          : (validForms.indexOf('idle') >= 0 ? 'idle' : validForms[0]))
+        : String(form || 'idle');
+      if (el.setAttribute) el.setAttribute('data-form', next);
+      return;
+    }
     if (avatar && typeof avatar.setForm === 'function') {
       if (avatar.setForm.length >= 2) {
         avatar.setForm(el, form);
       } else {
-        avatar.setForm(el, form);
+        avatar.setForm(form);
       }
       if (el.setAttribute && el.getAttribute('data-form') !== form) {
-        if (!avatar.FORMS || avatar.FORMS.indexOf(form) >= 0) {
-          el.setAttribute('data-form', form);
-        }
+        el.setAttribute('data-form', form);
       }
       return;
     }
@@ -285,6 +324,7 @@
           try { a.cancel(); } catch (e) { /* ignore */ }
         }
       }
+      cancelNodeAnimations(query(el, '.dt-anim'));
     }
 
     if (rec) rec.morphAbort = cancelMorph;
@@ -1077,7 +1117,11 @@
       rec.travelAbort = null;
     }
 
-    var slotName = opts.slot || (targetSlot.getAttribute && targetSlot.getAttribute('data-stage')) || null;
+    var slotName =
+      opts.slot ||
+      (targetSlot.getAttribute &&
+        (targetSlot.getAttribute('data-stage') || targetSlot.getAttribute('data-slot'))) ||
+      null;
 
     if (
       reducedMotion(muscleEl, opts) ||
@@ -1131,8 +1175,13 @@
     var prevOrigin = (muscleEl.style && muscleEl.style.transformOrigin) || '';
     if (muscleEl.style) muscleEl.style.transformOrigin = 'top left';
 
-    var duration = typeof opts.duration === 'number' ? opts.duration : 380;
+    var defaultDuration = slotName === SLOTS.header ? 320 : 380;
+    var duration =
+      opts.duration != null && typeof opts.duration === 'number' && Number.isFinite(opts.duration)
+        ? opts.duration
+        : defaultDuration;
     var cancelled = false;
+    var originRestored = false;
 
     // P(lay): WAAPI FLIP flight from inverted origin through parabolic apex to identity
     var anim = muscleEl.animate([
@@ -1163,6 +1212,9 @@
     }
 
     function restoreOrigin() {
+      if (originRestored) return;
+      originRestored = true;
+      if (rec && rec.travelAbort && rec.travelAbort !== abortTravel) return;
       if (muscleEl.style) muscleEl.style.transformOrigin = prevOrigin;
     }
 
@@ -1187,8 +1239,8 @@
         rec.animations.delete(anim);
         if (rec.travelAbort === abortTravel) rec.travelAbort = null;
       }
+      if (cancelled || (rec && rec.travelAbort && rec.travelAbort !== abortTravel)) return;
       restoreOrigin();
-      if (cancelled) return;
 
       var pose = query(muscleEl, '.dt-pose');
       if (pose && typeof pose.animate === 'function' && !reducedMotion(muscleEl, opts)) {
@@ -1211,6 +1263,7 @@
         rec.animations.delete(anim);
         if (rec.travelAbort === abortTravel) rec.travelAbort = null;
       }
+      if (cancelled || (rec && rec.travelAbort && rec.travelAbort !== abortTravel)) return;
       restoreOrigin();
     };
 
@@ -1400,7 +1453,11 @@
   function destroyElement(el) {
     if (!el) return;
     var rec = elementRecords ? elementRecords.get(el) : null;
-    if (!rec) return;
+    if (!rec) {
+      cancelNodeAnimations(query(el, '.dt-anim'));
+      glance(el, null);
+      return;
+    }
 
     if (rec.morphAbort) { rec.morphAbort(); rec.morphAbort = null; }
     if (rec.travelAbort) { rec.travelAbort(); rec.travelAbort = null; }
@@ -1425,6 +1482,7 @@
     });
     rec.animations.clear();
 
+    cancelNodeAnimations(query(el, '.dt-anim'));
     glance(el, null);
     trackedElements.delete(el);
   }

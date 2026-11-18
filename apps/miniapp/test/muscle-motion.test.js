@@ -355,6 +355,60 @@ describe('morph()', () => {
     assert.equal(env.shape.getAttribute('data-form'), 'agua');
     assert.equal(animEl._animations.length, 0);
   });
+
+  test('does NOT trigger duplicate squash(340ms) from ShapeAvatar.setForm (.dt-anim strictly 70 + 210 + 90 = 370ms) and cancels .dt-anim getAnimations()', () => {
+    const env = createHarness();
+    const animEl = env.shape.querySelector('.dt-anim');
+
+    const handle = MM.morph(env.shape, 'treino');
+    assert.ok(handle);
+    assert.equal(animEl._animations.length, 1);
+    assert.equal(animEl._animations[0].options.duration, 70);
+
+    // Phase 1 completes -> switches data-form directly without firing ShapeAvatar's 340ms squash
+    animEl._animations[0].finish();
+    assert.equal(env.shape.getAttribute('data-form'), 'treino');
+    assert.equal(animEl._animations.length, 2, 'must not spawn a rogue 340ms squash alongside 210ms overshoot');
+    assert.equal(animEl._animations[1].options.duration, 210);
+    assert.equal(animEl._animations.some((a) => a.options.duration === 340), false);
+
+    // Phase 2 completes -> 90ms settle
+    animEl._animations[1].finish();
+    assert.equal(animEl._animations.length, 3);
+    assert.equal(animEl._animations[2].options.duration, 90);
+
+    const durations = animEl._animations.map((a) => a.options.duration);
+    assert.deepEqual(durations, [70, 210, 90]);
+    assert.equal(durations.reduce((sum, d) => sum + d, 0), 370);
+    animEl._animations[2].finish();
+
+    // Unknown form with ShapeAvatar.FORMS falls back cleanly to FORMS[0] ('base')
+    const hFallback = MM.morph(env.shape, 'invalid-form');
+    animEl._animations.at(-1).finish();
+    assert.equal(env.shape.getAttribute('data-form'), 'base');
+    hFallback.cancel();
+
+    // Custom 1-arg setForm(form) adapter without FORMS invokes avatar.setForm(form)
+    const singleArgCalls = [];
+    MM.morph(env.shape, 'agua', {
+      avatar: { setForm(f) { singleArgCalls.push(f); } },
+    });
+    animEl._animations.at(-1).finish();
+    assert.deepEqual(singleArgCalls, ['agua']);
+    assert.equal(env.shape.getAttribute('data-form'), 'agua');
+
+    // cancel() and destroy() also cancel any active WAAPI animation exposed via .dt-anim.getAnimations()
+    const hCancel = MM.morph(env.shape, 'refeicao');
+    let strayCancelled = 0;
+    const strayAnim = { cancel() { strayCancelled += 1; } };
+    animEl.getAnimations = () => [strayAnim];
+    hCancel.cancel();
+    assert.equal(strayCancelled, 1);
+
+    MM.destroy(env.shape);
+    assert.equal(strayCancelled, 2);
+    delete animEl.getAnimations;
+  });
 });
 
 describe('react() & glance()', () => {
@@ -604,6 +658,109 @@ describe('travelTo() spatial FLIP & single-instance stage presence', () => {
     assert.equal(env.shape._animations.length, 0);
     assert.equal(arrived, true);
   });
+
+  test('async WAAPI oncancel from an interrupted flight never clears transformOrigin during a newer flight', () => {
+    const env = createHarness();
+    env.shape.style.transformOrigin = 'center bottom';
+
+    // Simulate real browser W3C WAAPI behavior: anim.cancel() queues oncancel asynchronously
+    const pendingCancels = [];
+    const origAnimate = env.shape.animate.bind(env.shape);
+    env.shape.animate = (frames, options) => {
+      const anim = origAnimate(frames, options);
+      anim.cancel = function () {
+        this.playState = 'idle';
+        pendingCancels.push(() => {
+          if (typeof this.oncancel === 'function') this.oncancel();
+        });
+      };
+      return anim;
+    };
+
+    const slot1 = env.doc.createElement('div');
+    slot1.setAttribute('data-stage', 'voice');
+    env.doc.body.appendChild(slot1);
+    const origAppend1 = slot1.appendChild.bind(slot1);
+    slot1.appendChild = (child) => {
+      const res = origAppend1(child);
+      child._rect = { left: 120, top: 240, right: 200, bottom: 320, width: 80, height: 80 };
+      return res;
+    };
+
+    const slot2 = env.doc.createElement('div');
+    slot2.setAttribute('data-stage', 'review');
+    env.doc.body.appendChild(slot2);
+    const origAppend2 = slot2.appendChild.bind(slot2);
+    slot2.appendChild = (child) => {
+      const res = origAppend2(child);
+      child._rect = { left: 60, top: 140, right: 120, bottom: 200, width: 60, height: 60 };
+      return res;
+    };
+
+    // Start Flight 1
+    const anim1 = MM.travelTo(env.shape, slot1);
+    assert.ok(anim1);
+    assert.equal(env.shape.style.transformOrigin, 'top left');
+
+    // Start Flight 2 before Flight 1 finishes -> cancels Flight 1 (oncancel still queued!)
+    const anim2 = MM.travelTo(env.shape, slot2);
+    assert.ok(anim2);
+    assert.equal(pendingCancels.length, 1);
+    assert.equal(env.shape.style.transformOrigin, 'top left');
+
+    // Next tick: Flight 1's async oncancel fires AFTER Flight 2 is already in progress
+    pendingCancels.shift()();
+    assert.equal(
+      env.shape.style.transformOrigin,
+      'top left',
+      'Flight 1 async oncancel must not clobber Flight 2 transformOrigin'
+    );
+
+    // Finish Flight 2 -> restores original pre-Flight-1 transformOrigin
+    anim2.finish();
+    assert.equal(env.shape.style.transformOrigin, 'center bottom');
+    MM.destroy(env.shape);
+  });
+
+  test('resolves data-slot="header" with 320ms duration + header aria-label and other slots with 380ms', () => {
+    const env = createHarness();
+
+    const voiceSlot = env.doc.createElement('div');
+    voiceSlot.setAttribute('data-slot', 'voice');
+    env.doc.body.appendChild(voiceSlot);
+    const origVoiceAppend = voiceSlot.appendChild.bind(voiceSlot);
+    voiceSlot.appendChild = (child) => {
+      const res = origVoiceAppend(child);
+      child._rect = { left: 130, top: 260, right: 210, bottom: 340, width: 80, height: 80 };
+      return res;
+    };
+
+    const headerSlot = env.doc.createElement('div');
+    headerSlot.setAttribute('data-slot', 'header');
+    env.doc.body.appendChild(headerSlot);
+    const origHeaderAppend = headerSlot.appendChild.bind(headerSlot);
+    headerSlot.appendChild = (child) => {
+      const res = origHeaderAppend(child);
+      child._rect = { left: 16, top: 20, right: 56, bottom: 60, width: 40, height: 40 };
+      return res;
+    };
+
+    // Non-header data-slot="voice" defaults to 380ms and updates aria-label
+    const toVoice = MM.travelTo(env.shape, voiceSlot);
+    assert.ok(toVoice);
+    assert.equal(toVoice.options.duration, 380);
+    assert.equal(env.shape.getAttribute('aria-label'), 'Muscle ouvindo sua voz');
+    toVoice.finish();
+
+    // Returning to data-slot="header" defaults to 320ms and updates aria-label
+    const toHeader = MM.travelTo(env.shape, headerSlot);
+    assert.ok(toHeader);
+    assert.equal(toHeader.options.duration, 320);
+    assert.equal(env.shape.getAttribute('aria-label'), 'Muscle: toque para uma dica');
+    toHeader.finish();
+
+    MM.destroy(env.shape);
+  });
 });
 
 describe('Timers, micro-life, guiding & lifecycle cleanup', () => {
@@ -696,6 +853,9 @@ describe('Timers, micro-life, guiding & lifecycle cleanup', () => {
 
     MM.attachLife(env.shape);
     MM.startFootTap(env.shape);
+    MM.morph(env.shape, 'treino');
+    // Even an external WAAPI animation started directly on .dt-anim is cancelled by destroy(el)
+    env.shape.querySelector('.dt-anim').animate([{ transform: 'scale(1, 1)' }], { duration: 340 });
     MM.connectVoice(env.shape, { id: 'live-mic' });
     MM.guideTo(env.shape, card, { delay: 120, reaction: 'nod' });
     MM.onValidationError(env.shape, card);
@@ -708,7 +868,7 @@ describe('Timers, micro-life, guiding & lifecycle cleanup', () => {
     assert.equal(env.timers.size, 0);
     assert.equal(env.rafs.size, 0);
     assert.equal(state.closeCalls, 1);
-    for (const part of ['.dt-breath', '.dt-foot', '.dt-pose']) {
+    for (const part of ['.dt-anim', '.dt-breath', '.dt-foot', '.dt-pose']) {
       const node = env.shape.querySelector(part);
       for (const anim of node._animations) {
         assert.notEqual(anim.playState, 'running', `${part} animation still running after destroy`);

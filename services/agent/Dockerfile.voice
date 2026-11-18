@@ -1,0 +1,37 @@
+# Standalone ASGI voice service (agent.voice_asgi:app) for Mini App speech-to-text.
+# Spec: docs/specs/2026-11-14-voice-input-design.md §5.1.
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+# Create non-root user early to avoid large chown layers over the virtualenv
+RUN useradd -u 1000 -s /bin/bash -m appuser
+
+WORKDIR /app
+RUN chown appuser:appuser /app
+
+# Run and install directly as appuser
+USER appuser
+
+# Install dependencies first for optimal layer caching
+COPY --chown=appuser:appuser pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Copy application source code and settings
+COPY --chown=appuser:appuser . .
+
+# Install project package into the virtualenv
+RUN uv sync --frozen --no-dev
+
+# Use virtual environment binaries
+ENV PATH="/app/.venv/bin:$PATH"
+
+EXPOSE 8080
+
+# Cloud Run injects $PORT (default 8080).
+# Single worker (--workers 1) is mandatory: rate limits, token budgets and deduplication
+# live in process memory per instance (§5.1).
+CMD ["sh", "-c", "exec uvicorn agent.voice_asgi:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1"]

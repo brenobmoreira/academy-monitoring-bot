@@ -801,7 +801,10 @@ def _usd(value: float | None) -> str:
 
 def format_table(headers: list[str], rows: list[list[str]]) -> str:
     widths = [max(len(h), *(len(r[i]) for r in rows)) if rows else len(h) for i, h in enumerate(headers)]
-    line = lambda cells: "  ".join(c.ljust(w) for c, w in zip(cells, widths, strict=True)).rstrip()  # noqa: E731
+
+    def line(cells: list[str]) -> str:
+        return "  ".join(c.ljust(w) for c, w in zip(cells, widths, strict=True)).rstrip()
+
     return "\n".join([line(headers), line(["-" * w for w in widths]), *(line(r) for r in rows)])
 
 
@@ -1016,8 +1019,10 @@ def checks_section(report: Report) -> list[str]:
             "determinística)."
         )
     lines += [
-        "- O LiteLLM 1.102 avisa que `temperature`, `top_p` e `top_k` seguem funcionando no Gemini 3+, mas "
-        "serão removidos numa versão futura.",
+        (
+            "- O LiteLLM 1.102 avisa que `temperature`, `top_p` e `top_k` seguem funcionando "
+            "no Gemini 3+, mas serão removidos numa versão futura."
+        ),
         "",
         f"### 3. max_tokens = {MAX_TOKENS}",
         "",
@@ -1062,9 +1067,8 @@ def checks_section(report: Report) -> list[str]:
 def _verdict(measured: int) -> str:
     diff = measured - TRANSCRIBE_PROMPT_TOKENS
     if abs(diff) <= PROMPT_TOKENS_TOLERANCE:
-        return (
-            f"diferença {diff:+d} em relação à constante, dentro de ±{PROMPT_TOKENS_TOLERANCE}: constante ok"
-        )
+        prefix = f"diferença {diff:+d} em relação à constante"
+        return f"{prefix}, dentro de ±{PROMPT_TOKENS_TOLERANCE}: constante ok"
     return f"diferença {diff:+d} em relação à constante: ajustar para cerca de {measured}"
 
 
@@ -1086,9 +1090,12 @@ def render_results(report: Report, generated_at: datetime) -> str:
     parts = [
         "# Comparação de modelos: resultados",
         "",
-        f"Gerado em {generated_at:%Y-%m-%d %H:%M} · modelos: {', '.join(f'`{m}`' for m in report.models)} · "
-        f"thinking: {', '.join(report.levels)} · {report.audio_count} áudio(s)"
-        + (f" (+{report.skipped_audio} ignorado(s) por tamanho)" if report.skipped_audio else ""),
+        (
+            f"Gerado em {generated_at:%Y-%m-%d %H:%M} · "
+            f"modelos: {', '.join(f'`{m}`' for m in report.models)} · "
+            f"thinking: {', '.join(report.levels)} · {report.audio_count} áudio(s)"
+            + (f" (+{report.skipped_audio} ignorado(s) por tamanho)" if report.skipped_audio else "")
+        ),
         "",
         "Este arquivo só tem métricas. As transcrições estão em `transcripts.txt`, nesta mesma pasta.",
         "",
@@ -1122,14 +1129,16 @@ def render_results(report: Report, generated_at: datetime) -> str:
         "",
         *prices,
         "",
-        "Custo = `prompt_tokens` × entrada + `completion_tokens` × saída; `completion_tokens` já inclui o "
-        "raciocínio. Estimativa, não fatura.",
+        (
+            "Custo = `prompt_tokens` × entrada + `completion_tokens` × saída; "
+            "`completion_tokens` já inclui o raciocínio. Estimativa, não fatura."
+        ),
         "",
     ]
     return "\n".join(parts)
 
 
-# --- Running -----------------------------------------------------------------------------------------------
+# --- Running -----------------------------------------------------------------------------------
 
 # Rough sizes for --dry-run only (a 60 s audio; the agent's instruction, tools and catalog are
 # about 5k tokens per model call and a message takes about 3 calls).
@@ -1207,7 +1216,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="nível de thinking (reasoning_effort); 'default' não envia nada, como o bot faz hoje",
     )
     parser.add_argument(
-        "--runs", type=int, default=2, help="vezes que cada áudio é transcrito, por modelo e nível (padrão 2)"
+        "--runs",
+        type=int,
+        default=2,
+        help="vezes que cada áudio é transcrito, por modelo e nível (padrão 2)",
     )
     parser.add_argument("--skip-chat", action="store_true")
     parser.add_argument("--skip-transcribe", action="store_true")

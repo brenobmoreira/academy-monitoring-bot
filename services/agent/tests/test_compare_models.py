@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import sys
 from collections.abc import Awaitable, Callable
 from datetime import date
@@ -13,6 +14,8 @@ from typing import Any
 import pytest
 from google.adk.models.lite_llm import LiteLLMClient
 from litellm import ModelResponse
+
+from agent import logs
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "compare_models.py"
 spec = importlib.util.spec_from_file_location("compare_models", SCRIPT)
@@ -128,6 +131,7 @@ def audio_dir(tmp_path: Path) -> Path:
 @pytest.fixture
 def with_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", KEY)
+    monkeypatch.setattr(logs, "_SECRETS", set())
 
 
 def read_tree(folder: Path) -> str:
@@ -169,6 +173,7 @@ def test_the_key_never_appears_in_any_output(
     script = chat_script({"ontem no jantar": FOOD_STEPS})
 
     def responder(model: Any, messages: list[dict[str, Any]], tools: Any, kwargs: dict[str, Any]) -> Any:
+        logging.getLogger("agent.bench").warning(f"debug {KEY}")
         # A provider error that echoes the request, key included (they do).
         if "o que comi hoje" in json.dumps(messages, ensure_ascii=False):
             return RuntimeError(f"401 invalid key {KEY}")
@@ -183,6 +188,7 @@ def test_the_key_never_appears_in_any_output(
     everything = captured.out + captured.err + caplog.text + read_tree(out)
     assert KEY not in everything
     assert "sentinel-key" not in everything
+    assert f"debug {logs.MASK}" in caplog.text
     # The failing case is reported by its class, not its message.
     assert "RuntimeError" in captured.out + read_tree(out) or "FALHOU" in captured.out
     assert (out / "results.md").is_file()

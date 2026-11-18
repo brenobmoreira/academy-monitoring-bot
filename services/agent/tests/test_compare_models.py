@@ -250,9 +250,12 @@ def test_default_levels_run_each_audio_twice_per_level(
     assert [r["reasoning_effort"] for r in audio_calls] == ["low", "low", "medium", "medium"]
     assert {r["model"] for r in audio_calls} == {"gemini/gemini-3.8-flash"}
     # The real Transcriber's request: temperature 0 and max_tokens 600.
-    assert all(r["temperature"] == 0 and r["max_tokens"] == 600 for r in audio_calls)
+    assert all(
+        r["temperature"] == 0 and r["max_tokens"] == 600 and r["drop_params"] is True for r in audio_calls
+    )
     # And one audio-free probe of the prompt size for the model.
-    assert sum(r["messages"][-1]["content"] == "." for r in inner.requests) == 1
+    probe_calls = [r for r in inner.requests if r["messages"][-1]["content"] == "."]
+    assert len(probe_calls) == 1 and probe_calls[0]["drop_params"] is True
 
 
 def test_results_md_has_metrics_and_the_three_checks(with_key: None, audio_dir: Path, tmp_path: Path) -> None:

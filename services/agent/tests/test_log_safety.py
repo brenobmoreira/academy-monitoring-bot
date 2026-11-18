@@ -571,6 +571,63 @@ async def test_the_retry_button_logs_a_failing_sheet_without_the_stored_form(cap
     assert all(r.exc_info is None for r in caplog.records)
 
 
+async def test_miniapp_text_submission_logs_no_submitted_text_on_failures(captured):
+    """§10.2 / §10.3: a secret word inside a Mini App `t: "text"` payload never reaches logs when
+    the bot fails, when sending the reply fails, or when `_miniapp` itself catches an error."""
+    caplog, stream = captured
+    sid_bot = "a" * 32
+    sid_send = "b" * 32
+    sid_err = "c" * 32
+    secret_text = f"{TEXT_SENTINEL} {AUDIO_B64}"
+
+    # 1. Bot raises a leaky error while processing `t: "text"`.
+    tg1 = FakeTelegram()
+    h1 = Handler({CHAT}, FakeBot(error=leaky()), tg1, clock=miniapp_clock())
+    await h1.handle_update(
+        web_app_update(
+            {"v": 1, "t": "text", "id": sid_bot, "src": "voice", "text": secret_text},
+            chat_id=CHAT,
+            update_id=22,
+        )
+    )
+    assert tg1.sent == [(CHAT, FAILURE)]
+
+    # 2. Sending the reply fails with a leaky error on a reply carrying the sentinel.
+    h2 = Handler({CHAT}, FakeBot(secret_text), FakeTelegram(error=leaky()), clock=miniapp_clock())
+    await h2.handle_update(
+        web_app_update(
+            {"v": 1, "t": "text", "id": sid_send, "src": "voice", "text": secret_text},
+            chat_id=CHAT,
+            update_id=23,
+        )
+    )
+
+    # 3. `_miniapp` itself catches an exception carrying the sentinel.
+    def broken_clock():
+        raise leaky()
+
+    tg3 = FakeTelegram()
+    h3 = Handler({CHAT}, FakeBot(), tg3, clock=broken_clock)
+    await h3.handle_update(
+        web_app_update(
+            {"v": 1, "t": "text", "id": sid_err, "src": "voice", "text": secret_text},
+            chat_id=CHAT,
+            update_id=24,
+        )
+    )
+    assert tg3.sent == [(CHAT, FAILURE)]
+
+    assert_clean(caplog.records, stream.getvalue())
+    assert_no_chat_id(caplog, stream)
+    for sid in (sid_bot, sid_send, sid_err):
+        assert sid not in caplog.text and sid not in stream.getvalue()
+    assert "bot failed on update 22: tests.test_log_safety.LeakyError" in caplog.text
+    assert "could not send the reply of update 23: tests.test_log_safety.LeakyError" in caplog.text
+    assert "mini app data failed on update 24: tests.test_log_safety.LeakyError" in caplog.text
+    assert "Traceback" not in caplog.text and "Traceback" not in stream.getvalue()
+    assert all(r.exc_info is None for r in caplog.records)
+
+
 async def test_a_failing_command_logs_no_typed_argument_and_no_exception_content(captured):
     caplog, stream = captured
     tg = FakeTelegram()

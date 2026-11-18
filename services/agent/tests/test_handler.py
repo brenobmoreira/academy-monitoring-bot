@@ -690,3 +690,571 @@ async def test_a_reply_to_the_voice_fix_prompt_passes_no_reply_context():
     await Handler({42}, bot, FakeTelegram()).handle_update(replying("supino 82 por 8", replied))
     assert bot.texts == [("supino 82 por 8", "42")]
     assert bot.contexts == [None]
+
+
+# ---- C7b: `/app` voice link & Mini App `t: "text"` glue (§4.2, §4.3.4, §7.1, §13 C7) --------------
+
+
+def _miniapp_text_update(
+    text: str = "almoço 150 g de arroz e 120 g de frango",
+    *,
+    sid: str = "0123456789abcdef0123456789abcdef",
+    chat_id: int = 42,
+    update_id: int = 500,
+    reply_to_message: dict | None = None,
+) -> dict:
+    import json
+
+    payload = {"v": 1, "t": "text", "id": sid, "src": "voice", "text": text}
+    msg: dict = {
+        "chat": {"id": chat_id},
+        "web_app_data": {"data": json.dumps(payload), "button_text": "🏋️ Treino"},
+    }
+    if reply_to_message is not None:
+        msg["reply_to_message"] = reply_to_message
+    return {"update_id": update_id, "message": msg}
+
+
+def _decode_button_catalog(url: str) -> dict:
+    import base64
+    import json
+    import zlib
+
+    blob = url.split("&c=", 1)[1]
+    packed = base64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4))
+    return json.loads(zlib.decompress(packed, -15).decode("utf-8"))
+
+
+async def test_build_handler_app_command_without_and_with_voice_settings():
+    import json
+    from datetime import UTC
+
+    import httpx
+
+    from agent.auth import AllowedChats, AuthError, LinkCodes, TelegramDirectory, derive_keys
+    from agent.handler import build_handler
+    from agent.settings import Settings
+
+    now = datetime(2026, 11, 14, 15, 0, tzinfo=UTC)
+    secret = "s" * 40
+    catalog_body = {
+        "ok": True,
+        "result": {
+            "today": "2026-11-14",
+            "timezone": "America/Sao_Paulo",
+            "client": {"name": "Teste"},
+            "sessions": ["Upper"],
+            "plan": [{"session": "Upper", "exercise": "Supino reto", "group": "Peito"}],
+            "exercises": [{"name": "Supino reto", "group": "Peito"}],
+            "foods": ["Arroz"],
+            "favorites": [],
+            "meals": ["Almoço"],
+            "units": ["g"],
+        },
+    }
+    sent_payloads: list[dict] = []
+
+    def transport_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "sheet.example":
+            return httpx.Response(200, json=catalog_body)
+        if request.url.path.endswith("/sendMessage"):
+            sent_payloads.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+        raise AssertionError(f"unexpected HTTP call: {request.method} {request.url}")
+
+    base_kwargs = {
+        "TELEGRAM_BOT_TOKEN": "123:fake-bot-token",
+        "ALLOWED_CHAT_IDS": "42,43",
+        "SHEET_API_URL": "https://sheet.example/exec",
+        "SHEET_API_KEY": "fake-sheet-key",
+        "LLM_MODEL": "gemini/gemini-2.5-flash",
+        "LLM_API_KEY": "fake-llm-key",
+        "MINIAPP_URL": "https://app.example/miniapp/",
+    }
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(transport_handler)) as http:
+        # 1. Without voice settings: `/app` emits keyboard URLs with no `vu`, `vc`, or `vx`.
+        no_voice = Settings.model_validate(base_kwargs)
+        h_plain = build_handler(no_voice, http, clock=lambda: now)
+        await h_plain.handle_update(update("/app", chat_id=42, update_id=601))
+        assert len(sent_payloads) == 1
+        plain_urls = [b["web_app"]["url"] for b in sent_payloads[0]["reply_markup"]["keyboard"][0]]
+        for url in plain_urls:
+            decoded = _decode_button_catalog(url)
+            assert "vu" not in decoded and "vc" not in decoded and "vx" not in decoded
+
+        # 2. With VOICE_API_URL + APP_AUTH_SECRET: `/app` issues one `vc` verifiable only for that chat_id.
+        sent_payloads.clear()
+        with_voice = Settings.model_validate(
+            {
+                **base_kwargs,
+                "VOICE_API_URL": "https://voice.example",
+                "APP_AUTH_SECRET": secret,
+                "APP_CODE_TTL_S": 600,
+            }
+        )
+        h_voice = build_handler(with_voice, http, clock=lambda: now)
+        await h_voice.handle_update(update("/app", chat_id=42, update_id=602))
+        assert len(sent_payloads) == 1
+        voice_urls = [b["web_app"]["url"] for b in sent_payloads[0]["reply_markup"]["keyboard"][0]]
+        w_cat, f_cat = (_decode_button_catalog(u) for u in voice_urls)
+        assert w_cat["vu"] == f_cat["vu"] == "https://voice.example"
+        assert w_cat["vx"] == f_cat["vx"] == int(now.timestamp()) + 600
+        code = w_cat["vc"]
+        assert isinstance(code, str) and code.startswith("c1.") and f_cat["vc"] == code
+
+        keys = derive_keys(secret)
+        only_other_chat = LinkCodes(keys, TelegramDirectory(keys, {43}), AllowedChats({43}), ttl_s=600)
+        with pytest.raises(AuthError) as forbidden_exc:
+            only_other_chat.verify(code, now)
+        assert forbidden_exc.value.code == "forbidden"
+
+        both_chats = LinkCodes(keys, TelegramDirectory(keys, {42, 43}), AllowedChats({42, 43}), ttl_s=600)
+        principal = both_chats.verify(code, now)
+        assert principal.provider == "telegram" and principal.chat_id == 42 and principal.subject == "42"
+
+        # Single-use: a second redemption of the same `vc` is rejected with `credential_used`.
+        with pytest.raises(AuthError) as used_exc:
+            both_chats.verify(code, now)
+        assert used_exc.value.code == "credential_used"
+
+
+async def test_miniapp_text_first_submission_runs_agent_with_scope_and_no_reply_context():
+    from agent.bot import Bot
+    from agent.tools import Journal
+
+    from .fakes import OK_DIARY, ScriptedLlm, call, say
+
+    sid = "a" * 32
+    sheet = FakeSheet(diary_upsert=[OK_DIARY])
+    llm = ScriptedLlm(
+        model="scripted",
+        script=[call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}), say("Ok")],
+    )
+    bot = Bot(sheet, llm, timezone="America/Sao_Paulo")
+    tg = FakeTelegram()
+    replied = {"message_id": 7, "from": {"id": 1, "is_bot": True}, "text": "20/09 · Peso kg 99,9"}
+
+    await Handler({42}, bot, tg, sheet=sheet, clock=lambda: datetime(2026, 9, 21, 12, 0)).handle_update(
+        _miniapp_text_update("peso 82,4", sid=sid, chat_id=42, update_id=501, reply_to_message=replied)
+    )
+
+    assert len(sheet.request_ids) == 1
+    assert sheet.request_ids[0] is not None
+    assert sheet.request_ids[0].startswith(f"tg:42:miniapp:text:{sid}:diary.upsert:")
+    assert tg.sent and "82,4" in tg.sent[0][1]
+
+    # Also verify directly via a spy Replier that `context` is None (`use_reply_context=False`) and
+    # `update_key_scope` inside `reply()` sets `tg:{chat_id}:miniapp:text:{id}`.
+    seen_prefixes: list[str | None] = []
+
+    class ScopeSpyBot(FakeBot):
+        async def reply(self, text, user_id="telegram", *, context=None, media=None):
+            seen_prefixes.append(Journal().request_prefix)
+            return await super().reply(text, user_id, context=context, media=media)
+
+    spy = ScopeSpyBot(Answer("<b>21/09</b> · Peso kg 82,4", ("w1",), wrote=True, outcome="committed"))
+    await Handler({42}, spy, FakeTelegram()).handle_update(
+        _miniapp_text_update("peso 82,4", sid="f" * 32, chat_id=42, update_id=502, reply_to_message=replied)
+    )
+    assert spy.texts == [("peso 82,4", "42")]
+    assert spy.contexts == [None]
+    assert seen_prefixes == [f"tg:42:miniapp:text:{'f' * 32}"]
+
+
+async def test_miniapp_text_same_payload_in_two_different_updates_runs_agent_once():
+    from agent.text_submissions import DONE_REPLY, TextSubmissions
+
+    sid = "b" * 32
+    submissions = TextSubmissions()
+    bot = FakeBot(Answer("<b>21/09</b> · Peso kg 82,4", ("w1",), wrote=True, outcome="committed"))
+    tg = FakeTelegram()
+    handler = Handler({42, 43}, bot, tg, text_submissions=submissions)
+
+    await handler.handle_update(_miniapp_text_update("peso 82,4", sid=sid, chat_id=42, update_id=510))
+    await handler.handle_update(_miniapp_text_update("peso 82,4", sid=sid, chat_id=42, update_id=511))
+
+    assert bot.texts == [("peso 82,4", "42")]
+    assert tg.sent == [
+        (42, "<b>21/09</b> · Peso kg 82,4"),
+        (42, DONE_REPLY),
+    ]
+    assert submissions.begin(42, sid, "peso 82,4").reason == "done"
+
+    # A clean read-only reply (`outcome=None, failed=False`) also settles as `done`.
+    read_sid = "c" * 32
+    read_bot = FakeBot(Answer("Nada gravado.", outcome=None))
+    read_tg = FakeTelegram()
+    read_handler = Handler({42}, read_bot, read_tg)
+    await read_handler.handle_update(_miniapp_text_update("oi", sid=read_sid, chat_id=42, update_id=512))
+    await read_handler.handle_update(_miniapp_text_update("oi", sid=read_sid, chat_id=42, update_id=513))
+    assert read_bot.texts == [("oi", "42")]
+    assert read_tg.sent == [(42, "Nada gravado."), (42, DONE_REPLY)]
+
+    # Keyed per principal (`telegram:<chat_id>`): another allowed chat with the same `sid` is independent.
+    await handler.handle_update(_miniapp_text_update("peso 82,4", sid=sid, chat_id=43, update_id=514))
+    assert bot.texts == [("peso 82,4", "42"), ("peso 82,4", "43")]
+
+
+async def test_miniapp_text_concurrent_duplicate_updates_run_agent_once_and_answer_running():
+    from agent.text_submissions import RUNNING_REPLY
+
+    sid = "d" * 32
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class GatedTextBot(FakeBot):
+        async def reply(self, text, user_id="telegram", *, context=None, media=None):
+            self.texts.append((text, user_id))
+            started.set()
+            await release.wait()
+            return Answer("<b>21/09</b> · Peso kg 82,4", ("w1",), wrote=True, outcome="committed")
+
+    bot = GatedTextBot()
+    tg = FakeTelegram()
+    handler = Handler({42}, bot, tg)
+
+    async def second_arrival():
+        await started.wait()
+        await handler.handle_update(_miniapp_text_update("peso 82,4", sid=sid, update_id=521))
+        assert tg.sent == [(42, RUNNING_REPLY)]
+        release.set()
+
+    await asyncio.gather(
+        handler.handle_update(_miniapp_text_update("peso 82,4", sid=sid, update_id=520)),
+        second_arrival(),
+    )
+
+    assert bot.texts == [("peso 82,4", "42")]
+    assert tg.sent == [(42, RUNNING_REPLY), (42, "<b>21/09</b> · Peso kg 82,4")]
+
+
+async def test_miniapp_text_same_id_with_different_text_answers_conflict_without_running_agent():
+    from agent.text_submissions import CONFLICT_REPLY
+
+    sid = "e" * 32
+    bot = FakeBot(Answer("<b>21/09</b> · Peso kg 82,4", ("w1",), wrote=True, outcome="committed"))
+    tg = FakeTelegram()
+    handler = Handler({42}, bot, tg)
+
+    await handler.handle_update(_miniapp_text_update("peso 82,4", sid=sid, update_id=530))
+    await handler.handle_update(_miniapp_text_update("peso 83,0", sid=sid, update_id=531))
+
+    assert bot.texts == [("peso 82,4", "42")]
+    assert tg.sent[-1] == (42, CONFLICT_REPLY)
+
+
+async def test_miniapp_text_written_answer_lost_keeps_entry_uncertain_and_blocks_resend():
+    import json
+
+    import httpx
+
+    from agent.bot import WRITE_UNCERTAIN, Bot
+    from agent.sheet_client import SheetClient
+    from agent.text_submissions import UNCERTAIN_REPLY, TextSubmissions
+
+    from .fakes import ScriptedLlm, call, say
+
+    sid = "1" * 32
+    applied_writes: list[dict] = []
+
+    def lost_answer_transport(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        applied_writes.append(body)
+        raise httpx.ReadTimeout("answer lost after write", request=request)
+
+    submissions = TextSubmissions()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lost_answer_transport)) as http:
+        sheet = SheetClient("https://sheet.example/exec", "fake-sheet-key", http)
+        llm = ScriptedLlm(
+            model="scripted",
+            script=[
+                call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+                say("Ok"),
+                call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+                say("Não deveria rodar."),
+            ],
+        )
+        bot = Bot(sheet, llm, timezone="America/Sao_Paulo")
+        tg = FakeTelegram()
+        handler = Handler(
+            {42},
+            bot,
+            tg,
+            sheet=sheet,
+            text_submissions=submissions,
+            clock=lambda: datetime(2026, 9, 21, 12, 0),
+        )
+
+        await handler.handle_update(_miniapp_text_update("peso 82,4", sid=sid, update_id=540))
+        assert len(applied_writes) == 1
+        assert len(submissions) == 1
+        assert submissions.begin(42, sid, "peso 82,4").reason == "uncertain"
+        assert tg.sent == [(42, WRITE_UNCERTAIN)]
+
+        # Resending in a brand-new `update_id` never runs the agent or posts a second time.
+        await handler.handle_update(_miniapp_text_update("peso 82,4", sid=sid, update_id=541))
+        assert len(applied_writes) == 1
+        assert len(llm.requests) == 2
+        assert tg.sent == [(42, WRITE_UNCERTAIN), (42, UNCERTAIN_REPLY)]
+
+
+async def test_miniapp_text_not_committed_removes_entry_so_resend_runs_again():
+    from agent.bot import Bot
+    from agent.text_submissions import TextSubmissions
+
+    from .fakes import OK_DIARY, ScriptedLlm, call, say
+
+    down = {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": "locked"}]}
+    invalid_food = {
+        "ok": False,
+        "errors": [{"path": "args.items[0].food", "code": "not_in_catalog", "message": "não achei"}],
+    }
+    ok_food = {"ok": True, "result": {"writeId": "wf1", "date": "2026-09-21", "meal": "Almoço", "added": 1}}
+
+    # 1. Sheet unavailable before write -> `not_committed`, entry removed, resend runs and succeeds.
+    sid_down = "2" * 32
+    subs1 = TextSubmissions()
+    sheet1 = FakeSheet(diary_upsert=[down, OK_DIARY])
+    llm1 = ScriptedLlm(
+        model="scripted",
+        script=[
+            call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+            say("Planilha indisponível."),
+            call("save_diary", date="2026-09-21", fields={"weightKg": 82.4}),
+            say("Ok"),
+        ],
+    )
+    tg1 = FakeTelegram()
+    h1 = Handler(
+        {42},
+        Bot(sheet1, llm1, timezone="America/Sao_Paulo"),
+        tg1,
+        sheet=sheet1,
+        text_submissions=subs1,
+        clock=lambda: datetime(2026, 9, 21, 12, 0),
+    )
+    await h1.handle_update(_miniapp_text_update("peso 82,4", sid=sid_down, update_id=550))
+    assert len(subs1) == 0
+    assert tg1.sent == [(42, SHEET_FAILED)]
+
+    await h1.handle_update(_miniapp_text_update("peso 82,4", sid=sid_down, update_id=551))
+    assert subs1.begin(42, sid_down, "peso 82,4").reason == "done"
+    assert len(sheet1.calls) == 2
+    assert "82,4" in tg1.sent[-1][1]
+
+    # 2. Pre-write validation refusal (`not_in_catalog`) -> `not_committed`, entry removed, resend runs.
+    sid_val = "3" * 32
+    subs2 = TextSubmissions()
+    sheet2 = FakeSheet(food_add=[invalid_food, ok_food])
+    llm2 = ScriptedLlm(
+        model="scripted",
+        script=[
+            call(
+                "save_food",
+                date="2026-09-21",
+                meal="Almoço",
+                items=[{"food": "Arroz", "qty": 150, "unit": "g"}],
+            ),
+            say("Não está no catálogo."),
+            call(
+                "save_food",
+                date="2026-09-21",
+                meal="Almoço",
+                items=[{"food": "Arroz", "qty": 150, "unit": "g"}],
+            ),
+            say("Ok"),
+        ],
+    )
+    tg2 = FakeTelegram()
+    h2 = Handler(
+        {42},
+        Bot(sheet2, llm2, timezone="America/Sao_Paulo"),
+        tg2,
+        sheet=sheet2,
+        text_submissions=subs2,
+        clock=lambda: datetime(2026, 9, 21, 12, 0),
+    )
+    await h2.handle_update(_miniapp_text_update("almoço 150 g arroz", sid=sid_val, update_id=552))
+    assert len(subs2) == 0
+    await h2.handle_update(_miniapp_text_update("almoço 150 g arroz", sid=sid_val, update_id=553))
+    assert subs2.begin(42, sid_val, "almoço 150 g arroz").reason == "done"
+    assert len(sheet2.calls) == 2
+
+    # 3. Model fails before any write (`outcome=None, failed=True` or exception) -> removed, resend runs.
+    sid_llm = "4" * 32
+    subs3 = TextSubmissions()
+    dedup = UpdateDeduplicator()
+    tg3 = FakeTelegram()
+    await Handler(
+        {42},
+        FakeBot(Answer(MODEL_FAILED_NOTHING_WRITTEN, failed=True, outcome=None)),
+        tg3,
+        deduplicator=dedup,
+        text_submissions=subs3,
+    ).handle_update(_miniapp_text_update("peso 82,4", sid=sid_llm, update_id=554))
+    assert len(subs3) == 0
+
+    await Handler(
+        {42},
+        FakeBot(error=RuntimeError("llm down")),
+        tg3,
+        deduplicator=dedup,
+        text_submissions=subs3,
+    ).handle_update(_miniapp_text_update("peso 82,4", sid=sid_llm, update_id=555))
+    assert len(subs3) == 0
+
+    ok_bot = FakeBot(Answer("<b>21/09</b> · Peso kg 82,4", ("w1",), wrote=True, outcome="committed"))
+    await Handler({42}, ok_bot, tg3, deduplicator=dedup, text_submissions=subs3).handle_update(
+        _miniapp_text_update("peso 82,4", sid=sid_llm, update_id=556)
+    )
+    assert subs3.begin(42, sid_llm, "peso 82,4").reason == "done"
+    assert ok_bot.texts == [("peso 82,4", "42")]
+
+
+async def test_miniapp_text_cut_by_message_deadline_and_hard_limit_marks_uncertain():
+    from agent.bot import WRITE_UNCERTAIN
+    from agent.text_submissions import UNCERTAIN_REPLY, TextSubmissions
+
+    # 1. Cut at MESSAGE_DEADLINE_AT (before hard_limit): entry becomes `uncertain`, reply is WRITE_UNCERTAIN,
+    # and neither a failed-send redelivery of the same update_id nor a new update_id runs again.
+    sid_soft = "5" * 32
+    subs_soft = TextSubmissions()
+    dedup_soft = UpdateDeduplicator()
+
+    class SoftDeadlineBot:
+        calls = 0
+
+        async def reply(self, text, user_id="telegram", *, context=None, media=None):
+            self.calls += 1
+            await asyncio.sleep(0.08)
+            return Answer(MODEL_FAILED_NOTHING_WRITTEN, failed=True, outcome=None)
+
+    soft_bot = SoftDeadlineBot()
+    tg_soft = FakeTelegram()
+    h_soft = Handler(
+        {42},
+        soft_bot,
+        tg_soft,
+        deduplicator=dedup_soft,
+        text_submissions=subs_soft,
+        message_deadline_s=0.03,
+        send_reserve_s=2.0,
+    )
+    await h_soft.handle_update(_miniapp_text_update("peso 82,4", sid=sid_soft, update_id=560))
+    assert subs_soft.begin(42, sid_soft, "peso 82,4").reason == "uncertain"
+    assert tg_soft.sent == [(42, WRITE_UNCERTAIN)]
+
+    await h_soft.handle_update(_miniapp_text_update("peso 82,4", sid=sid_soft, update_id=561))
+    assert soft_bot.calls == 1
+    assert tg_soft.sent == [(42, WRITE_UNCERTAIN), (42, UNCERTAIN_REPLY)]
+
+    # Even if `send_message` fails after a soft cut, `write_outcome="uncertain"` completes `update_id`.
+    sid_soft_drop = "a5" * 16
+    await Handler(
+        {42},
+        soft_bot,
+        FakeTelegram(error=RuntimeError("net")),
+        deduplicator=dedup_soft,
+        text_submissions=subs_soft,
+        message_deadline_s=0.03,
+        send_reserve_s=2.0,
+    ).handle_update(_miniapp_text_update("peso 82,4", sid=sid_soft_drop, update_id=564))
+    assert soft_bot.calls == 2
+    tg_retry = FakeTelegram()
+    await Handler(
+        {42}, soft_bot, tg_retry, deduplicator=dedup_soft, text_submissions=subs_soft
+    ).handle_update(_miniapp_text_update("peso 82,4", sid=sid_soft_drop, update_id=564))
+    assert soft_bot.calls == 2
+    assert tg_retry.sent == []
+
+    # 2. Cut at hard_limit (`TimeoutError` escapes `_run_bot`): entry becomes `uncertain` and never reruns.
+    sid_hard = "6" * 32
+    subs_hard = TextSubmissions()
+    hard_bot = FakeBot(seconds=5)
+    tg_hard = FakeTelegram()
+    h_hard = Handler(
+        {42},
+        hard_bot,
+        tg_hard,
+        text_submissions=subs_hard,
+        message_deadline_s=0.03,
+        send_reserve_s=0.03,
+    )
+    await h_hard.handle_update(_miniapp_text_update("peso 82,4", sid=sid_hard, update_id=562))
+    assert subs_hard.begin(42, sid_hard, "peso 82,4").reason == "uncertain"
+    assert tg_hard.sent == [(42, CUT)]
+
+    await h_hard.handle_update(_miniapp_text_update("peso 82,4", sid=sid_hard, update_id=563))
+    assert len(hard_bot.texts) == 1
+    assert tg_hard.sent == [(42, CUT), (42, UNCERTAIN_REPLY)]
+
+
+async def test_miniapp_workout_and_food_forms_stay_model_free_and_invalid_text_is_rejected():
+    import json
+
+    from agent.miniapp import NOTHING_SAVED
+    from agent.text_submissions import TextSubmissions
+
+    sid = "7" * 32
+    food_form = {
+        "v": 1,
+        "t": "food",
+        "id": sid,
+        "args": {
+            "date": "2026-09-21",
+            "meal": "Almoço",
+            "items": [{"food": "Arroz", "qty": 150, "unit": "g"}],
+        },
+    }
+    workout_form = {
+        "v": 1,
+        "t": "workout",
+        "id": "8" * 32,
+        "args": {
+            "date": "2026-09-21",
+            "session": "Upper",
+            "complete": True,
+            "exercises": [{"name": "Supino reto", "work": [{"kg": 80, "reps": 8}]}],
+        },
+    }
+    sheet = FakeSheet(
+        food_add=[
+            {"ok": True, "result": {"writeId": "wf1", "date": "2026-09-21", "meal": "Almoço", "added": 1}}
+        ],
+        workout_upsert=[
+            {"ok": True, "result": {"writeId": "ww1", "date": "2026-09-21", "session": "Upper", "saved": 1}}
+        ],
+    )
+    subs = TextSubmissions()
+    bot = FakeBot("ok")
+    tg = FakeTelegram()
+    handler = Handler(
+        {42},
+        bot,
+        tg,
+        sheet=sheet,
+        text_submissions=subs,
+        clock=lambda: datetime(2026, 9, 21, 12, 0),
+    )
+
+    await handler.handle_update(
+        {"update_id": 570, "message": {"chat": {"id": 42}, "web_app_data": {"data": json.dumps(food_form)}}}
+    )
+    await handler.handle_update(
+        {
+            "update_id": 571,
+            "message": {"chat": {"id": 42}, "web_app_data": {"data": json.dumps(workout_form)}},
+        }
+    )
+    assert bot.texts == []
+    assert [op for op, _ in sheet.calls] == ["food.add", "workout.upsert"]
+    assert len(subs) == 0
+
+    # Invalid `t: "text"` (blank text) returns NOTHING_SAVED without calling the model or storing `id`.
+    bad_text = {"v": 1, "t": "text", "id": "9" * 32, "src": "voice", "text": "   "}
+    await handler.handle_update(
+        {"update_id": 572, "message": {"chat": {"id": 42}, "web_app_data": {"data": json.dumps(bad_text)}}}
+    )
+    assert bot.texts == []
+    assert tg.sent[-1][1].startswith(NOTHING_SAVED)
+    assert len(subs) == 0

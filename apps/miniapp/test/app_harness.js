@@ -221,9 +221,9 @@ function page(doc) {
   };
   el('p', { id: 'preview-banner' }).hidden = true;
   const coach = el('header', { class: 'coach' });
-  el('button', { id: 'shape', class: 'shape', type: 'button', 'aria-label': 'Muscle: toque para uma dica', 'aria-describedby': 'say' }, coach);
+  el('button', { id: 'shape', class: 'shape', type: 'button', 'aria-label': 'Shaping: toque para uma dica', 'aria-describedby': 'say' }, coach);
   const bubble = el('div', { class: 'bubble' }, coach);
-  el('span', { class: 'bubble-name' }, bubble).textContent = 'Muscle';
+  el('span', { class: 'bubble-name' }, bubble).textContent = 'Shaping';
   el('p', { class: 'bubble-text', id: 'say' }, bubble);
   const nav = el('nav', { class: 'tabs' });
   el('button', { class: 'tab', id: 'tab-workout', 'data-view': 'workout' }, nav);

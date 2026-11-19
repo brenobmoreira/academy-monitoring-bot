@@ -184,6 +184,12 @@
     if (Avatar && Avatar.glance) Avatar.glance(target);
   }
 
+  function perch(target, opts) {
+    if (Avatar && typeof Avatar.perch === 'function') {
+      try { Avatar.perch(target, opts); } catch (e) { /* ignore */ }
+    }
+  }
+
   function wake() {
     var wasDozing = Avatar && Avatar.dozing && Avatar.dozing();
     if (Avatar && Avatar.setDozing) Avatar.setDozing(false);
@@ -203,6 +209,7 @@
   els.shape.addEventListener('pointerdown', function (e) { e.preventDefault(); }); // keep the typing field focused
   els.shape.addEventListener('click', function () {
     wake();
+    perch(null);
     var context = pulsoContext(), key = C.pulsoTips(context).join('\n');
     if (key !== tipKey) { tipKey = key; tipTap = 0; }
     react(C.pulsoTip(context, tipTap++));
@@ -322,10 +329,16 @@
     var t = e.target;
     wake();
     if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) {
+      var cardEl = null;
       for (var parent = t; parent && parent.getAttribute; parent = parent.parentNode) {
-        if (parent.hasAttribute('data-card-index')) { focusedCard = Number(parent.getAttribute('data-card-index')); break; }
+        if (parent.hasAttribute('data-card-index')) {
+          focusedCard = Number(parent.getAttribute('data-card-index'));
+          cardEl = parent;
+          break;
+        }
       }
       glance(t);
+      if (cardEl) perch(cardEl, { mode: 'card' });
       if (t.getAttribute('data-say')) { S.focus = t.getAttribute('data-say'); updateMood(); }
     }
   });
@@ -336,7 +349,10 @@
       if (!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) {
         S.focus = null;
         // Validation may have just installed a new target while removing the old input.
-        if (gazeTarget === leaving) glance(null);
+        if (gazeTarget === leaving) {
+          glance(null);
+          perch(null);
+        }
       }
     }, 0);
   });
@@ -686,7 +702,7 @@
     var summary = h('span', { class: 'card-summary', text: cardSummary(card) });
     var headBtn = h('button', {
       type: 'button', class: 'card-head', 'aria-expanded': String(!!card.open), 'aria-controls': bodyId,
-      onclick: function () { focusedCard = i; card.open = !card.open; replaceCard(i); scheduleSave(); },
+      onclick: function () { focusedCard = i; card.open = !card.open; replaceCard(i); perch(card.open ? cardEls[i] : null, { mode: 'card' }); scheduleSave(); },
     },
     h('span', { class: 'dot', 'aria-hidden': 'true' }),
     h('span', {}, h('span', { class: 'card-name', text: card.name }), card.group ? h('span', { class: 'card-group', text: card.group }) : null),
@@ -1495,6 +1511,8 @@
       facts, map, list, meter, raw,
     ].filter(function (node) { return !!node; });
     els.review.replaceChildren.apply(els.review, reviewNodes);
+    var reviewOrb = els.review.querySelector ? els.review.querySelector('.mascot-scene .shape') : null;
+    if (reviewOrb) perch(reviewOrb, { mode: 'stage' });
 
     if (inTelegram) {
       setMain('Enviar ao bot', function () { send(p.json); });
@@ -2079,6 +2097,7 @@
 
     var active = isVoiceActive();
     setFormLocked(active);
+    if (active) perch(null);
 
     if (voicePlanBOpen) {
       clearVoiceMascot();
@@ -2242,6 +2261,7 @@
     focusedCard = null;
     S.focus = null;
     glance(null);
+    perch(null);
     renderChrome();
     if (S.view === 'workout') renderWorkout(); else renderFood();
     updateMainForForm();

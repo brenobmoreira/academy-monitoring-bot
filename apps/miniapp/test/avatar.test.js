@@ -19,12 +19,17 @@ function avatarEnv(opts = {}) {
     get matches() { return reduced; },
     addEventListener(type, fn) { if (type === 'change') mediaListeners.push(fn); },
   };
+  let nextRaf = 1;
+  const rafs = new Map();
   const ctx = {
     document: doc,
     Element: FakeElement,
     Date: { now: () => timers.now() },
     setTimeout: timers.setTimeout,
     clearTimeout: timers.clearTimeout,
+    requestAnimationFrame(fn) { const id = nextRaf++; rafs.set(id, fn); return id; },
+    cancelAnimationFrame(id) { rafs.delete(id); },
+    innerHeight: 800,
     matchMedia(query) {
       if (query.includes('prefers-reduced-motion')) return mq;
       return { matches: false, addEventListener() {} };
@@ -39,6 +44,7 @@ function avatarEnv(opts = {}) {
 
   const coach = doc.createElement('header');
   coach.className = 'coach';
+  coach._rect = { left: 0, top: 0, right: 360, bottom: 72, width: 360, height: 72 };
   doc.body.appendChild(coach);
 
   const shape = doc.createElement('button');
@@ -47,7 +53,7 @@ function avatarEnv(opts = {}) {
   shape.setAttribute('type', 'button');
   shape.setAttribute('aria-label', opts.ariaLabel || 'Pulso: toque para uma dica');
   shape.setAttribute('aria-describedby', 'say');
-  shape._rect = { left: 16, top: 20, right: 56, bottom: 60, width: 40, height: 40 };
+  shape._rect = { left: 16, top: 20, right: 60, bottom: 64, width: 44, height: 44 };
   coach.appendChild(shape);
 
   const bubble = doc.createElement('div');
@@ -68,12 +74,20 @@ function avatarEnv(opts = {}) {
   return {
     doc,
     timers,
+    rafs,
     coach,
     shape,
     bubble,
     nameEl,
     sayEl,
     Avatar: ctx.ShapeAvatar,
+    stepRaf(n = 1) {
+      for (let i = 0; i < n; i++) {
+        const batch = [...rafs.entries()];
+        rafs.clear();
+        for (const [, fn] of batch) fn();
+      }
+    },
     setReduced(next) {
       reduced = !!next;
       mediaListeners.slice().forEach((fn) => fn({ matches: reduced }));
@@ -81,8 +95,8 @@ function avatarEnv(opts = {}) {
   };
 }
 
-test('the public API keeps all ShapeAvatar members and exposes Muscle identity, forms and rich states', () => {
-  assert.equal(A.NAME, 'Muscle');
+test('the public API keeps all ShapeAvatar members and exposes Shaping identity, forms and rich states', () => {
+  assert.equal(A.NAME, 'Shaping');
   assert.deepEqual(A.MOODS, ['idle', 'focused', 'happy', 'alert', 'thinking']);
   assert.deepEqual(A.STATES, ['idle', 'focused', 'happy', 'alert', 'thinking', 'listening', 'understood', 'oops', 'record', 'dozing']);
   assert.deepEqual(A.FORMS, ['base', 'treino', 'refeicao', 'agua', 'revisao', 'descanso']);
@@ -92,16 +106,16 @@ test('the public API keeps all ShapeAvatar members and exposes Muscle identity, 
   assert.equal(A.TICKS, 12);
   for (const k of [
     'mount', 'setMood', 'mood', 'setForm', 'form', 'setLevel', 'say', 'create',
-    'setProgress', 'progress', 'pulse', 'intro', 'glance', 'setDozing', 'dozing',
+    'setProgress', 'progress', 'pulse', 'perch', 'intro', 'glance', 'setDozing', 'dozing',
     'clampProgress', 'litTicks', 'flip', 'formFor', 'morphPlan', 'svg', 'iconSvg', 'monoSvg',
   ]) {
     assert.equal(typeof A[k], 'function', k);
   }
 });
 
-test('index.html renders Muscle in the header bubble name and #shape accessible label', () => {
-  assert.match(INDEX_HTML, /<button[^>]*id="shape"[^>]*aria-label="Muscle: toque para uma dica"/);
-  assert.match(INDEX_HTML, /<span class="bubble-name">Muscle<\/span>/);
+test('index.html renders Shaping in the header bubble name and #shape accessible label', () => {
+  assert.match(INDEX_HTML, /<button[^>]*id="shape"[^>]*aria-label="Shaping: toque para uma dica"/);
+  assert.match(INDEX_HTML, /<span class="bubble-name">Shaping<\/span>/);
   assert.doesNotMatch(INDEX_HTML, /Pulso/);
 });
 
@@ -192,19 +206,23 @@ test('intro, pulse, glance, setDozing and setProgress are safe before mount', ()
   assert.equal(A.progress(), 0);
 });
 
-test('mount draws Muscle artwork, syncs Muscle name/label, injects style once, and wires .pl-bar + .pl-dots', () => {
+test('mount draws Shaping Ember Orb artwork, syncs Shaping name/label, injects style once, and wires .pl-bar + .pl-dots', () => {
   const env = avatarEnv({ ariaLabel: 'Pulso: toque para uma dica', initialName: 'Pulso' });
   const { Avatar, doc, coach, shape, nameEl, sayEl } = env;
 
   const mounted = Avatar.mount(shape, sayEl);
   assert.equal(mounted, shape);
-  assert.equal(nameEl.textContent, 'Muscle');
-  assert.equal(shape.getAttribute('aria-label'), 'Muscle: toque para uma dica');
+  assert.equal(nameEl.textContent, 'Shaping');
+  assert.equal(shape.getAttribute('aria-label'), 'Shaping: toque para uma dica');
   assert.equal(shape.hasAttribute('aria-hidden'), false, 'interactive header button must not become aria-hidden');
   assert.equal(shape.getAttribute('data-state'), 'idle');
   assert.equal(shape.getAttribute('data-form'), 'base');
   assert.ok(doc.getElementById('shape-avatar-style'));
   assert.ok(shape.querySelector('.dt-svg'));
+  assert.ok(shape.querySelector('.orb-body'));
+  assert.ok(shape.querySelector('.orb-ring-arc'));
+  assert.equal(shape.querySelectorAll('.orb-tick').length, Avatar.TICKS);
+  assert.ok(shape.querySelector('.orb-bloom'));
   assert.ok(shape.querySelector('.dt-gaze'));
   assert.ok(shape.querySelector('.dt-waves'));
   assert.ok(shape.querySelector('.dt-sparks'));
@@ -494,3 +512,74 @@ test('dev/muscle-motion-lab.html wires styles, ShapeAvatar + optional MuscleMoti
   assert.ok(inlineMatch, 'expected inline lab controller script');
   assert.doesNotThrow(() => new vm.Script(inlineMatch[1], { filename: 'muscle-motion-lab.html' }));
 });
+
+test('integrated 12-tick progress ring syncs arc offset, tip rotation, and lit ticks with setProgress() and assets/shape.svg matches Shaping orb', () => {
+  const env = avatarEnv();
+  const { Avatar, shape, sayEl } = env;
+  Avatar.mount(shape, sayEl);
+
+  const ring = shape.querySelector('.orb-ring');
+  const arc = shape.querySelector('.orb-ring-arc');
+  const tip = shape.querySelector('.orb-ring-tip-wrap');
+  const litCount = () => shape.querySelectorAll('.orb-tick').filter((t) => t.getAttribute('data-lit') === 'true').length;
+
+  assert.equal(ring.getAttribute('data-has-progress'), 'false');
+  assert.equal(litCount(), 0);
+
+  Avatar.setProgress(0.5);
+  assert.equal(ring.getAttribute('data-has-progress'), 'true');
+  assert.equal(litCount(), 6);
+  assert.equal(tip.style.transform, 'rotate(180deg)');
+  const halfOffset = Number(arc.getAttribute('stroke-dashoffset'));
+  assert.ok(halfOffset > 140 && halfOffset < 146, `expected half circumference offset, got ${halfOffset}`);
+
+  Avatar.setProgress(1);
+  assert.equal(litCount(), 12);
+  assert.equal(Number(arc.getAttribute('stroke-dashoffset')), 0);
+  assert.equal(tip.style.transform, 'rotate(360deg)');
+
+  const faviconSvg = fs.readFileSync(path.join(__dirname, '..', 'assets', 'shape.svg'), 'utf8');
+  assert.match(faviconSvg, /<title>Shaping<\/title>/);
+  assert.match(faviconSvg, /radialGradient id="s-base"/);
+  assert.match(faviconSvg, /#fffdf9/);
+});
+
+test('perch() glides Shaping orb onto a visible card via spring rAF, mirrors state/progress, returns home, and disables under reduced motion', () => {
+  const env = avatarEnv();
+  const { Avatar, doc, shape, sayEl, rafs, stepRaf } = env;
+  Avatar.mount(shape, sayEl);
+
+  const card = doc.createElement('article');
+  card.className = 'card';
+  card._rect = { left: 16, top: 180, right: 344, bottom: 320, width: 328, height: 140 };
+  doc.body.appendChild(card);
+
+  assert.equal(Avatar.perch(card, { mode: 'card' }), true);
+  assert.equal(shape.getAttribute('data-vacant'), 'true');
+  const glider = doc.body.querySelector('.orb-glider');
+  assert.ok(glider, 'expected floating .orb-glider in flight layer');
+  assert.ok(rafs.size > 0, 'spring flight schedules rAF');
+
+  Avatar.setMood('focused');
+  Avatar.setProgress(0.75);
+  assert.equal(glider.getAttribute('data-state'), 'focused');
+  assert.equal(glider.getAttribute('data-progress'), '0.75');
+
+  // Step spring frames until settled: glider stops scheduling rAF once landed
+  stepRaf(80);
+  assert.equal(rafs.size, 0, 'rAF loop stops cleanly once perched');
+  assert.match(glider.style.transform, /^translate3d\(/);
+
+  // Returning home glides back and tears down flight layer + vacant marker
+  assert.equal(Avatar.perch(null), true);
+  stepRaf(80);
+  assert.equal(doc.body.querySelector('.orb-flight-layer'), null);
+  assert.equal(shape.hasAttribute('data-vacant'), false);
+
+  // Under prefers-reduced-motion: reduce, perch() is a safe no-op
+  env.setReduced(true);
+  assert.equal(Avatar.perch(card, { mode: 'card' }), false);
+  assert.equal(doc.body.querySelector('.orb-flight-layer'), null);
+  assert.equal(shape.hasAttribute('data-vacant'), false);
+});
+

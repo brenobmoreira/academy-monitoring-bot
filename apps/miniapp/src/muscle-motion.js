@@ -1094,16 +1094,18 @@
     };
   }
 
-  function ensureA11y(muscleEl, slot) {
+  function ensureA11y(muscleEl, slot, opts) {
     if (!muscleEl || typeof muscleEl.setAttribute !== 'function' || !slot) return;
+    var avatar = resolveAvatar(muscleEl, opts);
+    var name = (avatar && typeof avatar.NAME === 'string' && avatar.NAME) ? avatar.NAME : 'Shaping';
     if (slot === SLOTS.header) {
-      muscleEl.setAttribute('aria-label', 'Muscle: toque para uma dica');
+      muscleEl.setAttribute('aria-label', name + ': toque para uma dica');
     } else if (slot === SLOTS.voice) {
-      muscleEl.setAttribute('aria-label', 'Muscle ouvindo sua voz');
+      muscleEl.setAttribute('aria-label', name + ' ouvindo sua voz');
     } else if (slot === SLOTS.review) {
-      muscleEl.setAttribute('aria-label', 'Muscle: revisão pronta');
+      muscleEl.setAttribute('aria-label', name + ': revisão pronta');
     } else {
-      muscleEl.setAttribute('aria-label', 'Muscle');
+      muscleEl.setAttribute('aria-label', name);
     }
   }
 
@@ -1133,7 +1135,7 @@
       }
       if (opts.form) applyAvatarForm(muscleEl, opts.form, opts);
       if (opts.state) applyAvatarState(muscleEl, opts.state, opts);
-      if (slotName) ensureA11y(muscleEl, slotName);
+      if (slotName) ensureA11y(muscleEl, slotName, opts);
       if (typeof opts.onArrive === 'function') opts.onArrive(muscleEl, targetSlot);
       return null;
     }
@@ -1147,7 +1149,7 @@
     }
     if (opts.form) applyAvatarForm(muscleEl, opts.form, opts);
     if (opts.state) applyAvatarState(muscleEl, opts.state, opts);
-    if (slotName) ensureA11y(muscleEl, slotName);
+    if (slotName) ensureA11y(muscleEl, slotName, opts);
 
     var last = muscleEl.getBoundingClientRect();
 

@@ -650,16 +650,16 @@ test('M10: favorite chips render SVG star with aria-hidden and workout card erro
   assert.equal(svg.getAttribute('aria-hidden'), 'true');
 });
 
-test('Muscle integration: header displays Muscle, tabs morph treino <-> refeicao, review morphs to revisao, and 45s sleep morphs to descanso and wakes back to active tab form', async () => {
+test('Shaping integration: header displays Shaping, tabs morph treino <-> refeicao, review morphs to revisao, and 45s sleep morphs to descanso and wakes back to active tab form', async () => {
   const entries = Object.assign({}, doneWorkoutDraft(today(), SAMPLE.next), foodDraft(today()));
   const p = await boot({ loadAvatar: true, storage: storageWith(entries) });
   const shape = p.doc.getElementById('shape');
   const nameEl = p.doc.querySelector('.bubble-name');
 
-  // 1) Official name Muscle in header and ShapeAvatar API
-  assert.equal(p.ctx.ShapeAvatar.NAME, 'Muscle');
-  assert.equal(nameEl.textContent, 'Muscle');
-  assert.equal(shape.getAttribute('aria-label'), 'Muscle: toque para uma dica');
+  // 1) Official name Shaping in header and ShapeAvatar API
+  assert.equal(p.ctx.ShapeAvatar.NAME, 'Shaping');
+  assert.equal(nameEl.textContent, 'Shaping');
+  assert.equal(shape.getAttribute('aria-label'), 'Shaping: toque para uma dica');
 
   // 2) Booted on Treino -> form is 'treino'; empty workout plan scene uses 'base'
   assert.equal(shape.getAttribute('data-form'), 'treino');

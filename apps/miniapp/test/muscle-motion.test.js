@@ -197,7 +197,7 @@ describe('Exports & browser UMD contract', () => {
     vm.runInContext(AVATAR_SRC, ctx, { filename: 'avatar.js' });
     vm.runInContext(MOTION_SRC, ctx, { filename: 'muscle-motion.js' });
 
-    assert.equal(ctx.ShapeAvatar.NAME, 'Muscle');
+    assert.equal(ctx.ShapeAvatar.NAME, 'Shaping');
     assert.equal(typeof ctx.MuscleMotion.morph, 'function');
 
     // Verify DitoArt fallback when ShapeAvatar is absent
@@ -590,7 +590,7 @@ describe('travelTo() spatial FLIP & single-instance stage presence', () => {
     assert.equal(env.coach.querySelector('.shape'), null);
     assert.equal(env.shape.getAttribute('data-form'), 'revisao');
     assert.equal(env.shape.getAttribute('data-state'), 'happy');
-    assert.equal(env.shape.getAttribute('aria-label'), 'Muscle: revisão pronta');
+    assert.equal(env.shape.getAttribute('aria-label'), 'Shaping: revisão pronta');
 
     assert.ok(anim, 'expected FLIP WAAPI animation');
     assert.equal(anim.frames.length, 3);
@@ -749,14 +749,14 @@ describe('travelTo() spatial FLIP & single-instance stage presence', () => {
     const toVoice = MM.travelTo(env.shape, voiceSlot);
     assert.ok(toVoice);
     assert.equal(toVoice.options.duration, 380);
-    assert.equal(env.shape.getAttribute('aria-label'), 'Muscle ouvindo sua voz');
+    assert.equal(env.shape.getAttribute('aria-label'), 'Shaping ouvindo sua voz');
     toVoice.finish();
 
     // Returning to data-slot="header" defaults to 320ms and updates aria-label
     const toHeader = MM.travelTo(env.shape, headerSlot);
     assert.ok(toHeader);
     assert.equal(toHeader.options.duration, 320);
-    assert.equal(env.shape.getAttribute('aria-label'), 'Muscle: toque para uma dica');
+    assert.equal(env.shape.getAttribute('aria-label'), 'Shaping: toque para uma dica');
     toHeader.finish();
 
     MM.destroy(env.shape);

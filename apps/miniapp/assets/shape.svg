@@ -1,39 +1,48 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
-  <title>Shape</title>
-  <style>
-    .sh-shadow{fill:#1c1917;opacity:.1}.sh-face-mid{fill:#3a3532}.sh-face-side{fill:#1c1917}
-    .sh-collar{fill:#e04e14}.sh-grip{fill:#f5f4f2;stroke:#1c1917;stroke-width:2.4}
-    .sh-knurl{stroke:#a8a29e;stroke-width:1.2}.sh-ink{fill:#1c1917}
-    .sh-line{fill:none;stroke:#1c1917;stroke-width:2.6;stroke-linecap:round}
-  </style>
-  <ellipse class="sh-shadow" cx="60" cy="108" rx="44" ry="3.2"/>
-  <g class="sh-figure">
-    <!-- hex heads, seen from the side: three faces (side, front, side) -->
-    <g class="sh-head sh-head-l">
-      <rect class="sh-face-mid" x="5" y="20" width="29" height="80" rx="4"/>
-      <rect class="sh-face-side" x="5" y="20" width="7" height="80" rx="3"/>
-      <rect class="sh-face-side" x="27" y="20" width="7" height="80" rx="3"/>
-    </g>
-    <g class="sh-head sh-head-r">
-      <rect class="sh-face-mid" x="86" y="20" width="29" height="80" rx="4"/>
-      <rect class="sh-face-side" x="86" y="20" width="7" height="80" rx="3"/>
-      <rect class="sh-face-side" x="108" y="20" width="7" height="80" rx="3"/>
-    </g>
-    <!-- collars: the accent; they turn to the warning colour on alert -->
-    <rect class="sh-collar" x="34" y="38" width="5" height="44" rx="1.5"/>
-    <rect class="sh-collar" x="81" y="38" width="5" height="44" rx="1.5"/>
-    <!-- grip: carries the face; knurled bands near each collar -->
-    <rect class="sh-grip" x="39" y="42" width="42" height="36" rx="5"/>
-    <path class="sh-knurl" d="M43.5 51v18M46.5 51v18M73.5 51v18M76.5 51v18"/>
-
-    <!-- idle: level bars, neutral mouth -->
-    <g >
-      <g class="sh-blink">
-        <rect class="sh-ink" x="50" y="56" width="7" height="3.2" rx="1.4"/>
-        <rect class="sh-ink" x="63" y="56" width="7" height="3.2" rx="1.4"/>
-      </g>
-      <path class="sh-line" d="M50 51h7M63 51h7"/>
-      <path class="sh-line" d="M55.5 68h9"/>
-    </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <title>Shaping</title>
+  <defs>
+    <radialGradient id="s-base" cx="34%" cy="30%" r="74%">
+      <stop offset="0%" stop-color="#ff7a3d"/>
+      <stop offset="52%" stop-color="#c93c0c"/>
+      <stop offset="100%" stop-color="#220c08"/>
+    </radialGradient>
+    <radialGradient id="s-lobe" cx="44%" cy="42%" r="54%">
+      <stop offset="0%" stop-color="#ffe0c4" stop-opacity="0.55"/>
+      <stop offset="48%" stop-color="#ff6a2b" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#ff6a2b" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="s-dim" cx="50%" cy="56%" r="52%">
+      <stop offset="0%" stop-color="#0e0604" stop-opacity="0.46"/>
+      <stop offset="100%" stop-color="#0e0604" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="s-bloom" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#fffaf4" stop-opacity="0.95"/>
+      <stop offset="40%" stop-color="#ffcca6" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#ff823c" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="s-spec" cx="32%" cy="22%" r="65%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.64"/>
+      <stop offset="42%" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="s-ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff7a3d"/>
+      <stop offset="100%" stop-color="#ffd6c2"/>
+    </linearGradient>
+    <clipPath id="s-clip"><circle cx="50" cy="50" r="38"/></clipPath>
+  </defs>
+  <circle cx="50" cy="50" r="46" fill="none" stroke="#ff7a3d" stroke-opacity="0.22" stroke-width="3.2"/>
+  <path d="M50 4 A46 46 0 1 1 14 78" fill="none" stroke="url(#s-ring)" stroke-width="3.4" stroke-linecap="round"/>
+  <g clip-path="url(#s-clip)">
+    <circle cx="50" cy="50" r="38" fill="url(#s-base)"/>
+    <circle cx="44" cy="43" r="28" fill="url(#s-lobe)"/>
+    <circle cx="50" cy="56" r="31" fill="url(#s-dim)"/>
+    <ellipse cx="38.5" cy="51" rx="10.5" ry="13.5" fill="url(#s-bloom)"/>
+    <ellipse cx="61.5" cy="51" rx="10.5" ry="13.5" fill="url(#s-bloom)"/>
+    <path fill="#fffdf9" d="M38.5 43.2Q44.2 48.2 43.6 51Q44.2 53.8 38.5 58.8Q32.8 53.8 33.4 51Q32.8 48.2 38.5 43.2Z"/>
+    <path fill="#fffdf9" d="M61.5 43.2Q67.2 48.2 66.6 51Q67.2 53.8 61.5 58.8Q55.8 53.8 56.4 51Q55.8 48.2 61.5 43.2Z"/>
+    <ellipse cx="39" cy="33" rx="20" ry="10.5" transform="rotate(-26 39 33)" fill="url(#s-spec)"/>
+    <circle cx="50" cy="50" r="36.8" fill="none" stroke="#ffd6c2" stroke-opacity="0.46" stroke-width="2.2"/>
   </g>
+  <circle cx="50" cy="50" r="38" fill="none" stroke="#1c1917" stroke-opacity="0.22" stroke-width="1.2"/>
 </svg>

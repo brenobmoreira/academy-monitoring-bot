@@ -30,7 +30,7 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.16.8",
-    "ty>=0.0.104",
+    "ty>=0.0.107",
 ]
 
 [tool.pytest.ini_options]

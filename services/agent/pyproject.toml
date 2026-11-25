@@ -6,9 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "functions-framework>=3.10.2",
-    "google-adk>=2.14.1",
+    "google-adk>=2.15.0",
     "httpx>=0.28.1",
-    "litellm>=1.109.1",
+    "litellm>=1.110.2",
     "pydantic-settings[yaml]>=2.15.0",
     "python-dotenv>=1.2.4",
     "starlette>=1.10.0",

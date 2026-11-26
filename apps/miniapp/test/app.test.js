@@ -712,3 +712,202 @@ test('Shaping integration: header displays Shaping, tabs morph treino <-> refeic
   assert.equal(pf.doc.getElementById('shape').getAttribute('data-form'), 'base');
   assert.equal(pf.doc.querySelector('#view .empty-plan .shape').getAttribute('data-form'), 'base');
 });
+
+test('rest timer runs in the Shaping ring from prescribed chip, supports +15s/-15s, notifies on completion and restores workout state', async () => {
+  const customCatalog = Object.assign({}, SAMPLE, {
+    plan: [
+      Object.assign({}, SAMPLE.plan[0], { p: '2×6–10 · RIR 0–1 · 150 s' }),
+      SAMPLE.plan[1],
+    ],
+  });
+  const card0 = C.planCards(C.normalizeCatalog(customCatalog), SAMPLE.next)[0];
+  card0.sets[0] = { kg: '60', reps: '8', rir: '1' };
+  const p = await boot({ loadAvatar: true, catalog: customCatalog, storage: pulsoWorkout([card0]) });
+
+  const haptics = [];
+  p.tg.HapticFeedback.notificationOccurred = (kind) => haptics.push(kind);
+
+  const shape = p.doc.getElementById('shape');
+  const restBar = p.doc.getElementById('rest-bar');
+  assert.ok(restBar);
+  assert.equal(restBar.hidden, true);
+
+  // Initial workout progress before rest (1 of 2 sets on card0, plus missing card1 in draft = 0.25)
+  const initialProgress = p.ctx.ShapeAvatar.progress();
+  assert.equal(initialProgress, 0.25);
+  assert.equal(shape.getAttribute('data-form'), 'treino');
+
+  // Prescribed 150s chip gets .is-suggested and starts 2:30 rest on Shaping ring
+  const suggested = p.doc.querySelector('.card .rest-chip.is-suggested');
+  assert.ok(suggested);
+  assert.equal(suggested.textContent, '150s');
+  suggested.click();
+
+  assert.equal(restBar.hidden, false);
+  assert.equal(restBar.querySelector('.rest-time').textContent, '2:30');
+  assert.equal(restBar.querySelector('.rest-label').textContent, SAMPLE.plan[0].e);
+  assert.equal(shape.getAttribute('data-form'), 'descanso');
+  assert.equal(p.ctx.ShapeAvatar.progress(), 1);
+  assert.match(p.say(), /^Descanso 2:30/);
+
+  // Advance 50s -> remaining 1:40, ring = 100 / 150
+  p.timers.run(50000);
+  assert.equal(restBar.querySelector('.rest-time').textContent, '1:40');
+  assert.ok(Math.abs(p.ctx.ShapeAvatar.progress() - 100 / 150) < 0.02);
+
+  // Tap +15s -> remaining 1:55 (total 150s since 115s < 150s); tap -15s -> back to 1:40
+  restBar.querySelector('.rest-plus').click();
+  assert.equal(restBar.querySelector('.rest-time').textContent, '1:55');
+  restBar.querySelector('.rest-minus').click();
+  assert.equal(restBar.querySelector('.rest-time').textContent, '1:40');
+
+  // Shaping must NOT doze while actively resting (even past 45s)
+  assert.equal(p.ctx.ShapeAvatar.dozing(), false);
+
+  // Complete remaining 100s -> hides bar, restores treino form & workout progress, fires success haptic
+  p.timers.run(100250);
+  assert.equal(restBar.hidden, true);
+  assert.equal(shape.getAttribute('data-form'), 'treino');
+  assert.equal(p.ctx.ShapeAvatar.progress(), initialProgress);
+  assert.ok(haptics.includes('success'));
+  assert.match(p.say(), /^Descanso acabou! Próxima série de /);
+});
+
+test('rest timer stops cleanly on Pular, tab switch and review without altering sendData payload', async () => {
+  const card = C.planCards(C.normalizeCatalog(SAMPLE), SAMPLE.next)[0];
+  card.sets[0] = { kg: '60', reps: '8', rir: '1' };
+  const p = await boot({ loadAvatar: true, storage: pulsoWorkout([card]) });
+  const shape = p.doc.getElementById('shape');
+  const restBar = p.doc.getElementById('rest-bar');
+
+  // 1) Pular cancels rest and restores treino form + progress
+  p.doc.querySelector('.card .rest-chip').click();
+  assert.equal(restBar.hidden, false);
+  assert.equal(shape.getAttribute('data-form'), 'descanso');
+  restBar.querySelector('.rest-skip').click();
+  assert.equal(restBar.hidden, true);
+  assert.equal(shape.getAttribute('data-form'), 'treino');
+  assert.equal(p.ctx.ShapeAvatar.progress(), 0.1, '1 of 10 planned sets restored');
+
+  // 2) Switching to Refeição cancels active rest
+  p.doc.querySelector('.card .rest-chip').click();
+  assert.equal(restBar.hidden, false);
+  p.tab('food');
+  assert.equal(restBar.hidden, true);
+  assert.equal(shape.getAttribute('data-form'), 'refeicao');
+
+  // 3) Opening review stops active rest and workout payload has no rest fields
+  p.tab('workout');
+  p.doc.querySelector('.card .rest-chip').click();
+  assert.equal(restBar.hidden, false);
+  p.press();
+  p.timers.run(400);
+  assert.equal(p.review.hidden, false);
+  assert.equal(restBar.hidden, true);
+  assert.equal(shape.getAttribute('data-form'), 'revisao');
+
+  p.press();
+  assert.equal(p.tg.sent.length, 1);
+  const payload = JSON.parse(p.tg.sent[0]);
+  assert.equal(payload.t, 'workout');
+  assert.deepEqual(Object.keys(payload.args).sort(), ['complete', 'date', 'exercises', 'session']);
+});
+
+test('daily balance updates live vs goal on food tab and date switch isolates yesterday baseline', async () => {
+  const ownName = 'Frango grelhado teste';
+  const customCatalog = Object.assign({}, SAMPLE, {
+    foods: [ownName],
+    fv: [[0, 0, 100, 160, 32, 0, 3, null, null]],
+    fu: ['g'],
+    goal: { k: 2400, p: 160, c: 260, g: 70 },
+    day: { k: 920, p: 72, c: 95, g: 26, w: 1.25 },
+  });
+  const p = await boot({ view: 'food', catalog: customCatalog });
+  const box = p.doc.getElementById('daily-balance');
+  assert.ok(box);
+  assert.equal(box.querySelector('.balance-title').textContent, 'Hoje vs. meta');
+  assert.equal(box.querySelector('.balance-kcal').textContent, '920 / 2400 kcal');
+  assert.equal(box.querySelector('.balance-rem').textContent, 'Faltam 1480 kcal');
+  assert.match(box.querySelector('.water-val').textContent, /^1,25 L \/ 2,5 L/);
+
+  // Add 200 g chicken (+320 kcal, +64 P, +6 G) -> totals become 1240 kcal, P 136 g, G 32 g
+  const search = p.doc.querySelectorAll('input').find((e) => e.getAttribute('aria-label') === 'Buscar alimento');
+  p.input(search, 'frango');
+  button(p.doc.getElementById('view'), ownName).click();
+  const qty = p.doc.querySelectorAll('input').find((e) => e.getAttribute('aria-label') === 'Quantidade');
+  p.input(qty, '200');
+  button(p.doc.getElementById('view'), 'Pôr no prato').click();
+
+  const updated = p.doc.getElementById('daily-balance');
+  assert.equal(updated.querySelector('.balance-kcal').textContent, '1240 / 2400 kcal');
+  assert.equal(updated.querySelector('.balance-delta').textContent, '+320 no prato');
+  assert.equal(updated.querySelector('.balance-rem').textContent, 'Faltam 1160 kcal');
+  assert.equal(updated.querySelectorAll('.macro-val')[0].textContent, '136 / 160 g');
+
+  // Remove item -> drops back to 920 kcal
+  p.doc.querySelectorAll('button').find((b) => b.getAttribute('aria-label') === 'Tirar ' + ownName + ' do prato').click();
+  assert.equal(p.doc.getElementById('daily-balance').querySelector('.balance-kcal').textContent, '920 / 2400 kcal');
+
+  // Switch date to Ontem -> drops today's baseline (meal-only kcal & 0 L water)
+  p.doc.getElementById('dates').children[1].click();
+  const yest = p.doc.getElementById('daily-balance');
+  assert.equal(yest.querySelector('.balance-title').textContent, 'Nesta refeição');
+  assert.equal(yest.querySelector('.balance-kcal').textContent, '0 / 2400 kcal');
+  assert.match(yest.querySelector('.water-val').textContent, /^0 L \/ 2,5 L/);
+});
+
+test('quick hydration chips accumulate water, switch MainButton when plate is empty, and emit t=water preserving food draft', async () => {
+  const storage = storageWith(foodDraft(today()));
+  const customCatalog = Object.assign({}, SAMPLE, {
+    goal: { k: 2400, p: 160, c: 260, g: 70 },
+    day: { k: 920, p: 72, c: 95, g: 26, w: 1.5 },
+  });
+  const p = await boot({ loadAvatar: true, view: 'food', catalog: customCatalog, storage });
+  const haptics = [];
+  p.tg.HapticFeedback.notificationOccurred = (kind) => haptics.push(kind);
+
+  const box = () => p.doc.getElementById('daily-balance');
+  assert.equal(p.tg.MainButton.params.text, 'Revisar refeição (1)');
+  assert.equal(box().querySelector('#water-send'), null);
+
+  // Tap +500 ml and +500 ml -> 1.5 + 1.0 = 2.5 L (hits water goal)
+  button(box(), '+500 ml').click();
+  assert.equal(box().querySelector('.water-delta').textContent, '+500 ml');
+  assert.ok(box().querySelector('#water-send'), 'Registrar água appears alongside non-empty plate');
+
+  button(box(), '+500 ml').click();
+  assert.match(box().querySelector('.water-val').textContent, /^2,5 L \/ 2,5 L/);
+  assert.equal(box().querySelector('.water-delta').textContent, '+1 L');
+  assert.ok(haptics.includes('success'));
+  assert.match(p.say(), /^Meta de água batida: 2,5 L/);
+
+  // Tap −250 ml -> drops back to 2.25 L (+750 ml)
+  box().querySelector('.water-undo').click();
+  assert.match(box().querySelector('.water-val').textContent, /^2,25 L \/ 2,5 L/);
+  assert.equal(box().querySelector('.water-delta').textContent, '+750 ml');
+
+  // Review via Registrar água button -> emits t: "water" without wiping food draft
+  box().querySelector('#water-send').click();
+  p.timers.run(400);
+  assert.equal(p.review.hidden, false);
+  assert.match(p.review.textContent, /2,25 L/);
+  assert.doesNotMatch(p.review.textContent, /gravado|salvo/i);
+
+  p.press();
+  assert.equal(p.tg.sent.length, 1);
+  const waterPayload = JSON.parse(p.tg.sent[0]);
+  assert.equal(waterPayload.t, 'water');
+  assert.match(waterPayload.id, ID);
+  assert.deepEqual(waterPayload.args, { date: today(), waterL: 2.25 });
+  const draftKey = [...storage.map.keys()].find((k) => k.indexOf(':f:') > 0);
+  assert.ok(draftKey, 'existing food draft stays intact in storage after water send');
+
+  // Empty plate + water delta switches MainButton directly to Revisar água
+  const emptyP = await boot({ view: 'food', catalog: customCatalog });
+  button(emptyP.doc.getElementById('daily-balance'), '+250 ml').click();
+  assert.equal(emptyP.tg.MainButton.params.text, 'Revisar água (+250 ml)');
+  emptyP.press();
+  emptyP.timers.run(400);
+  emptyP.press();
+  assert.deepEqual(JSON.parse(emptyP.tg.sent[0]).args, { date: today(), waterL: 1.75 });
+});

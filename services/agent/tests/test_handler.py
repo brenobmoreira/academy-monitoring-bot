@@ -914,7 +914,7 @@ def _decode_button_catalog(url: str) -> dict:
     return json.loads(zlib.decompress(packed, -15).decode("utf-8"))
 
 
-async def test_build_handler_app_command_without_and_with_voice_settings():
+async def test_build_handler_app_command_without_and_with_voice_settings(monkeypatch, tmp_path):
     import json
     from datetime import UTC
 
@@ -925,6 +925,10 @@ async def test_build_handler_app_command_without_and_with_voice_settings():
     from agent.handler import build_handler
     from agent.settings import Settings
     from agent.transcribe import Transcriber
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("VOICE_API_URL", raising=False)
+    monkeypatch.delenv("APP_AUTH_SECRET", raising=False)
 
     now = datetime(2026, 11, 14, 15, 0, tzinfo=UTC)
     secret = "s" * 40

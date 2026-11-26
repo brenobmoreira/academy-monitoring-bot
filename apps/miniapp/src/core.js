@@ -446,6 +446,72 @@
       fav: strList(raw.fav),
       meals: meals.length ? meals : DEFAULT_MEALS.slice(),
       units: units.length ? units : DEFAULT_UNITS.slice(),
+      goal: parseGoal(raw.goal),
+      day: parseDay(raw.day),
+      prefillFood: parsePrefillFood(raw.df),
+    };
+  }
+
+  var WATER_LIMITS = { MIN: 0.05, MAX: 20, DEFAULT_GOAL: 2.5, STEP_SM: 0.25, STEP_LG: 0.5 };
+
+  function parseDailyMap(raw, positiveOnly) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    var map = [['k', 'kcal'], ['p', 'protein'], ['c', 'carbs'], ['g', 'fat'], ['w', 'water']];
+    var out = { kcal: null, protein: null, carbs: null, fat: null, water: null };
+    var any = false;
+    map.forEach(function (pair) {
+      var v = raw[pair[0]];
+      if (typeof v === 'number' && isFinite(v) && (positiveOnly ? v > 0 : v >= 0)) {
+        out[pair[1]] = round(v, 2);
+        any = true;
+      }
+    });
+    return any ? out : null;
+  }
+  function parseGoal(raw) { return parseDailyMap(raw, true); }
+  function parseDay(raw) { return parseDailyMap(raw, false); }
+
+  function numInput(val) {
+    if (typeof val === 'number' && isFinite(val)) return val;
+    if (typeof val === 'string') return parseDecimal(val);
+    return null;
+  }
+
+  /** Compact `df` ({d, m, i}) prefill from agent `propose_food` -> Mini App food draft, or null. */
+  function parsePrefillFood(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    if (!Array.isArray(raw.i)) return null;
+    var items = [];
+    raw.i.slice(0, LIMITS.MAX_FOOD_ITEMS).forEach(function (it) {
+      if (!it || typeof it !== 'object' || Array.isArray(it)) return;
+      var foodName = str(it.f);
+      var favName = str(it.fav);
+      var desc = str(it.ds);
+      if (foodName) {
+        var q = numInput(it.q);
+        if (q === null || !Number.isFinite(q) || q < LIMITS.QTY_MIN || q > LIMITS.QTY_MAX) return;
+        items.push({
+          kind: 'food',
+          food: foodName,
+          qty: formatBR(q),
+          unit: str(it.u),
+          measure: MEASURES.indexOf(str(it.ms)) >= 0 ? str(it.ms) : '',
+        });
+      } else if (favName) {
+        var p = numInput(it.p);
+        var portions = p !== null && Number.isFinite(p) && p >= LIMITS.PORTIONS_MIN && p <= LIMITS.PORTIONS_MAX ? formatBR(p) : '1';
+        items.push({ kind: 'favorite', favorite: favName, portions: portions });
+      } else if (desc) {
+        var dq = numInput(it.q);
+        var qtyText = dq !== null && Number.isFinite(dq) && dq >= LIMITS.QTY_MIN && dq <= LIMITS.QTY_MAX ? formatBR(dq) : '';
+        items.push({ kind: 'description', description: desc, qty: qtyText, unit: str(it.u) });
+      }
+    });
+    if (!items.length) return null;
+    return {
+      date: isDateKey(raw.d) ? raw.d : '',
+      meal: str(raw.m).slice(0, LIMITS.MEAL_MAX),
+      items: items,
     };
   }
 
@@ -986,6 +1052,9 @@
   }
 
   function pulsoSummary(context) {
+    if (context.view === 'water') {
+      return 'Água pronta para conferir: ' + formatLiters(context.waterTotal) + '.';
+    }
     if (context.view === 'food') {
       var n = (context.items || []).length;
       return n ? n + (n === 1 ? ' item nesta refeição.' : ' itens nesta refeição.') : 'Refeição pronta para conferir.';
@@ -1698,6 +1767,264 @@
     return { ok: true, payload: payload, json: json, bytes: bytes, error: null };
   }
 
+  /* rest timer --------------------------------------------------------------------------------- */
+
+  var REST_PRESETS = [60, 90, 120];
+  var REST_LIMITS = { MIN: 15, MAX: 600, DEFAULT: 90, STEP: 15 };
+  var REST_RX = /(?:^|[\s·,;(/])(\d+(?:[.,]\d+)?)(?:\s*(?:[–-]|a\s)\s*\d+(?:[.,]\d+)?)?\s*(segundos?|seg\.?|s|minutos?|min\.?)(?=$|[\s·,;)/!?.])/i;
+
+  /** Extract rest interval in seconds from a sheet prescription string, or null. */
+  function parseRestSeconds(prescription) {
+    if (typeof prescription !== 'string' || !prescription.trim()) return null;
+    var m = REST_RX.exec(prescription);
+    if (!m) return null;
+    var num = Number(m[1].replace(',', '.'));
+    if (!Number.isFinite(num) || num <= 0) return null;
+    var sec = m[2].charAt(0).toLowerCase() === 'm' ? Math.round(num * 60) : Math.round(num);
+    return sec >= REST_LIMITS.MIN && sec <= REST_LIMITS.MAX ? sec : null;
+  }
+
+  /** Ordered rest presets for an exercise card plus the prescribed/default suggestion. */
+  function restPresetsFor(prescription) {
+    var prescribed = parseRestSeconds(prescription);
+    var presets = REST_PRESETS.slice();
+    if (prescribed !== null && presets.indexOf(prescribed) < 0) {
+      presets.push(prescribed);
+      presets.sort(function (a, b) { return a - b; });
+    }
+    return {
+      prescribed: prescribed,
+      suggested: prescribed !== null ? prescribed : REST_LIMITS.DEFAULT,
+      presets: presets,
+    };
+  }
+
+  /** Format remaining seconds as "m:ss". */
+  function formatRestClock(seconds) {
+    var total = Math.max(0, Math.ceil(Number(seconds) || 0));
+    var m = Math.floor(total / 60);
+    var s = total % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  /** Format preset button label in seconds ("90s"). */
+  function formatRestChip(seconds) {
+    var total = Math.max(0, Math.round(Number(seconds) || 0));
+    return total + 's';
+  }
+
+  /** Remaining fraction 0..1 for the Shaping ring countdown. */
+  function restProgress(remainingMs, totalMs) {
+    if (!Number.isFinite(totalMs) || totalMs <= 0 || !Number.isFinite(remainingMs)) return 0;
+    return clamp(remainingMs / totalMs, 0, 1);
+  }
+
+  /* daily balance & hydration ------------------------------------------------------------------ */
+
+  /** Format water volume in litres ("1,25 L", "0 L"). */
+  function formatLiters(liters) {
+    return formatBR(round(Math.max(0, Number(liters) || 0), 2)) + ' L';
+  }
+
+  /** Format positive water delta ("+250 ml", "+1,5 L"). */
+  function formatWaterDelta(liters) {
+    var d = round(Math.max(0, Number(liters) || 0), 2);
+    if (!d) return '0 ml';
+    if (d < 1) return '+' + Math.round(d * 1000) + ' ml';
+    return '+' + formatBR(d) + ' L';
+  }
+
+  /** Combine today's logged totals/water (when isToday) with live plate items and water delta. */
+  function dailyBalance(catalog, items, opts) {
+    var o = opts || {};
+    var isToday = o.isToday !== false;
+    var waterAdd = Math.max(0, Number(o.waterAddL) || 0);
+    var plate = mealNutrition(items, catalog);
+    var day = isToday && catalog && catalog.day ? catalog.day : null;
+    var goal = catalog && catalog.goal ? catalog.goal : null;
+    var logged = {
+      kcal: day && day.kcal !== null ? day.kcal : 0,
+      protein: day && day.protein !== null ? day.protein : 0,
+      carbs: day && day.carbs !== null ? day.carbs : 0,
+      fat: day && day.fat !== null ? day.fat : 0,
+      water: day && day.water !== null ? day.water : 0,
+    };
+    var hasLoggedFood = !!(day && (day.kcal !== null || day.protein !== null || day.carbs !== null || day.fat !== null));
+    var targets = {
+      kcal: goal ? goal.kcal : null,
+      protein: goal ? goal.protein : null,
+      carbs: goal ? goal.carbs : null,
+      fat: goal ? goal.fat : null,
+      water: (goal && goal.water) || WATER_LIMITS.DEFAULT_GOAL,
+    };
+    var total = {
+      kcal: round(logged.kcal + plate.kcal, 1),
+      protein: round(logged.protein + plate.protein, 1),
+      carbs: round(logged.carbs + plate.carbs, 1),
+      fat: round(logged.fat + plate.fat, 1),
+      water: round(clamp(logged.water + waterAdd, 0, WATER_LIMITS.MAX), 2),
+    };
+    var pct = function (v, t) { return t > 0 ? clamp(v / t, 0, 1) : 0; };
+    return {
+      isToday: isToday,
+      hasLoggedFood: hasLoggedFood,
+      logged: logged,
+      plate: plate,
+      total: total,
+      targets: targets,
+      waterAdd: round(waterAdd, 2),
+      ratio: {
+        kcal: pct(total.kcal, targets.kcal),
+        protein: pct(total.protein, targets.protein),
+        carbs: pct(total.carbs, targets.carbs),
+        fat: pct(total.fat, targets.fat),
+        water: pct(total.water, targets.water),
+      },
+      over: {
+        kcal: !!(targets.kcal && total.kcal > targets.kcal),
+        protein: !!(targets.protein && total.protein > targets.protein),
+        carbs: !!(targets.carbs && total.carbs > targets.carbs),
+        fat: !!(targets.fat && total.fat > targets.fat),
+        water: total.water >= targets.water,
+      },
+    };
+  }
+
+  /** Water state {date, baseWaterL, addWaterL} → payload args {date, waterL} for t: "water". */
+  function buildWater(state, opts) {
+    var errors = [];
+    var s = state || {};
+    checkDate(errors, s.date, opts && opts.today);
+    var add = parseDecimal(s.addWaterL);
+    if (add === null || !Number.isFinite(add) || add <= 0) {
+      errors.push({ path: 'waterL', message: 'Adicione alguma quantidade de água' });
+    }
+    var rawBase = parseDecimal(s.baseWaterL);
+    var base = rawBase !== null && Number.isFinite(rawBase) && rawBase >= 0 ? rawBase : 0;
+    var total = add !== null && Number.isFinite(add) && add > 0 ? round(base + add, 2) : null;
+    if (total !== null && (total < WATER_LIMITS.MIN || total > WATER_LIMITS.MAX)) {
+      errors.push({ path: 'waterL', message: 'Água deve ficar entre ' + formatBR(WATER_LIMITS.MIN) + ' e ' + formatBR(WATER_LIMITS.MAX) + ' L' });
+    }
+    return {
+      args: errors.length ? null : { date: s.date, waterL: total },
+      errors: errors,
+    };
+  }
+
+  /* swap & adjust (Onda 1 #3: equivalent substitution on TACO + own catalog foods) -------- */
+
+  var SWAP_CRITERIA = ['kcal', 'protein', 'carbs', 'fat'];
+  var SWAP_CRITERION_LABELS = {
+    kcal: 'Calorias',
+    protein: 'Proteína',
+    carbs: 'Carbo',
+    fat: 'Gordura',
+  };
+
+  /** Picks the dominant macro kcal share (>= 50%), otherwise falls back to calories. */
+  function defaultSwapCriterion(nutrition) {
+    if (!nutrition) return 'kcal';
+    var p4 = (nutrition.protein || 0) * 4;
+    var c4 = (nutrition.carbs || 0) * 4;
+    var f9 = (nutrition.fat || 0) * 9;
+    var sum = p4 + c4 + f9;
+    if (sum > 0) {
+      if (p4 >= 0.5 * sum) return 'protein';
+      if (c4 >= 0.5 * sum) return 'carbs';
+      if (f9 >= 0.5 * sum) return 'fat';
+    }
+    return 'kcal';
+  }
+
+  /**
+   * Computes the equivalent quantity of `targetName` matching `item` by `criterion`, mirroring
+   * `Equivalences.swap` in apps/sheet4/src/food_plan.js (baseQty / perUnit, rounded to 1 decimal).
+   */
+  function computeSwap(item, targetName, criterion, catalog) {
+    if (!item || item.kind !== 'food') {
+      return { ok: false, error: 'Apenas alimentos do catálogo podem ser trocados.' };
+    }
+    var base = foodNutrition(item, catalog);
+    var map = catalog && catalog.nutrition;
+    var baseRow = map && map[foodKey(item.food)];
+    if (!base || !baseRow) {
+      return { ok: false, error: 'Alimento atual sem valores nutricionais disponíveis.' };
+    }
+    if (SWAP_CRITERIA.indexOf(criterion) < 0) {
+      return { ok: false, error: 'Critério de equivalência inválido.' };
+    }
+    var altKey = foodKey(targetName);
+    if (!altKey || altKey === foodKey(item.food)) {
+      return { ok: false, error: 'Escolha outro alimento para substituir.' };
+    }
+    var alt = map[altKey];
+    if (!alt) {
+      return { ok: false, error: 'Substituto sem valores nutricionais disponíveis.' };
+    }
+    var label = SWAP_CRITERION_LABELS[criterion].toLowerCase();
+    if (!(base[criterion] > 0)) {
+      return { ok: false, error: 'O alimento atual não tem ' + label + ' para comparar.' };
+    }
+    var perUnit = alt[criterion] / alt.baseQty;
+    if (!(perUnit > 0)) {
+      return { ok: false, error: targetName + ' não tem ' + label + ': troca impossível por esse critério.' };
+    }
+    var qty = round(base[criterion] / perUnit, 1);
+    if (!Number.isFinite(qty) || qty < LIMITS.QTY_MIN || qty > LIMITS.QTY_MAX) {
+      return { ok: false, error: 'Quantidade equivalente fora do limite permitido.' };
+    }
+    var qtyText = formatBR(qty);
+    var altNutrition = foodNutrition({ kind: 'food', food: targetName, qty: qtyText, unit: alt.baseUnit }, catalog);
+    if (!altNutrition) {
+      return { ok: false, error: 'Não foi possível calcular o alimento substituto.' };
+    }
+    var diff = {};
+    ['kcal', 'protein', 'carbs', 'fat'].forEach(function (k) {
+      diff[k] = round(altNutrition[k] - base[k], 1);
+    });
+    return {
+      ok: true,
+      criterion: criterion,
+      base: {
+        food: item.food,
+        qty: item.qty,
+        unit: item.unit || baseRow.baseUnit,
+        nutrition: base,
+      },
+      target: {
+        food: targetName,
+        qty: qty,
+        qtyText: qtyText,
+        unit: alt.baseUnit,
+        nutrition: altNutrition,
+      },
+      diff: diff,
+    };
+  }
+
+  /** Ranks closest nutritional substitutes from `catalog.foods` under `criterion`. */
+  function swapSuggestions(item, criterion, catalog, limit) {
+    var list = (catalog && Array.isArray(catalog.foods)) ? catalog.foods : [];
+    var seen = Object.create(null);
+    var ranked = [];
+    list.forEach(function (name) {
+      var key = foodKey(name);
+      if (!key || seen[key]) return;
+      seen[key] = true;
+      var res = computeSwap(item, name, criterion, catalog);
+      if (!res.ok || res.target.qty > 1000) return;
+      var baseKcal = Math.max(res.base.nutrition.kcal, 1);
+      var score = Math.abs(res.diff.kcal) / baseKcal +
+        (Math.abs(res.diff.protein) * 4 + Math.abs(res.diff.carbs) * 4 + Math.abs(res.diff.fat) * 9) / baseKcal;
+      ranked.push({ res: res, score: score, key: key });
+    });
+    ranked.sort(function (a, b) {
+      if (a.score !== b.score) return a.score - b.score;
+      return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+    });
+    return ranked.slice(0, limit || 6).map(function (entry) { return entry.res; });
+  }
+
   var api = {
     LIMITS: LIMITS,
     MEASURES: MEASURES,
@@ -1776,6 +2103,24 @@
     voiceReducer: voiceReducer,
     keepBlob: keepBlob,
     textPayload: textPayload,
+    REST_PRESETS: REST_PRESETS,
+    REST_LIMITS: REST_LIMITS,
+    parseRestSeconds: parseRestSeconds,
+    restPresetsFor: restPresetsFor,
+    formatRestClock: formatRestClock,
+    formatRestChip: formatRestChip,
+    restProgress: restProgress,
+    WATER_LIMITS: WATER_LIMITS,
+    formatLiters: formatLiters,
+    formatWaterDelta: formatWaterDelta,
+    dailyBalance: dailyBalance,
+    buildWater: buildWater,
+    SWAP_CRITERIA: SWAP_CRITERIA,
+    SWAP_CRITERION_LABELS: SWAP_CRITERION_LABELS,
+    defaultSwapCriterion: defaultSwapCriterion,
+    computeSwap: computeSwap,
+    swapSuggestions: swapSuggestions,
+    parsePrefillFood: parsePrefillFood,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

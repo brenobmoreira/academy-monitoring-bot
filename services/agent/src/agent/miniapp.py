@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import json
 import logging
@@ -68,6 +69,7 @@ NOTHING_SAVED = "⚠ Não gravei nada:"
 DROPPED_LABELS = {
     "fv": "valores dos alimentos próprios",
     "wk": "mapa da semana",
+    "day": "saldo do dia",
     "l": "últimas cargas",
     "p": "prescrições",
     "foods": "lista de alimentos",
@@ -134,6 +136,7 @@ Rir = Annotated[int | float, AfterValidator(_range(0, 10))]
 Pain = Annotated[int, BeforeValidator(_whole), AfterValidator(_range(0, 10))]
 Qty = Annotated[int | float, AfterValidator(_range(0.001, 100000))]
 Portions = Annotated[int | float, AfterValidator(_range(0.01, 50))]
+WaterL = Annotated[int | float, AfterValidator(_range(0.05, 20))]
 
 
 class _Model(BaseModel):
@@ -310,6 +313,18 @@ class FoodPayload(_Versioned):
     args: FoodArgs
 
 
+class WaterArgs(_Model):
+    date: Day
+    waterL: WaterL
+
+
+class WaterPayload(_Versioned):
+    v: Literal[1]
+    t: Literal["water"]
+    id: SubmissionId
+    args: WaterArgs
+
+
 class TextPayload(_Versioned):
     v: Literal[1]
     t: Literal["text"]
@@ -318,12 +333,12 @@ class TextPayload(_Versioned):
     text: VoiceText
 
 
-Payload = WorkoutPayload | FoodPayload | TextPayload
+Payload = WorkoutPayload | FoodPayload | WaterPayload | TextPayload
 
 
 def _payload_tag(value: Any) -> str | None:
     t = value.get("t") if isinstance(value, dict) else None
-    return t if t in ("workout", "food", "text") else None
+    return t if t in ("workout", "food", "water", "text") else None
 
 
 # Tagged by a function, not a field: the `t` field itself takes no before-validators.
@@ -331,6 +346,7 @@ _PAYLOAD = TypeAdapter(
     Annotated[
         Annotated[WorkoutPayload, Tag("workout")]
         | Annotated[FoodPayload, Tag("food")]
+        | Annotated[WaterPayload, Tag("water")]
         | Annotated[TextPayload, Tag("text")],
         Discriminator(_payload_tag),
     ]
@@ -350,7 +366,11 @@ def _path(loc: tuple[int | str, ...]) -> str:
     for i, part in enumerate(loc):
         if isinstance(part, int):
             out += f"[{part}]"
-        elif (i == 0 and part in ("workout", "food", "text")) or part == "float" or part.startswith("item_"):
+        elif (
+            (i == 0 and part in ("workout", "food", "water", "text"))
+            or part == "float"
+            or part.startswith("item_")
+        ):
             continue  # union tags, not fields
         else:
             out += f".{part}" if out else part
@@ -379,7 +399,7 @@ def _message(error: Any) -> str:
         return f"quantidade de itens fora do permitido ({low if low is not None else 0} a {high})"
     if kind in ("literal_error", "union_tag_invalid", "union_tag_not_found"):
         if kind != "literal_error" and ctx.get("discriminator") == "_payload_tag()":
-            return "t deve ser workout, food ou text"
+            return "t deve ser workout, food, water ou text"
         if kind != "literal_error":
             return "cada item tem exatamente um de: food (+ qty), favorite ou description"
         return f"valor inválido {_show(error.get('input'))}; aceitos: {ctx.get('expected', '')}"
@@ -442,6 +462,7 @@ ALREADY_SAVED = (
 
 
 class MiniappSheet(Protocol):
+    async def upsert_diary(self, date: str, fields: dict[str, Any]) -> dict[str, Any]: ...
     async def upsert_workout(
         self, date: str, session: str, exercises: list[dict[str, Any]], complete: bool | None = None
     ) -> dict[str, Any]: ...
@@ -518,6 +539,67 @@ class PendingStore:
             del self._items[key]
 
 
+DRAFT_EXPIRED = "Esse rascunho expirou ou já foi usado. Envie a foto ou mensagem de novo."
+DRAFT_CANCELLED = "Ok, descartei esse rascunho. Nada foi gravado."
+DRAFT_ADJUST_BUTTON = "🍽️ Ajustar refeição"
+FOOD_DRAFT_MAX = 64
+FOOD_DRAFT_TTL_S = 30 * 60.0
+
+
+class FoodDraftStore:
+    """Bounded, in-memory store for `propose_food` drafts awaiting confirmation or Mini App adjustment."""
+
+    def __init__(
+        self,
+        max_size: int = FOOD_DRAFT_MAX,
+        ttl_s: float = FOOD_DRAFT_TTL_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._max = max_size
+        self._ttl = ttl_s
+        self._clock = clock
+        self._items: OrderedDict[str, tuple[float, int, dict[str, Any]]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def put(self, chat_id: int, draft: dict[str, Any]) -> str:
+        with self._lock:
+            self._purge()
+            key = secrets.token_hex(8)
+            while key in self._items:
+                key = secrets.token_hex(8)
+            self._items[key] = (self._clock() + self._ttl, chat_id, copy.deepcopy(draft))
+            while len(self._items) > self._max:
+                self._items.popitem(last=False)
+            return key
+
+    def peek(self, key: str, chat_id: int | None) -> dict[str, Any] | None:
+        with self._lock:
+            self._purge()
+            entry = self._items.get(key)
+            if entry is None or chat_id is None or entry[1] != chat_id:
+                return None
+            return copy.deepcopy(entry[2])
+
+    def claim(self, key: str, chat_id: int | None) -> dict[str, Any] | None:
+        with self._lock:
+            self._purge()
+            entry = self._items.get(key)
+            if entry is None or chat_id is None or entry[1] != chat_id:
+                return None
+            del self._items[key]
+            return copy.deepcopy(entry[2])
+
+    def __len__(self) -> int:
+        with self._lock:
+            self._purge()
+            return len(self._items)
+
+    def _purge(self) -> None:
+        now = self._clock()
+        for key in [k for k, (until, _, _) in self._items.items() if until <= now]:
+            del self._items[key]
+
+
 def _outage(response: dict[str, Any]) -> bool:
     """The sheet was down and provably wrote nothing: the only failure that is tried again. A
     write whose outcome is uncertain may have landed, so it is never an outage."""
@@ -543,6 +625,8 @@ async def _write(sheet: MiniappSheet, pending: Pending) -> dict[str, Any]:
                 response = await sheet.upsert_workout(
                     args["date"], args["session"], args["exercises"], args.get("complete")
                 )
+            elif pending.op == "diary.upsert":
+                response = await sheet.upsert_diary(args["date"], args["fields"])
             else:
                 response = await sheet.add_food(args["date"], args["meal"], args["items"])
         if not _outage(response):
@@ -576,11 +660,27 @@ async def handle(
         return Reply("\n".join([NOTHING_SAVED, *(f"• {p}" for p in problems)]))
     if isinstance(payload, TextPayload):
         raise ValueError("text payloads must be routed to the agent, not miniapp.handle")
-    # What the page sent, now validated field by field (extra="forbid": nothing else is in there).
-    args = json.loads(raw)["args"]
-    op = "workout.upsert" if isinstance(payload, WorkoutPayload) else "food.add"
+    if isinstance(payload, WaterPayload):
+        op = "diary.upsert"
+        args = {"date": payload.args.date, "fields": {"waterL": payload.args.waterL}}
+    else:
+        # What the page sent, now validated field by field (extra="forbid": nothing else is in there).
+        args = json.loads(raw)["args"]
+        op = "workout.upsert" if isinstance(payload, WorkoutPayload) else "food.add"
     key = request_id(chat_id, payload.id, op)
     return await _run(sheet, Pending(op, args, key, chat_id), pending)
+
+
+async def commit_food_draft(
+    sheet: MiniappSheet,
+    draft: dict[str, Any],
+    chat_id: int | None,
+    draft_id: str,
+    pending: PendingStore | None = None,
+) -> Reply:
+    """Writes a confirmed `propose_food` draft through the idempotent Mini App retry pipeline."""
+    key = request_id(chat_id, draft_id, "food.add")
+    return await _run(sheet, Pending("food.add", copy.deepcopy(draft), key, chat_id), pending)
 
 
 async def retry(sheet: MiniappSheet, key: str, store: PendingStore, chat_id: int | None) -> Reply:
@@ -716,6 +816,44 @@ def _week(values: Any) -> list[list[Any]]:
     return out[:WEEK_GROUPS_MAX]
 
 
+def _finite_num(value: Any, *, positive: bool = False) -> int | float | None:
+    if type(value) not in (int, float) or not math.isfinite(value):
+        return None
+    if value <= 0 if positive else value < 0:
+        return None
+    rounded = round(float(value), 2)
+    return int(rounded) if rounded.is_integer() else rounded
+
+
+def _daily_goal(result: dict[str, Any]) -> dict[str, int | float]:
+    phase = result.get("phase")
+    goal = phase.get("goal") if isinstance(phase, dict) else None
+    if not isinstance(goal, dict):
+        return {}
+    out: dict[str, int | float] = {}
+    for src, dst in (("kcal", "k"), ("protein", "p"), ("carbs", "c"), ("fat", "g")):
+        val = _finite_num(goal.get(src), positive=True)
+        if val is not None:
+            out[dst] = val
+    return out
+
+
+def _daily_intake(result: dict[str, Any]) -> dict[str, int | float]:
+    out: dict[str, int | float] = {}
+    totals = result.get("todayTotals")
+    if isinstance(totals, dict):
+        for src, dst in (("kcal", "k"), ("protein", "p"), ("carbs", "c"), ("fat", "g")):
+            val = _finite_num(totals.get(src), positive=False)
+            if val is not None:
+                out[dst] = val
+    diary = result.get("todayDiary")
+    if isinstance(diary, dict):
+        water = _finite_num(diary.get("waterL"), positive=False)
+        if water is not None:
+            out["w"] = water
+    return out
+
+
 def catalog_v1(result: dict[str, Any]) -> dict[str, Any]:
     """The catalog the page receives (short keys, empty fields omitted) from `catalog` result."""
     out: dict[str, Any] = {"v": 1}
@@ -759,6 +897,12 @@ def catalog_v1(result: dict[str, Any]) -> dict[str, Any]:
         if value:
             out[key] = value
     _food_values(result, out)
+    goal = _daily_goal(result)
+    if goal:
+        out["goal"] = goal
+    day = _daily_intake(result)
+    if day:
+        out["day"] = day
     return out
 
 
@@ -770,9 +914,12 @@ def encode_catalog(catalog: dict[str, Any]) -> str:
 
 
 def _trim(catalog: dict[str, Any], key: str) -> bool:
-    """Drops `key` (`l`/`p` of every plan row, top-level `fv`/`wk`/`foods`, or `voice`); True if changed."""
+    """Drops `key` (`l`/`p` of every plan row, `fv`/`wk`/`day`/`foods`, or `voice`); True if changed."""
     if key == "voice":
         removed = [catalog.pop(k, None) is not None for k in ("vu", "vc", "vx")]
+        return any(removed)
+    if key == "day":
+        removed = [catalog.pop(k, None) is not None for k in ("day", "goal")]
         return any(removed)
     if key in ("fv", "wk", "foods"):
         if key in ("fv", "foods"):
@@ -802,8 +949,9 @@ def keyboard_markup(
     voice_keys: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Separate view catalogs in two buttons. Trim only an oversized view, in this order:
-    own values, week map, last works, prescriptions, own names, voice. Raise if either still cannot
-    fit. The old page ignores the new keys and still has everything its launched view needs.
+    own values, week map, daily balance/goal, last works, prescriptions, own names, voice. Raise if
+    either still cannot fit. The old page ignores the new keys and still has everything its launched
+    view needs.
     """
     catalog = catalog_v1(catalog_result)
     common = {k: v for k, v in catalog.items() if k in ("v", "today", "tz", "client")}
@@ -814,7 +962,7 @@ def keyboard_markup(
         "view": "workout",
         **{k: v for k, v in catalog.items() if k in ("next", "sessions", "plan", "ex", "wk")},
     }
-    food_keys = ("foods", "fav", "meals", "units", "ft", "fv", "fu", "fh")
+    food_keys = ("foods", "fav", "meals", "units", "ft", "fv", "fu", "fh", "goal", "day")
     food = {
         **common,
         "view": "food",
@@ -828,7 +976,7 @@ def keyboard_markup(
             f"{miniapp_url}#v=food&c={encode_catalog(food)}",
         )
 
-    for key in ("fv", "wk", "l", "p", "foods", "voice"):
+    for key in ("fv", "wk", "day", "l", "p", "foods", "voice"):
         if max(len(u) for u in urls()) <= max_len:
             break
         changed = False
@@ -850,5 +998,74 @@ def keyboard_markup(
         ],
         "is_persistent": True,
         "resize_keyboard": True,
+    }
+    return markup, dropped
+
+
+def encode_prefill_food(draft: dict[str, Any]) -> dict[str, Any]:
+    """Compact `df` ({d, m, i}) payload shipped inside a Mini App draft URL fragment."""
+    items_out: list[dict[str, Any]] = []
+    for item in (draft.get("items") or [])[:20]:
+        if not isinstance(item, dict):
+            continue
+        if item.get("food"):
+            entry: dict[str, Any] = {"f": item["food"], "q": item["qty"]}
+            if item.get("unit"):
+                entry["u"] = item["unit"]
+            if item.get("measure"):
+                entry["ms"] = item["measure"]
+            items_out.append(entry)
+        elif item.get("favorite"):
+            entry = {"fav": item["favorite"]}
+            if item.get("portions") is not None:
+                entry["p"] = item["portions"]
+            items_out.append(entry)
+        elif item.get("description"):
+            entry = {"ds": item["description"]}
+            if item.get("qty") is not None:
+                entry["q"] = item["qty"]
+            if item.get("unit"):
+                entry["u"] = item["unit"]
+            items_out.append(entry)
+    return {"d": draft["date"], "m": draft["meal"], "i": items_out}
+
+
+def food_draft_markup(
+    miniapp_url: str,
+    catalog_result: dict[str, Any],
+    draft: dict[str, Any],
+    max_len: int = MINIAPP_URL_MAX,
+    voice_keys: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Reply keyboard with a one-time Food Mini App button pre-filled with `df` (`draft`)."""
+    catalog = catalog_v1(catalog_result)
+    common = {k: v for k, v in catalog.items() if k in ("v", "today", "tz", "client")}
+    if voice_keys:
+        common.update({k: voice_keys[k] for k in ("vu", "vc", "vx") if k in voice_keys})
+    food_keys = ("foods", "fav", "meals", "units", "ft", "fv", "fu", "fh", "goal", "day")
+    food: dict[str, Any] = {
+        **common,
+        "view": "food",
+        **{k: v for k, v in catalog.items() if k in food_keys},
+        "df": encode_prefill_food(draft),
+    }
+    dropped: list[str] = []
+
+    def food_url() -> str:
+        return f"{miniapp_url}#v=food&c={encode_catalog(food)}"
+
+    for key in ("fv", "day", "foods", "voice"):
+        if len(food_url()) <= max_len:
+            break
+        if _trim(food, key):
+            dropped.append(key)
+    url = food_url()
+    if len(url) > max_len:
+        raise CatalogTooLarge(len(url), max_len)
+    markup = {
+        "keyboard": [[{"text": DRAFT_ADJUST_BUTTON, "web_app": {"url": url}}]],
+        "is_persistent": False,
+        "resize_keyboard": True,
+        "one_time_keyboard": True,
     }
     return markup, dropped

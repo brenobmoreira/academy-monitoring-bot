@@ -240,6 +240,28 @@ def _totals(t: dict[str, Any]) -> str:
 # ---- values --------------------------------------------------------------------------------
 
 
+def food_draft_summary(draft: dict[str, Any]) -> str:
+    """Telegram HTML summary of a non-committed `propose_food` draft."""
+    header = f"Rascunho — {_day(draft['date'])} · {escape(draft['meal'])}:"
+    lines = [f"🍽️ {bold(header)}"]
+    for item in draft.get("items") or []:
+        if item.get("food"):
+            unit = f" {escape(item['unit'])}" if item.get("unit") else ""
+            qty = _value(item["qty"]) if item.get("qty") is not None else "?"
+            measure = f" ({escape(item['measure'])})" if item.get("measure") else ""
+            lines.append(f"• {escape(item['food'])} {qty}{unit}{measure}")
+        elif item.get("favorite"):
+            portions = item.get("portions")
+            portion_txt = f" × {_value(portions)}" if portions is not None else ""
+            lines.append(f"• {escape(item['favorite'])}{portion_txt} (favorita)")
+        else:
+            unit = f" {escape(item['unit'])}" if item.get("unit") else ""
+            amount = f" {_value(item['qty'])}{unit}" if item.get("qty") is not None else ""
+            lines.append(f"• {escape(item.get('description', ''))}{amount} (sem cálculo)")
+    lines.append("Nada foi gravado ainda. Confirme para registrar ou ajuste no Mini App.")
+    return "\n".join(lines)
+
+
 def _delta(diff: float, unit: str = "") -> str:
     if diff == 0:
         return "igual"

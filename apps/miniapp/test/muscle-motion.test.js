@@ -169,10 +169,15 @@ describe('Exports & browser UMD contract', () => {
     assert.match(MM.ANTICIPATE, /^cubic-bezier\(/);
     assert.match(MM.SETTLE, /^cubic-bezier\(/);
 
+    assert.equal(typeof MM.EYE_LEAD_MS, 'number');
+    assert.equal(MM.EYE_LEAD_MS, 45);
+    assert.equal(typeof MM.CHOREOGRAPHY, 'object');
+    assert.deepEqual(Object.keys(MM.CHOREOGRAPHY).sort(), ['acknowledge', 'focus', 'milestone', 'notice', 'proud']);
+
     for (const fn of [
-      'morph', 'react', 'glance', 'blink', 'startBlink', 'startBlinkLoop',
+      'morph', 'react', 'glance', 'anticipateLook', 'blink', 'startBlink', 'startBlinkLoop',
       'nextBlinkDelay', 'startIdleBreath', 'startFootTap', 'createVoiceMeter',
-      'connectVoice', 'flip', 'travelTo', 'guideTo', 'onValidationError',
+      'connectVoice', 'flip', 'travelTo', 'guideTo', 'playSequence', 'onValidationError',
       'attachLife', 'destroy', 'reducedMotion',
     ]) {
       assert.equal(typeof MM[fn], 'function', `expected function ${fn}`);
@@ -874,5 +879,158 @@ describe('Timers, micro-life, guiding & lifecycle cleanup', () => {
         assert.notEqual(anim.playState, 'running', `${part} animation still running after destroy`);
       }
     }
+  });
+});
+
+describe('Proactive guiding choreography (EYE_LEAD_MS, anticipateLook, playSequence)', () => {
+  test('anticipateLook moves .dt-gaze immediately and waits EYE_LEAD_MS (45ms) before tilting .dt-pose', () => {
+    const env = createHarness();
+    const field = env.doc.createElement('input');
+    field._rect = { left: 116, top: 20, right: 156, bottom: 60, width: 40, height: 40 };
+    env.doc.body.appendChild(field);
+
+    const gaze = env.shape.querySelector('.dt-gaze');
+    const pose = env.shape.querySelector('.dt-pose');
+
+    MM.anticipateLook(env.shape, field);
+    assert.equal(gaze.style.transform, 'translate(3px, 0px)');
+    assert.ok(!pose.style.transform);
+    assert.equal(env.timers.size, 1);
+
+    env.advanceTimers(44);
+    assert.ok(!pose.style.transform);
+
+    env.advanceTimers(1);
+    assert.equal(pose.style.transform, 'rotate(3deg)');
+    assert.equal(env.timers.size, 0);
+
+    // MM.glance with eyeLead: true delegates to anticipateLook
+    pose.style.transform = '';
+    gaze.style.transform = '';
+    MM.glance(env.shape, field, { eyeLead: true });
+    assert.equal(gaze.style.transform, 'translate(3px, 0px)');
+    assert.equal(pose.style.transform, '');
+    env.advanceTimers(MM.EYE_LEAD_MS);
+    assert.equal(pose.style.transform, 'rotate(3deg)');
+
+    // Reduced motion clears look synchronously with zero timers
+    env.setReduced(true);
+    MM.anticipateLook(env.shape, field);
+    assert.equal(gaze.style.transform, '');
+    assert.equal(pose.style.transform, '');
+    assert.equal(env.timers.size, 0);
+  });
+
+  test('anticipateLook supersedes prior pending look and cleans up on destroy(el)', () => {
+    const env = createHarness();
+    const leftField = env.doc.createElement('input');
+    leftField._rect = { left: 0, top: 20, right: 10, bottom: 60, width: 10, height: 40 };
+    const rightField = env.doc.createElement('input');
+    rightField._rect = { left: 116, top: 20, right: 156, bottom: 60, width: 40, height: 40 };
+    env.doc.body.appendChild(leftField);
+    env.doc.body.appendChild(rightField);
+
+    MM.anticipateLook(env.shape, leftField);
+    MM.anticipateLook(env.shape, rightField);
+    assert.equal(env.timers.size, 1);
+    env.advanceTimers(45);
+    assert.equal(env.shape.querySelector('.dt-pose').style.transform, 'rotate(3deg)');
+
+    MM.anticipateLook(env.shape, leftField);
+    assert.equal(env.timers.size, 1);
+    MM.destroy(env.shape);
+    assert.equal(env.timers.size, 0);
+  });
+
+  test('playSequence runs all 5 CHOREOGRAPHY beats with eye-lead anticipation and settles cleanly', () => {
+    const env = createHarness();
+    const target = env.doc.createElement('div');
+    target._rect = { left: 116, top: 20, right: 156, bottom: 60, width: 40, height: 40 };
+    env.doc.body.appendChild(target);
+
+    const gaze = env.shape.querySelector('.dt-gaze');
+    const pose = env.shape.querySelector('.dt-pose');
+    const finished = [];
+
+    // 1. notice: eye-lead -> nod + blink -> settle at 325ms
+    env.shape.setAttribute('data-state', 'idle');
+    const eyesNode = env.shape.querySelector('.f-idle .dt-eyes') || env.shape.querySelector('.dt-eyes');
+    const s1 = MM.playSequence(env.shape, 'notice', { target, onFinish: (el, name) => finished.push(name) });
+    assert.equal(s1.name, 'notice');
+    assert.equal(s1.leadMs, 45);
+    assert.equal(gaze.style.transform, 'translate(3px, 0px)');
+    assert.ok(!pose.style.transform);
+    const beforePoseAnims = pose._animations.length;
+    const beforeEyeAnims = eyesNode ? eyesNode._animations.length : 0;
+    env.advanceTimers(45);
+    assert.equal(pose.style.transform, 'rotate(3deg)');
+    assert.ok(pose._animations.length > beforePoseAnims);
+    if (eyesNode) assert.ok(eyesNode._animations.length > beforeEyeAnims);
+    assert.equal(env.shape.getAttribute('data-state'), 'idle');
+    env.advanceTimers(325 - 45);
+    assert.deepEqual(finished, ['notice']);
+
+    // 2. focus: sets data-state="focused" after 45ms and finishes at 345ms
+    const s2 = MM.playSequence(env.shape, 'focus', { onFinish: (el, name) => finished.push(name) });
+    assert.equal(s2.totalMs, 345);
+    assert.equal(gaze.style.transform, 'translateY(-1.5px)');
+    env.advanceTimers(45);
+    assert.equal(env.shape.getAttribute('data-state'), 'focused');
+    assert.equal(gaze.style.transform, '');
+    env.advanceTimers(300);
+    assert.deepEqual(finished, ['notice', 'focus']);
+
+    // 3. acknowledge: sets data-state="happy" after 45ms and finishes at 325ms
+    MM.playSequence(env.shape, 'acknowledge', { onFinish: (el, name) => finished.push(name) });
+    env.advanceTimers(325);
+    assert.equal(env.shape.getAttribute('data-state'), 'happy');
+    assert.deepEqual(finished, ['notice', 'focus', 'acknowledge']);
+
+    // 4. proud: sets "record" at 55ms, restores "happy" at 1100ms
+    MM.playSequence(env.shape, 'proud', { onFinish: (el, name) => finished.push(name) });
+    env.advanceTimers(54);
+    assert.notEqual(env.shape.getAttribute('data-state'), 'record');
+    env.advanceTimers(1);
+    assert.equal(env.shape.getAttribute('data-state'), 'record');
+    env.advanceTimers(1100 - 55);
+    assert.equal(env.shape.getAttribute('data-state'), 'happy');
+    assert.deepEqual(finished, ['notice', 'focus', 'acknowledge', 'proud']);
+
+    // 5. milestone: sets "record" at 60ms, follow-through at 580ms, restores "happy" at 1400ms
+    MM.playSequence(env.shape, 'milestone', { target, onFinish: (el, name) => finished.push(name) });
+    env.advanceTimers(60);
+    assert.equal(env.shape.getAttribute('data-state'), 'record');
+    const poseAnimsAt60 = pose._animations.length;
+    env.advanceTimers(520);
+    assert.ok(pose._animations.length > poseAnimsAt60, 'secondReaction follow-through triggers at 580ms');
+    env.advanceTimers(1400 - 580);
+    assert.equal(env.shape.getAttribute('data-state'), 'happy');
+    assert.deepEqual(finished, ['notice', 'focus', 'acknowledge', 'proud', 'milestone']);
+    assert.equal(env.timers.size, 0);
+  });
+
+  test('playSequence interrupts earlier sequence cleanly, respects reduced motion, and ignores unknown names', () => {
+    const env = createHarness();
+    const target = env.doc.createElement('div');
+    target._rect = { left: 116, top: 20, right: 156, bottom: 60, width: 40, height: 40 };
+    env.doc.body.appendChild(target);
+
+    const finished = [];
+    MM.playSequence(env.shape, 'milestone', { target, onFinish: (el, name) => finished.push(name) });
+    env.advanceTimers(20);
+    MM.playSequence(env.shape, 'acknowledge', { onFinish: (el, name) => finished.push(name) });
+    env.advanceTimers(2000);
+    assert.deepEqual(finished, ['acknowledge']);
+    assert.equal(env.timers.size, 0);
+
+    // Reduced motion applies target state immediately with zero timers and runs onFinish synchronously
+    env.setReduced(true);
+    const seq = MM.playSequence(env.shape, 'proud', { onFinish: (el, name) => finished.push(name) });
+    assert.equal(seq, null);
+    assert.equal(env.shape.getAttribute('data-state'), 'record');
+    assert.equal(env.timers.size, 0);
+    assert.deepEqual(finished, ['acknowledge', 'proud']);
+
+    assert.equal(MM.playSequence(env.shape, 'unknown-beat'), null);
   });
 });

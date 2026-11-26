@@ -32,6 +32,7 @@ def test_exposes_the_tools_with_docstrings(sheet):
         "save_diary",
         "save_workout",
         "save_food",
+        "propose_food",
         "copy_food",
         "save_measures",
         "get_exercise_history",
@@ -424,3 +425,51 @@ def test_a_journal_refuses_nothing_until_a_write_is_uncertain():
     assert journal.refusal() is None
     journal.interrupted = True
     assert journal.refusal() is not None
+
+
+async def test_propose_food_stores_draft_on_journal_without_writing_sheet():
+    sheet = FakeSheet()
+    journal = Journal()
+    t = tools(sheet, journal)
+    res = await t["propose_food"](
+        "2026-09-21",
+        "Almoço",
+        [
+            FoodItem(food="Arroz branco cozido", qty=150, unit="g", measure="Estimada"),
+            FoodItem(description="bife acebolado", qty=120, unit="g"),
+        ],
+    )
+    assert res["ok"] is True
+    assert res["result"]["draft"] is True
+    assert sheet.calls == []
+    assert journal.writes == []
+    assert journal.food_draft == {
+        "date": "2026-09-21",
+        "meal": "Almoço",
+        "items": [
+            {"food": "Arroz branco cozido", "qty": 150, "unit": "g", "measure": "Estimada"},
+            {"description": "bife acebolado", "qty": 120, "unit": "g"},
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("date", "meal", "items"),
+    [
+        ("2026-99-99", "Almoço", [FoodItem(food="Arroz", qty=100, unit="g")]),
+        ("2026-09-21", "", [FoodItem(food="Arroz", qty=100, unit="g")]),
+        ("2026-09-21", "Almoço", []),
+        ("2026-09-21", "Almoço", [FoodItem(food="Arroz", description="extra", qty=100)]),
+        ("2026-09-21", "Almoço", [FoodItem(food="Arroz", qty=0, unit="g")]),
+        ("2026-09-21", "Almoço", [FoodItem(favorite="Café", portions=0)]),
+    ],
+)
+async def test_propose_food_rejects_invalid_draft_inputs(date, meal, items):
+    sheet = FakeSheet()
+    journal = Journal()
+    t = tools(sheet, journal)
+    res = await t["propose_food"](date, meal, items)
+    assert res["ok"] is False
+    assert res["errors"]
+    assert journal.food_draft is None
+    assert sheet.calls == []

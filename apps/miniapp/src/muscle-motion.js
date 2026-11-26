@@ -33,6 +33,15 @@
   /* Deterministic 8-step organic blink cadence (all in 2500..8000ms, zero Math.random) */
   var BLINK_SEQUENCE = [3800, 5200, 4100, 6400, 3200, 5800, 4600, 7000];
   var blinkIndex = 0;
+  var EYE_LEAD_MS = 45;
+
+  var CHOREOGRAPHY = {
+    notice: { state: null, leadMs: 45, reaction: 'nod', blink: true, settleMs: 325 },
+    focus: { state: 'focused', leadMs: 45, reaction: 'tick', settleMs: 345 },
+    acknowledge: { state: 'happy', leadMs: 45, reaction: 'nod', settleMs: 325 },
+    proud: { state: 'record', leadMs: 55, reaction: 'pr', settleMs: 615, restoreState: 'happy', restoreAfterMs: 1100 },
+    milestone: { state: 'record', leadMs: 60, reaction: 'celebrate', secondReaction: 'full', secondDelayMs: 520, settleMs: 1020, restoreState: 'happy', restoreAfterMs: 1400 },
+  };
 
   var SLOTS = {
     header: 'header',
@@ -231,6 +240,8 @@
           travelAbort: null,
           validationAbort: null,
           guideAbort: null,
+          lookAbort: null,
+          choreoAbort: null,
         };
         elementRecords.set(el, rec);
       }
@@ -529,6 +540,9 @@
   var startBlinkLoop = startBlink;
 
   function glance(el, targetEl, opts) {
+    if (opts && opts.eyeLead) {
+      return anticipateLook(el, targetEl, opts);
+    }
     if (!el) return;
     var gaze = query(el, '.dt-gaze') || query(el, '.dt-scan');
     var pose = query(el, '.dt-pose');
@@ -573,6 +587,92 @@
       pose.style.transition = 'transform 0.3s ease-out';
       pose.style.transform = 'rotate(' + tiltDeg + 'deg)';
     }
+  }
+
+  /**
+   * Disney-style eye-lead anticipation: `.dt-gaze` darts first at 0ms while `.dt-pose` body
+   * tilt follows after `leadMs` (default 45ms). Synchronously resets when targetEl is null or
+   * under reduced-motion.
+   */
+  function anticipateLook(el, targetEl, opts) {
+    if (!el) return noop;
+    var options = opts || {};
+    var rec = recordFor(el);
+    if (rec && rec.lookAbort) {
+      rec.lookAbort();
+      rec.lookAbort = null;
+    }
+
+    var gaze = query(el, '.dt-gaze') || query(el, '.dt-scan');
+    var pose = query(el, '.dt-pose');
+    if (!gaze || !gaze.style) return noop;
+
+    var isReduced = reducedMotion(el, options);
+    if (
+      isReduced ||
+      !targetEl ||
+      typeof targetEl.getBoundingClientRect !== 'function' ||
+      typeof el.getBoundingClientRect !== 'function'
+    ) {
+      gaze.style.transform = '';
+      if (pose && pose.style) {
+        if (!isReduced && targetEl === null) pose.style.transition = 'transform 0.25s ease-out';
+        pose.style.transform = '';
+      }
+      return noop;
+    }
+
+    var from = el.getBoundingClientRect();
+    var to = targetEl.getBoundingClientRect();
+    var dx = (to.left + to.width / 2) - (from.left + from.width / 2);
+    var dy = (to.top + to.height / 2) - (from.top + from.height / 2);
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (!(len > 0)) {
+      gaze.style.transform = '';
+      if (pose && pose.style) pose.style.transform = '';
+      return noop;
+    }
+
+    var maxShift = typeof options.maxShift === 'number' ? options.maxShift : 3;
+    var eyeX = Math.round((dx / len) * maxShift * 100) / 100;
+    var eyeY = Math.round((dy / len) * maxShift * 100) / 100;
+    gaze.style.transition = 'transform 0.14s ease-out';
+    gaze.style.transform = 'translate(' + eyeX + 'px, ' + eyeY + 'px)';
+
+    if (!pose || !pose.style) return noop;
+
+    var leadMs = typeof options.leadMs === 'number' && options.leadMs >= 0 ? options.leadMs : EYE_LEAD_MS;
+    var tiltDeg = Math.round((dx / len) * 3 * 10) / 10;
+    if (leadMs === 0) {
+      pose.style.transition = 'transform 0.3s ease-out';
+      pose.style.transform = 'rotate(' + tiltDeg + 'deg)';
+      return noop;
+    }
+
+    var win = winOf(el, options);
+    var timerId = setTimer(win, function () {
+      if (rec) {
+        rec.timers.delete(timerId);
+        if (rec.lookAbort === cancelLook) rec.lookAbort = null;
+      }
+      timerId = null;
+      pose.style.transition = 'transform 0.3s ease-out';
+      pose.style.transform = 'rotate(' + tiltDeg + 'deg)';
+    }, leadMs);
+
+    if (rec) rec.timers.add(timerId);
+
+    var cancelLook = registerCleanup(el, function () {
+      if (timerId !== null) {
+        if (rec) rec.timers.delete(timerId);
+        clearTimer(win, timerId);
+        timerId = null;
+      }
+      if (rec && rec.lookAbort === cancelLook) rec.lookAbort = null;
+    });
+
+    if (rec) rec.lookAbort = cancelLook;
+    return cancelLook;
   }
 
   function startIdleBreath(el, opts) {
@@ -1342,6 +1442,102 @@
     return cancelGuide;
   }
 
+  /** Named expressive choreography beat: eye-lead anticipation -> reaction -> optional follow-up -> settle. */
+  function playSequence(el, name, opts) {
+    var spec = CHOREOGRAPHY[name];
+    if (!el || !spec) return null;
+    var options = opts || {};
+    var rec = recordFor(el);
+    if (rec && rec.choreoAbort) {
+      rec.choreoAbort();
+      rec.choreoAbort = null;
+    }
+
+    if (reducedMotion(el, options)) {
+      if (spec.state && options.applyState !== false) {
+        applyAvatarState(el, spec.state, options);
+      }
+      if (typeof options.onFinish === 'function') options.onFinish(el, name);
+      return null;
+    }
+
+    var win = winOf(el, options);
+    var timersList = [];
+    var cancelled = false;
+    var lookCancel = noop;
+    var gaze = query(el, '.dt-gaze') || query(el, '.dt-scan');
+
+    function scheduleSeq(fn, ms) {
+      var id = setTimer(win, function () {
+        if (rec) rec.timers.delete(id);
+        var idx = timersList.indexOf(id);
+        if (idx >= 0) timersList.splice(idx, 1);
+        if (!cancelled) fn();
+      }, ms);
+      timersList.push(id);
+      if (rec) rec.timers.add(id);
+      return id;
+    }
+
+    var cancelSeq = registerCleanup(el, function () {
+      if (cancelled) return;
+      cancelled = true;
+      if (rec && rec.choreoAbort === cancelSeq) rec.choreoAbort = null;
+      if (typeof lookCancel === 'function') lookCancel();
+      while (timersList.length) {
+        var tid = timersList.pop();
+        if (rec) rec.timers.delete(tid);
+        clearTimer(win, tid);
+      }
+    });
+    if (rec) rec.choreoAbort = cancelSeq;
+
+    // 1. Immediate eye-lead anticipation at 0ms
+    if (options.target) {
+      lookCancel = anticipateLook(el, options.target, Object.assign({}, options, { leadMs: spec.leadMs }));
+    } else if (gaze && gaze.style) {
+      gaze.style.transition = 'transform 0.12s ease-out';
+      gaze.style.transform = 'translateY(-1.5px)';
+    }
+
+    // 2. State + primary reaction + optional blink after eye-lead
+    scheduleSeq(function () {
+      if (!options.target && gaze && gaze.style) gaze.style.transform = '';
+      if (spec.state && options.applyState !== false) {
+        applyAvatarState(el, spec.state, options);
+      }
+      react(el, spec.reaction, options);
+      if (spec.blink) blink(el, options);
+    }, spec.leadMs);
+
+    // 3. Optional follow-through beat (e.g. milestone celebrate -> full)
+    if (spec.secondReaction) {
+      scheduleSeq(function () {
+        react(el, spec.secondReaction, Object.assign({}, options, { applyState: false }));
+      }, spec.leadMs + spec.secondDelayMs);
+    }
+
+    // 4. Optional post-celebration state restoration and finish callback
+    var totalMs = spec.restoreState && options.restoreState !== false ? spec.restoreAfterMs : spec.settleMs;
+    if (spec.restoreState && options.restoreState !== false) {
+      var targetRestore = typeof options.restoreState === 'string' ? options.restoreState : spec.restoreState;
+      scheduleSeq(function () {
+        if (el.getAttribute && el.getAttribute('data-state') === spec.state) {
+          applyAvatarState(el, targetRestore, options);
+        }
+        if (rec && rec.choreoAbort === cancelSeq) rec.choreoAbort = null;
+        if (typeof options.onFinish === 'function') options.onFinish(el, name);
+      }, spec.restoreAfterMs);
+    } else {
+      scheduleSeq(function () {
+        if (rec && rec.choreoAbort === cancelSeq) rec.choreoAbort = null;
+        if (typeof options.onFinish === 'function') options.onFinish(el, name);
+      }, spec.settleMs);
+    }
+
+    return { name: name, leadMs: spec.leadMs, totalMs: totalMs, cancel: cancelSeq };
+  }
+
   function introLand(muscleEl, opts) {
     if (!muscleEl) return noop;
     var options = opts || {};
@@ -1465,6 +1661,8 @@
     if (rec.travelAbort) { rec.travelAbort(); rec.travelAbort = null; }
     if (rec.validationAbort) { rec.validationAbort(); rec.validationAbort = null; }
     if (rec.guideAbort) { rec.guideAbort(); rec.guideAbort = null; }
+    if (rec.lookAbort) { rec.lookAbort(); rec.lookAbort = null; }
+    if (rec.choreoAbort) { rec.choreoAbort(); rec.choreoAbort = null; }
 
     Array.from(rec.cleanups).forEach(function (fn) {
       try { fn(); } catch (e) { /* ignore */ }
@@ -1518,6 +1716,8 @@
     EASE_BREATH: EASE_BREATH,
     MORPH_TIMING: MORPH_TIMING,
     BLINK_SEQUENCE: BLINK_SEQUENCE,
+    EYE_LEAD_MS: EYE_LEAD_MS,
+    CHOREOGRAPHY: CHOREOGRAPHY,
     REACTIONS: REACTIONS,
     SLOTS: SLOTS,
 
@@ -1525,6 +1725,8 @@
     morph: morph,
     react: react,
     glance: glance,
+    anticipateLook: anticipateLook,
+    playSequence: playSequence,
 
     // Micro-life (§1.3)
     blink: blink,

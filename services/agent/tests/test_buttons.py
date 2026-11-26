@@ -3,6 +3,10 @@ import hashlib
 import pytest
 
 from agent.buttons import (
+    DRAFT_MINIAPP,
+    DRAFT_NO,
+    DRAFT_OK,
+    DRAFT_VERBS,
     ENTENDI_HEADER,
     FIX_PLACEHOLDER,
     FIX_PROMPT,
@@ -13,6 +17,7 @@ from agent.buttons import (
     action,
     entendi_text,
     fix_prompt,
+    food_draft_keyboard,
     keyboard,
     parse,
     transcript_from,
@@ -108,3 +113,33 @@ def test_voice_fix_prompt_escapes_transcript_inside_code_and_bounds_length():
     assert long_html.startswith(f"{VOICE_FIX_PROMPT}\n\n<code>")
     assert long_html.endswith("…</code>")
     assert len(long_html) < 4096
+
+
+def test_food_draft_keyboard_builds_buttons_and_enforces_callback_data_limit():
+    kb = food_draft_keyboard("abcd1234")
+    assert kb == {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Registrar no diário", "callback_data": "dok:abcd1234"},
+                {"text": "✏️ Ajustar no Mini App", "callback_data": "dfix:abcd1234"},
+            ],
+            [{"text": "✖️ Cancelar", "callback_data": "dno:abcd1234"}],
+        ]
+    }
+    no_miniapp = food_draft_keyboard("abcd1234", include_miniapp=False)
+    assert no_miniapp == {
+        "inline_keyboard": [
+            [{"text": "✅ Registrar no diário", "callback_data": "dok:abcd1234"}],
+            [{"text": "✖️ Cancelar", "callback_data": "dno:abcd1234"}],
+        ]
+    }
+    for verb in (DRAFT_OK, DRAFT_MINIAPP, DRAFT_NO):
+        assert verb in DRAFT_VERBS
+        data = f"{verb}:abcd1234"
+        assert parse(data) == (verb, ["abcd1234"])
+        assert action(data) == verb
+
+    with pytest.raises(ValueError):
+        food_draft_keyboard("")
+    with pytest.raises(ValueError):
+        food_draft_keyboard("x" * (MAX_DATA - len(DRAFT_MINIAPP)))

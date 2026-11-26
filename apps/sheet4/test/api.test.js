@@ -1119,3 +1119,30 @@ test('S1 PRE_WRITE_CODES: every single code in spec §4.3.2 answers ok: false wi
   }
   assert.deepEqual([...seen].sort(), [...EXPECTED_PRE_WRITE_CODES].sort());
 });
+
+test('catalog includes todayTotals matching day.get totals once food is logged today', () => {
+  const ctx = setup();
+  const emptyCat = ok(ctx.api('catalog', {}));
+  assert.equal(emptyCat.todayTotals, null);
+
+  ok(ctx.api('diary.upsert', { date: '2026-10-20', fields: { waterL: 1.5 } }));
+  ok(ctx.api('food.add', {
+    date: '2026-10-20',
+    meal: 'Almoço',
+    items: [{ food: 'Arroz branco cozido', qty: 150, unit: 'g' }],
+  }));
+
+  const cat = ok(ctx.api('catalog', {}));
+  const day = ok(ctx.api('day.get', { date: '2026-10-20' }));
+  assert.equal(cat.todayDiary.waterL, 1.5);
+  assert.deepEqual(cat.todayTotals, {
+    kcal: day.totals.kcal,
+    protein: day.totals.protein,
+    carbs: day.totals.carbs,
+    fat: day.totals.fat,
+    fiber: day.totals.fiber,
+    noCalcItems: day.totals.noCalcItems,
+    estimatedItems: day.totals.estimatedItems,
+  });
+  assert.equal(cat.todayTotals.kcal, 192);
+});

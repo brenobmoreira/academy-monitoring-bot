@@ -30,7 +30,7 @@ from agent.bot import (
     Media,
 )
 from agent.budget import Budget, MemoryBudget
-from agent.commands import COMMANDS, CommandSheet, Context, Reply, parse_command
+from agent.commands import COMMANDS, SHEET_DOWN, CommandSheet, Context, Reply, parse_command
 from agent.format import escape, split
 from agent.llm import build_model
 from agent.logs import describe
@@ -272,6 +272,7 @@ class Handler:
         confirmations: VoiceConfirmations | None = None,
         transcriber: VoiceTranscriber | None = None,
         voice_max_seconds: int = VOICE_MAX_SECONDS,
+        food_drafts: miniapp.FoodDraftStore | None = None,
     ) -> None:
         self._allowed = allowed_chat_ids
         self._bot = bot
@@ -294,6 +295,7 @@ class Handler:
         self._confirmations = confirmations if confirmations is not None else VoiceConfirmations()
         self._transcriber = transcriber
         self._voice_max_seconds = voice_max_seconds
+        self._food_drafts = food_drafts if food_drafts is not None else miniapp.FoodDraftStore()
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         """Never raises: a webhook that errors makes Telegram resend the same update. A malformed
@@ -485,7 +487,13 @@ class Handler:
                     answer = await self._bot.reply(text, user_id=str(chat_id), context=context, media=media)
                 else:
                     answer = await self._bot.reply(text, user_id=str(chat_id), context=context)
-            markup = buttons.keyboard(answer.write_ids) if answer.wrote else None
+            if answer.wrote:
+                markup = buttons.keyboard(answer.write_ids)
+            elif answer.food_draft is not None:
+                did = self._food_drafts.put(chat_id, answer.food_draft)
+                markup = buttons.food_draft_keyboard(did, include_miniapp=bool(self._miniapp_url))
+            else:
+                markup = None
             transient = answer.failed and answer.outcome not in ("committed", "uncertain")
             return Reply(
                 answer.text,
@@ -793,6 +801,67 @@ class Handler:
             text, markup = buttons.fix_prompt(message.get("text"))
             return await self._deliver(
                 chat_id, Reply(text, reply_markup=markup), update_id, reply_to=message_id
+            )
+        if verb == buttons.DRAFT_OK:
+            did = ids[0] if ids else ""
+            draft = self._food_drafts.claim(did, chat_id)
+            await self._remove_keyboard(chat_id, message_id)
+            if draft is None:
+                return await self._deliver(
+                    chat_id, Reply(miniapp.DRAFT_EXPIRED), update_id, reply_to=message_id
+                )
+            if self._sheet is None:
+                raise RuntimeError("this handler has no sheet API")
+            sheet = cast(miniapp.MiniappSheet, self._sheet)
+            reply = await miniapp.commit_food_draft(sheet, draft, chat_id, did, self._pending)
+            return await self._deliver(chat_id, reply, update_id, reply_to=message_id)
+        if verb == buttons.DRAFT_NO:
+            did = ids[0] if ids else ""
+            draft = self._food_drafts.claim(did, chat_id)
+            await self._remove_keyboard(chat_id, message_id)
+            msg = miniapp.DRAFT_CANCELLED if draft is not None else miniapp.DRAFT_EXPIRED
+            return await self._deliver(chat_id, Reply(msg), update_id, reply_to=message_id)
+        if verb == buttons.DRAFT_MINIAPP:
+            did = ids[0] if ids else ""
+            draft = self._food_drafts.peek(did, chat_id)
+            if draft is None:
+                await self._remove_keyboard(chat_id, message_id)
+                return await self._deliver(
+                    chat_id, Reply(miniapp.DRAFT_EXPIRED), update_id, reply_to=message_id
+                )
+            if not self._miniapp_url or self._sheet is None:
+                return await self._deliver(
+                    chat_id,
+                    Reply("Ajuste no Mini App indisponível no momento. Confirme ou cancele por aqui."),
+                    update_id,
+                    reply_to=message_id,
+                )
+            cat = await self._sheet.catalog()
+            if not cat.get("ok"):
+                return await self._deliver(
+                    chat_id, Reply(SHEET_DOWN, failed=True, transient=True), update_id, reply_to=message_id
+                )
+            voice_keys = self._voice_link.issue_keys(chat_id) if self._voice_link else None
+            try:
+                markup, _ = miniapp.food_draft_markup(
+                    self._miniapp_url, cat["result"], draft, voice_keys=voice_keys
+                )
+            except miniapp.CatalogTooLarge as err:
+                return await self._deliver(
+                    chat_id,
+                    Reply(f"Não consegui abrir o Mini App ({err}). Confirme ou cancele por aqui."),
+                    update_id,
+                    reply_to=message_id,
+                )
+            return await self._deliver(
+                chat_id,
+                Reply(
+                    f"Toque em “{miniapp.DRAFT_ADJUST_BUTTON}” abaixo para revisar e ajustar as gramas "
+                    "no Mini App:",
+                    reply_markup=markup,
+                ),
+                update_id,
+                reply_to=message_id,
             )
         log.warning("unknown button data of %d characters on update %s", len(data), update_id)
         return True

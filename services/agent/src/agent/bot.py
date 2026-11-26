@@ -8,7 +8,7 @@ from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
 from google.adk.agents import LlmAgent
@@ -23,7 +23,7 @@ from google.genai import types
 from agent.format import escape
 from agent.logs import describe, safe_code
 from agent.sheet_client import WriteOutcome
-from agent.summary import confirmation
+from agent.summary import confirmation, food_draft_summary
 from agent.tools import Journal, SheetApi, build_tools
 
 log = logging.getLogger(__name__)
@@ -70,6 +70,8 @@ refeições e recent (gravações dos últimos 30 minutos, a mais recente primei
 cansaço, dor, registro alimentar, observações, água em litros).
 - save_workout: exercícios de musculação: work sets, aquecimento e feeder separados.
 - save_food: alimentos de uma refeição (do catálogo, favorita ou descrição sem cálculo).
+- propose_food: monta um rascunho revisável de refeição (sem gravar ainda) para foto de prato ou \
+estimativa aproximada.
 - copy_food: copia uma refeição (ou todas as refeições do dia) de uma data anterior para outra \
 data (ex.: "almocei igual a ontem").
 - save_measures: medidas corporais na aba Medidas (cintura, quadril, peito, braço direito, coxa \
@@ -139,7 +141,9 @@ Foto:
 16. Mensagem com foto (balança, tela de app de passos, sono ou treino): leia os valores mostrados \
 e aplique as mesmas regras. Nunca adivinhe um dígito ilegível: grave o resto e diga o que não deu \
 para ler. Se a mensagem indica foto anexada mas você não recebeu o conteúdo, não grave nada e \
-responda que não conseguiu ler a foto.
+responda que não conseguiu ler a foto. Para foto de prato ou comida (ou quando a pessoa pedir para \
+estimar uma refeição antes de salvar), chame get_catalog, estime os alimentos e gramas com \
+measure="Estimada" e use propose_food em vez de save_food.
 {reply_context}"""
 
 # The replied-to message is our own reply, at most one Telegram message long; the cap only keeps
@@ -169,6 +173,7 @@ class Answer:
     wrote: bool = False
     failed: bool = False
     outcome: WriteOutcome | None = None
+    food_draft: dict[str, Any] | None = None
 
 
 def instruction(now: datetime, context: str | None = None) -> str:
@@ -322,12 +327,15 @@ class Bot:
             # Replaces any note that says nothing else was saved: that is not known.
             log.warning("write outcome uncertain: %s", ", ".join(safe_code(c) for c in journal.error_codes))
             note = WRITE_UNCERTAIN
+        draft = journal.food_draft if (journal.food_draft is not None and not journal.writes) else None
+        lines = [food_draft_summary(draft)] if draft is not None else confirmation(journal.writes)
         return Answer(
-            compose(confirmation(journal.writes), final, note),
+            compose(lines, final, note),
             write_ids=tuple(journal.write_ids),
             wrote=bool(journal.writes),
             failed=model_failed or journal.sheet_failed,
             outcome=outcome,
+            food_draft=draft,
         )
 
 

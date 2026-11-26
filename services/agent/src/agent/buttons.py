@@ -21,7 +21,11 @@ VOICE_OK = "vok"
 VOICE_FIX = "vfix"
 VOICE_NO = "vno"
 VOICE_VERBS = frozenset({VOICE_OK, VOICE_FIX, VOICE_NO})
-VERBS = frozenset({OK, UNDO, FIX, RETRY, *VOICE_VERBS})
+DRAFT_OK = "dok"
+DRAFT_MINIAPP = "dfix"
+DRAFT_NO = "dno"
+DRAFT_VERBS = frozenset({DRAFT_OK, DRAFT_MINIAPP, DRAFT_NO})
+VERBS = frozenset({OK, UNDO, FIX, RETRY, *VOICE_VERBS, *DRAFT_VERBS})
 MAX_DATA = 64  # bytes, Telegram's limit for callback_data
 
 ENTENDI_HEADER = "🎙️ Entendi:"
@@ -53,6 +57,19 @@ def voice_keyboard(vid: str) -> dict[str, Any]:
         {"text": "✖️ Cancelar", "callback_data": f"{VOICE_NO}:{vid}"},
     ]
     return {"inline_keyboard": [row]}
+
+
+def food_draft_keyboard(draft_id: str, *, include_miniapp: bool = True) -> dict[str, Any]:
+    """The markup for a revisable food draft (`propose_food`, Onda 1 #4)."""
+    if not draft_id or any(
+        len(f"{verb}:{draft_id}".encode()) > MAX_DATA for verb in (DRAFT_OK, DRAFT_MINIAPP, DRAFT_NO)
+    ):
+        raise ValueError("food draft id does not fit in callback_data")
+    row1 = [{"text": "✅ Registrar no diário", "callback_data": f"{DRAFT_OK}:{draft_id}"}]
+    if include_miniapp:
+        row1.append({"text": "✏️ Ajustar no Mini App", "callback_data": f"{DRAFT_MINIAPP}:{draft_id}"})
+    row2 = [{"text": "✖️ Cancelar", "callback_data": f"{DRAFT_NO}:{draft_id}"}]
+    return {"inline_keyboard": [row1, row2]}
 
 
 def entendi_text(body: str) -> str:

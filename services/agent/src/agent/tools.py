@@ -9,8 +9,10 @@ every rejected call, reads included, are kept there too, so the bot can tell a s
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
 import json
+import re
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -189,6 +191,8 @@ class Journal:
     interrupted: bool = False
     # The outcome of each mutating attempt that got an answer, in order (see sheet_client).
     outcomes: list[WriteOutcome] = field(default_factory=list)
+    # Non-writing proposed meal draft for preview/confirmation (Onda 1 #4).
+    food_draft: dict[str, Any] | None = None
     # Serialises the write tools of this message (see write_turn). An asyncio lock, because the
     # tools are coroutines that ADK runs as tasks on the bot's event loop; RunConfig's
     # tool_thread_pool_config, which would move them to threads with their own loops, is not set.
@@ -406,6 +410,23 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
                 response = await sheet.add_food(date, meal, plain_items)
             return journal.record("food.add", response, token)
 
+    async def propose_food(date: str, meal: str, items: list[FoodItem]) -> dict[str, Any]:
+        """Monta um rascunho revisável de refeição (sem gravar na planilha ainda) para foto de
+        prato ou estimativa aproximada, devolvendo botões de confirmar ou ajustar no Mini App.
+
+        Args:
+            date: dia da refeição, yyyy-MM-dd.
+            meal: refeição (ex.: Café da manhã, Almoço, Jantar), conforme meals do catálogo.
+            items: itens estimados da refeição.
+        """
+        plain_items = _plain(items)
+        errors = _validate_food_draft(date, meal, plain_items)
+        if errors:
+            return {"ok": False, "errors": errors}
+        draft = {"date": date.strip(), "meal": meal.strip(), "items": plain_items}
+        journal.food_draft = draft
+        return {"ok": True, "result": {"draft": True, **draft}}
+
     async def copy_food(date_from: str, date_to: str, meal: str | None = None) -> dict[str, Any]:
         """Copia uma refeição (ou todas as refeições do dia, se meal for omitido) de date_from para
         date_to na aba Alimentação (ex.: "almocei igual a ontem", "repete o café da manhã de ontem").
@@ -493,6 +514,7 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         save_diary,
         save_workout,
         save_food,
+        propose_food,
         copy_food,
         save_measures,
         get_exercise_history,
@@ -500,6 +522,52 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         get_phase,
         get_week,
     ]
+
+
+_DRAFT_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_food_draft(date: str, meal: str, items: Any) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    clean_date = date.strip() if isinstance(date, str) else ""
+    if not _DRAFT_DATE_RE.fullmatch(clean_date):
+        errors.append({"path": "date", "message": "use yyyy-MM-dd"})
+    else:
+        try:
+            dt.date.fromisoformat(clean_date)
+        except ValueError:
+            errors.append({"path": "date", "message": "data inválida"})
+    clean_meal = meal.strip() if isinstance(meal, str) else ""
+    if not clean_meal or len(clean_meal) > 60:
+        errors.append({"path": "meal", "message": "informe a refeição (1 a 60 caracteres)"})
+    if not isinstance(items, list) or not (1 <= len(items) <= 20):
+        errors.append({"path": "items", "message": "informe de 1 a 20 itens na refeição"})
+        return errors
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            errors.append({"path": f"items[{idx}]", "message": "item inválido"})
+            continue
+        has_food = isinstance(item.get("food"), str) and bool(item["food"].strip())
+        has_fav = isinstance(item.get("favorite"), str) and bool(item["favorite"].strip())
+        has_desc = isinstance(item.get("description"), str) and bool(item["description"].strip())
+        if has_food + has_fav + has_desc != 1:
+            errors.append(
+                {"path": f"items[{idx}]", "message": "use exatamente um de: food, favorite ou description"}
+            )
+            continue
+        if has_food:
+            qty = item.get("qty")
+            if isinstance(qty, bool) or not isinstance(qty, int | float) or qty <= 0:
+                errors.append({"path": f"items[{idx}].qty", "message": "quantidade do alimento > 0"})
+        elif has_fav and "portions" in item:
+            portions = item.get("portions")
+            if isinstance(portions, bool) or not isinstance(portions, int | float) or portions <= 0:
+                errors.append({"path": f"items[{idx}].portions", "message": "porções > 0"})
+        elif has_desc and "qty" in item:
+            qty = item.get("qty")
+            if isinstance(qty, bool) or not isinstance(qty, int | float) or qty <= 0:
+                errors.append({"path": f"items[{idx}].qty", "message": "quantidade > 0"})
+    return errors
 
 
 def _plain(value: Any) -> Any:

@@ -1034,3 +1034,31 @@ describe('Proactive guiding choreography (EYE_LEAD_MS, anticipateLook, playSeque
     assert.equal(MM.playSequence(env.shape, 'unknown-beat'), null);
   });
 });
+
+describe('finished choreography releases its cleanups', () => {
+  const field = (env) => {
+    const el = env.doc.createElement('input');
+    el._rect = { left: 116, top: 20, right: 156, bottom: 60, width: 40, height: 40 };
+    env.doc.body.appendChild(el);
+    return el;
+  };
+
+  test('anticipateLook and playSequence leave nothing behind after their timers end', () => {
+    const env = createHarness();
+    const target = field(env);
+    const before = MM.pendingCleanups(env.shape);
+
+    MM.anticipateLook(env.shape, target);
+    assert.equal(MM.pendingCleanups(env.shape), before + 1);
+    env.advanceTimers(45);
+    assert.equal(MM.pendingCleanups(env.shape), before);
+
+    for (const name of Object.keys(MM.CHOREOGRAPHY)) {
+      const seq = MM.playSequence(env.shape, name, { target });
+      env.advanceTimers(seq.totalMs + 5000);
+      assert.equal(MM.pendingCleanups(env.shape), before, name);
+      seq.cancel(); // a late cancel is harmless
+    }
+    MM.destroy(env.shape);
+  });
+});

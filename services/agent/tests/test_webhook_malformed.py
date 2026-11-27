@@ -56,7 +56,7 @@ def world(monkeypatch) -> World:
     """The real webhook and the real Handler, over fakes."""
     world = World()
 
-    def build(settings, http, *, deduplicator=None, confirmations=None, text_submissions=None, budget=None):
+    def build(settings, http, **shared):
         world.built += 1
         return Handler(ALLOWED, world.bot, world.telegram, sheet=world.sheet)
 
@@ -367,7 +367,7 @@ def test_an_exception_of_the_processing_is_answered_200_and_logged_by_its_class(
 def test_a_handler_that_cannot_be_built_is_answered_200_and_logged_by_its_class(
     world, output, monkeypatch, call
 ):
-    def build(settings, http, *, deduplicator=None, confirmations=None, text_submissions=None, budget=None):
+    def build(settings, http, **shared):
         raise leaky()
 
     monkeypatch.setattr(webhook, "build_handler", build)

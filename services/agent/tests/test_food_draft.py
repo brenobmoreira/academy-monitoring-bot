@@ -13,6 +13,7 @@ from agent import buttons, miniapp
 from agent.bot import Bot, Media
 from agent.handler import Handler
 from agent.summary import food_draft_summary
+from agent.tools import _validate_food_draft
 from agent.voice_confirm import VoiceConfirmations, sha256_hex
 
 from .fakes import FakeSheet, FakeTelegram, ScriptedLlm, call, file, media_update, say
@@ -89,7 +90,7 @@ def test_food_draft_store_enforces_chat_binding_single_claim_ttl_and_capacity():
     draft = {"date": "2026-09-21", "meal": "Almoço", "items": [{"food": "Arroz", "qty": 150, "unit": "g"}]}
 
     k1 = store.put(42, draft)
-    assert len(k1) == 16 and len(store) == 1
+    assert len(k1) == 32 and len(store) == 1
     assert store.peek(k1, 99) is None
     peeked = store.peek(k1, 42)
     assert peeked == draft
@@ -249,6 +250,8 @@ async def test_photo_handler_draft_confirm_adjust_and_cancel_flows():
     assert reply_kb["one_time_keyboard"] is True
     assert reply_kb["keyboard"][0][0]["text"] == miniapp.DRAFT_ADJUST_BUTTON
     decoded = decode_food_fragment(reply_kb["keyboard"][0][0]["web_app"]["url"])
+    did = dok_data.partition(":")[2]
+    assert decoded["df"]["id"] == did and len(dfix_data.encode()) == 37
     assert decoded["df"]["d"] == "2026-09-21"
     assert decoded["df"]["m"] == "Almoço"
     assert decoded["df"]["i"] == [{"f": "Arroz branco cozido", "q": 150, "u": "g", "ms": "Estimada"}]
@@ -384,3 +387,171 @@ async def test_dok_uses_miniapp_retry_pipeline_when_sheet_is_temporarily_unavail
     assert [op for op, _ in sheet.calls] == ["food.add"] * 4
     assert sheet.request_ids[0] is not None and len(set(sheet.request_ids)) == 1
     assert "Arroz branco cozido" in tg.sent[-1][1]
+
+
+RICE = {"food": "Arroz branco cozido", "qty": 150, "unit": "g"}
+DRAFT: dict[str, Any] = {"date": "2026-09-21", "meal": "Almoço", "items": [RICE]}
+WRITTEN = {"ok": True, "result": {"writeId": "w1", "date": "2026-09-21", "meal": "Almoço", "items": [RICE]}}
+
+
+def draft_handler(sheet: FakeSheet, script: list[Any] | None = None, **kwargs: Any):
+    llm = ScriptedLlm(model="scripted", script=script or [], requests=[])
+    tg = FakeTelegram()
+    drafts = miniapp.FoodDraftStore()
+    handler = Handler(
+        {42},
+        Bot(sheet, llm, timezone="America/Sao_Paulo", clock=lambda: NOW),
+        tg,
+        sheet=sheet,
+        clock=lambda: NOW,
+        miniapp_url=MINIAPP_URL,
+        food_drafts=drafts,
+        **kwargs,
+    )
+    return handler, tg, drafts
+
+
+def form_update(did: str, args: dict[str, Any], update_id: int = 60) -> dict[str, Any]:
+    data = json.dumps({"v": 1, "t": "food", "id": did, "args": args})
+    message = {"chat": {"id": 42}, "message_id": 5, "web_app_data": {"data": data}}
+    return {"update_id": update_id, "message": message}
+
+
+async def test_dok_and_the_adjusted_form_write_under_one_request_id():
+    sheet = FakeSheet(food_add=[WRITTEN, WRITTEN])
+    handler, _, drafts = draft_handler(sheet)
+    did = drafts.put(42, DRAFT)
+
+    await handler.handle_update(tap(f"dok:{did}", update_id=61))
+    await handler.handle_update(form_update(did, DRAFT, update_id=62))
+
+    # The sheet dedups (or refuses, when the content differs) by this id: no second row.
+    assert sheet.request_ids == [f"tg:42:miniapp:food.add:{did}"] * 2
+
+
+async def test_the_adjusted_form_retires_the_chat_draft():
+    sheet = FakeSheet(food_add=[WRITTEN])
+    handler, tg, drafts = draft_handler(sheet)
+    did = drafts.put(42, DRAFT)
+
+    await handler.handle_update(form_update(did, {**DRAFT, "items": [{**RICE, "qty": 200}]}))
+    assert len(drafts) == 0
+    await handler.handle_update(tap(f"dok:{did}", update_id=61))
+
+    assert tg.sent[-1] == (42, miniapp.DRAFT_EXPIRED)
+    assert [op for op, _ in sheet.calls] == ["food.add"]
+
+
+async def test_a_rejected_dok_keeps_the_draft_for_adjusting():
+    error = {"path": "args.items[0].food", "code": "unknown", "message": "?"}
+    refused = {"ok": False, "writeState": "none", "errors": [error]}
+    sheet = FakeSheet(food_add=[refused], catalog=[{"ok": True, "result": CATALOG}])
+    handler, tg, drafts = draft_handler(sheet)
+    did = drafts.put(42, DRAFT)
+
+    await handler.handle_update(tap(f"dok:{did}", update_id=61))
+
+    assert drafts.peek(did, 42) == DRAFT
+    assert miniapp.DRAFT_KEPT in tg.sent[-1][1]
+    kb = tg.options[-1]["reply_markup"]["inline_keyboard"]
+    assert kb[0][1]["callback_data"] == f"dfix:{did}"
+    await handler.handle_update(tap(f"dfix:{did}", update_id=62))
+    url = tg.options[-1]["reply_markup"]["keyboard"][0][0]["web_app"]["url"]
+    assert decode_food_fragment(url)["df"]["id"] == did
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        WRITTEN,
+        {"ok": False, "writeState": "none", "errors": [{"path": "requestId", "code": "conflict"}]},
+        {"ok": False, "writeState": "unknown", "errors": [{"path": "", "code": "write_uncertain"}]},
+    ],
+)
+async def test_dok_drops_the_draft_once_it_may_be_in_the_sheet(response):
+    sheet = FakeSheet(food_add=[response])
+    handler, _, drafts = draft_handler(sheet)
+    did = drafts.put(42, DRAFT)
+
+    await handler.handle_update(tap(f"dok:{did}", update_id=61))
+
+    assert len(drafts) == 0
+
+
+async def test_dfix_says_what_did_not_fit_in_the_link(monkeypatch):
+    real = miniapp.food_draft_markup
+
+    def trimmed(*args: Any, **kwargs: Any):
+        markup, _ = real(*args, **kwargs)
+        return markup, ["fv", "day"]
+
+    monkeypatch.setattr(miniapp, "food_draft_markup", trimmed)
+    handler, tg, drafts = draft_handler(FakeSheet(catalog=[{"ok": True, "result": CATALOG}]))
+    did = drafts.put(42, DRAFT)
+
+    await handler.handle_update(tap(f"dfix:{did}", update_id=61))
+
+    assert "Não couberam no link: valores dos alimentos próprios, saldo do dia." in tg.sent[-1][1]
+
+
+@pytest.mark.parametrize("order", ["write_first", "draft_first"])
+async def test_a_draft_beside_a_write_gets_its_own_message(order):
+    diary = {"ok": True, "result": {"date": "2026-09-21", "row": 6, "fields": {"weightKg": 82.4}}}
+    diary["result"]["writeId"] = "w_diary"
+    write = call("save_diary", date="2026-09-21", fields={"weightKg": 82.4})
+    propose = call("propose_food", date="2026-09-21", meal="Almoço", items=[RICE])
+    turns = [write, propose] if order == "write_first" else [propose, write]
+    sheet = FakeSheet(diary_upsert=[diary])
+    handler, tg, drafts = draft_handler(sheet, [*turns, say("ok")])
+
+    await handler.handle_update({"update_id": 70, "message": {"chat": {"id": 42}, "text": "peso e prato"}})
+
+    assert len(tg.sent) == 2 and len(drafts) == 1
+    first, second = (o["reply_markup"]["inline_keyboard"] for o in tg.options)
+    assert first[0][1]["callback_data"] == "undo:w_diary"
+    assert second[0][0]["callback_data"].startswith("dok:")
+    assert "Rascunho" not in tg.sent[0][1]
+    assert "Arroz branco cozido 150 g" in tg.sent[1][1]
+    assert "ainda não foi gravado" in tg.sent[1][1]
+
+
+@pytest.mark.parametrize(
+    ("date", "meal", "item"),
+    [
+        ("2026-09-22", "Almoço", RICE),
+        ("2026-09-21", "=SOMA(A1)", RICE),
+        ("2026-09-21", "Almoço", {**RICE, "qty": float("nan")}),
+        ("2026-09-21", "Almoço", {**RICE, "qty": float("inf")}),
+        ("2026-09-21", "Almoço", {**RICE, "qty": 100001}),
+        ("2026-09-21", "Almoço", {**RICE, "unit": "u" * 21}),
+        ("2026-09-21", "Almoço", {**RICE, "measure": "Chute"}),
+        ("2026-09-21", "Almoço", {**RICE, "note": "n" * 201}),
+        ("2026-09-21", "Almoço", {**RICE, "food": "=cmd"}),
+        ("2026-09-21", "Almoço", {"favorite": "Café", "portions": 51}),
+        ("2026-09-21", "Almoço", {"description": "d" * 201}),
+        ("2026-09-21", "Almoço", {"description": "@x"}),
+        ("2026-09-21", "Almoço", {"description": "+1"}),
+    ],
+)
+def test_a_draft_is_refused_for_what_the_form_would_be_refused_for(date, meal, item):
+    assert _validate_food_draft(date, meal, [item], NOW.date())
+
+
+def test_a_valid_draft_and_a_catalog_with_nan():
+    assert _validate_food_draft("2026-09-21", "Almoço", [RICE], NOW.date()) == []
+    with pytest.raises(ValueError):
+        miniapp.encode_catalog({"v": 1, "x": float("nan")})
+
+
+@pytest.mark.parametrize(
+    ("result", "water"),
+    [
+        ({"todayDiary": None}, 0),
+        ({"todayDiary": {"weightKg": 82}}, 0),
+        ({"todayDiary": {"waterL": 1.25}}, 1.25),
+        ({}, None),
+        ({"todayDiary": {"waterL": "muito"}}, None),
+    ],
+)
+def test_the_catalog_says_when_the_water_of_today_is_known(result, water):
+    assert miniapp.catalog_v1(result).get("day", {}).get("w") == water

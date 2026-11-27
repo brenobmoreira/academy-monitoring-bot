@@ -4,8 +4,11 @@ from pydantic import SecretStr
 from starlette.testclient import TestClient
 from werkzeug.test import EnvironBuilder
 
-from agent import asgi, main, webhook
+from agent import asgi, main, miniapp, webhook
+from agent import handler as handler_module
 from agent.settings import Settings
+
+from .fakes import FakeSheet, FakeTelegram, ScriptedLlm, call, say
 
 pytestmark = pytest.mark.unit
 
@@ -85,3 +88,53 @@ def test_asgi_ignores_a_body_that_is_not_json(handled):
     response = TestClient(asgi.app).post("/", headers={webhook.SECRET_HEADER: "sec"}, content=b"{nope")
     assert (response.text, response.status_code) == ("ok", 200)
     assert handled == []
+
+
+@pytest.mark.parametrize("verb", ["dok", "dfix"])
+async def test_a_draft_survives_into_the_next_webhook_request(monkeypatch, verb):
+    """One handler is built per request: the draft proposed by one must be there for the tap."""
+    items = [{"food": "Arroz branco cozido", "qty": 150, "unit": "g"}]
+    catalog = {"ok": True, "result": {"foods": ["Arroz branco cozido"], "today": "2026-09-21"}}
+    written = {"writeId": "w1", "date": "2026-09-21", "meal": "Almoço", "items": items}
+    sheet = FakeSheet(catalog=[catalog], food_add=[{"ok": True, "result": written}])
+    tg = FakeTelegram()
+    llm = ScriptedLlm(
+        model="scripted",
+        script=[call("propose_food", date="2026-09-21", meal="Almoço", items=items), say("ok")],
+        requests=[],
+    )
+    monkeypatch.setattr(handler_module, "SheetClient", lambda *args: sheet)
+    monkeypatch.setattr(handler_module, "TelegramClient", lambda *args: tg)
+    monkeypatch.setattr(handler_module, "build_model", lambda settings: llm)
+    monkeypatch.setattr(webhook, "_FOOD_DRAFTS", miniapp.FoodDraftStore())
+    monkeypatch.setattr(webhook, "_DEDUPLICATOR", handler_module.UpdateDeduplicator())
+    settings = SETTINGS.model_copy(update={"MEDIA_ENABLED": False, "MINIAPP_URL": "https://x.test/app/"})
+
+    await webhook.handle_update(
+        settings, {"update_id": 901, "message": {"chat": {"id": 42}, "text": "estima meu almoço"}}
+    )
+    keyboard = tg.options[-1]["reply_markup"]["inline_keyboard"]
+    data = keyboard[0][0 if verb == "dok" else 1]["callback_data"]
+    assert data.startswith(f"{verb}:")
+    await webhook.handle_update(
+        settings,
+        {
+            "update_id": 902,
+            "callback_query": {
+                "id": "c",
+                "data": data,
+                "message": {"message_id": 1, "chat": {"id": 42}},
+            },
+        },
+    )
+
+    assert tg.sent[-1][1] != miniapp.DRAFT_EXPIRED
+    if verb == "dok":
+        assert [op for op, _ in sheet.calls] == ["food.add"]
+    else:
+        assert tg.options[-1]["reply_markup"]["keyboard"][0][0]["text"] == miniapp.DRAFT_ADJUST_BUTTON
+
+
+def test_the_webhook_stores_are_shared_by_the_whole_process():
+    assert isinstance(webhook._FOOD_DRAFTS, miniapp.FoodDraftStore)
+    assert isinstance(webhook._PENDING, miniapp.PendingStore)

@@ -12,7 +12,6 @@ import asyncio
 import datetime as dt
 import hashlib
 import json
-import re
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -325,7 +324,9 @@ class Journal:
         return [result["writeId"] for _, result in self.writes if result.get("writeId")]
 
 
-def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
+def build_tools(sheet: SheetApi, journal: Journal, today: dt.date | None = None) -> list[FunctionType]:
+    """`today` is the person's local date: a food draft dated after it is refused."""
+
     async def get_catalog() -> dict[str, Any]:
         """Lê o catálogo da planilha: today; phase (objetivo, meta com alvos e ficha em vigor hoje,
         e a última recomendação); sessions, nextSession (próxima da rotação) e lastWorkout;
@@ -420,7 +421,7 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
             items: itens estimados da refeição.
         """
         plain_items = _plain(items)
-        errors = _validate_food_draft(date, meal, plain_items)
+        errors = _validate_food_draft(date, meal, plain_items, today or dt.date.today())
         if errors:
             return {"ok": False, "errors": errors}
         draft = {"date": date.strip(), "meal": meal.strip(), "items": plain_items}
@@ -524,50 +525,13 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
     ]
 
 
-_DRAFT_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+def _validate_food_draft(date: str, meal: str, items: Any, today: dt.date) -> list[dict[str, str]]:
+    # Imported here: miniapp imports this module (directly and through bot).
+    from agent.miniapp import food_draft_errors
 
-
-def _validate_food_draft(date: str, meal: str, items: Any) -> list[dict[str, str]]:
-    errors: list[dict[str, str]] = []
-    clean_date = date.strip() if isinstance(date, str) else ""
-    if not _DRAFT_DATE_RE.fullmatch(clean_date):
-        errors.append({"path": "date", "message": "use yyyy-MM-dd"})
-    else:
-        try:
-            dt.date.fromisoformat(clean_date)
-        except ValueError:
-            errors.append({"path": "date", "message": "data inválida"})
-    clean_meal = meal.strip() if isinstance(meal, str) else ""
-    if not clean_meal or len(clean_meal) > 60:
-        errors.append({"path": "meal", "message": "informe a refeição (1 a 60 caracteres)"})
-    if not isinstance(items, list) or not (1 <= len(items) <= 20):
-        errors.append({"path": "items", "message": "informe de 1 a 20 itens na refeição"})
-        return errors
-    for idx, item in enumerate(items):
-        if not isinstance(item, dict):
-            errors.append({"path": f"items[{idx}]", "message": "item inválido"})
-            continue
-        has_food = isinstance(item.get("food"), str) and bool(item["food"].strip())
-        has_fav = isinstance(item.get("favorite"), str) and bool(item["favorite"].strip())
-        has_desc = isinstance(item.get("description"), str) and bool(item["description"].strip())
-        if has_food + has_fav + has_desc != 1:
-            errors.append(
-                {"path": f"items[{idx}]", "message": "use exatamente um de: food, favorite ou description"}
-            )
-            continue
-        if has_food:
-            qty = item.get("qty")
-            if isinstance(qty, bool) or not isinstance(qty, int | float) or qty <= 0:
-                errors.append({"path": f"items[{idx}].qty", "message": "quantidade do alimento > 0"})
-        elif has_fav and "portions" in item:
-            portions = item.get("portions")
-            if isinstance(portions, bool) or not isinstance(portions, int | float) or portions <= 0:
-                errors.append({"path": f"items[{idx}].portions", "message": "porções > 0"})
-        elif has_desc and "qty" in item:
-            qty = item.get("qty")
-            if isinstance(qty, bool) or not isinstance(qty, int | float) or qty <= 0:
-                errors.append({"path": f"items[{idx}].qty", "message": "quantidade > 0"})
-    return errors
+    clean_date = date.strip() if isinstance(date, str) else date
+    clean_meal = meal.strip() if isinstance(meal, str) else meal
+    return food_draft_errors(clean_date, clean_meal, items, today)
 
 
 def _plain(value: Any) -> Any:

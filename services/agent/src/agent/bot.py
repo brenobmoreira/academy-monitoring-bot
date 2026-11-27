@@ -267,7 +267,7 @@ class Bot:
             model=self._model,
             # A callable instruction is not treated as a template, so literal braces are safe.
             instruction=lambda _ctx: instruction(now, context),
-            tools=build_tools(self._sheet, journal),
+            tools=build_tools(self._sheet, journal, today=now.date()),
             on_model_error_callback=on_model_error,
         )
         sessions = InMemorySessionService()
@@ -327,8 +327,10 @@ class Bot:
             # Replaces any note that says nothing else was saved: that is not known.
             log.warning("write outcome uncertain: %s", ", ".join(safe_code(c) for c in journal.error_codes))
             note = WRITE_UNCERTAIN
-        draft = journal.food_draft if (journal.food_draft is not None and not journal.writes) else None
-        lines = [food_draft_summary(draft)] if draft is not None else confirmation(journal.writes)
+        # With writes in the same message the draft goes in a message of its own (see the handler).
+        draft = journal.food_draft
+        alone = draft is not None and not journal.writes
+        lines = [food_draft_summary(draft)] if alone else confirmation(journal.writes)
         return Answer(
             compose(lines, final, note),
             write_ids=tuple(journal.write_ids),

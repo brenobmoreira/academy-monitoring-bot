@@ -250,6 +250,12 @@
     return null;
   }
 
+  /** How many cancel functions `el` still holds (for tests: finished work must not pile up). */
+  function pendingCleanups(el) {
+    var rec = elementRecords && el ? elementRecords.get(el) : null;
+    return rec ? rec.cleanups.size : 0;
+  }
+
   function trackAnim(el, anim) {
     if (!anim) return null;
     var rec = recordFor(el);
@@ -651,13 +657,11 @@
 
     var win = winOf(el, options);
     var timerId = setTimer(win, function () {
-      if (rec) {
-        rec.timers.delete(timerId);
-        if (rec.lookAbort === cancelLook) rec.lookAbort = null;
-      }
+      if (rec) rec.timers.delete(timerId);
       timerId = null;
       pose.style.transition = 'transform 0.3s ease-out';
       pose.style.transform = 'rotate(' + tiltDeg + 'deg)';
+      cancelLook(); // done: nothing left to cancel, so the record drops it
     }, leadMs);
 
     if (rec) rec.timers.add(timerId);
@@ -1473,6 +1477,7 @@
         var idx = timersList.indexOf(id);
         if (idx >= 0) timersList.splice(idx, 1);
         if (!cancelled) fn();
+        if (!timersList.length) cancelSeq(); // the last beat: release the cleanup
       }, ms);
       timersList.push(id);
       if (rec) rec.timers.add(id);
@@ -1727,6 +1732,7 @@
     glance: glance,
     anticipateLook: anticipateLook,
     playSequence: playSequence,
+    pendingCleanups: pendingCleanups,
 
     // Micro-life (§1.3)
     blink: blink,

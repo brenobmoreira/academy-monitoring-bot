@@ -439,6 +439,20 @@ def parse_payload(raw: str, today: date) -> tuple[Payload | None, list[str]]:
         return None, lines
 
 
+def food_draft_errors(date_key: Any, meal: Any, items: Any, today: date) -> list[dict[str, str]]:
+    """The errors a food form with these values would get ([] when it would be accepted), so a
+    draft is refused for what confirming it would be refused for."""
+    try:
+        FoodArgs.model_validate({"date": date_key, "meal": meal, "items": items}, context={"today": today})
+    except ValidationError as err:
+        return [
+            {"path": _path(e["loc"]), "message": _message(e)}
+            for e in err.errors()
+            if not (e["loc"] and e["loc"][-1] == "int")  # `int | float` reports the same value twice
+        ]
+    return []
+
+
 def request_id(chat_id: int | None, submission: str, op: str) -> str | None:
     """The sheet's idempotency key: one page draft (chat, draft id) is one write however often
     it arrives (retry tap, or a restored resend after a bot restart). The args are not part of
@@ -541,6 +555,7 @@ class PendingStore:
 
 DRAFT_EXPIRED = "Esse rascunho expirou ou já foi usado. Envie a foto ou mensagem de novo."
 DRAFT_CANCELLED = "Ok, descartei esse rascunho. Nada foi gravado."
+DRAFT_KEPT = "O rascunho continua aqui: ajuste no Mini App ou cancele."
 DRAFT_ADJUST_BUTTON = "🍽️ Ajustar refeição"
 FOOD_DRAFT_MAX = 64
 FOOD_DRAFT_TTL_S = 30 * 60.0
@@ -564,13 +579,24 @@ class FoodDraftStore:
     def put(self, chat_id: int, draft: dict[str, Any]) -> str:
         with self._lock:
             self._purge()
-            key = secrets.token_hex(8)
+            # 32 hex characters: the shape of a page's submission id, which it becomes when the
+            # draft is adjusted in the Mini App (one request id for either way of confirming).
+            key = secrets.token_hex(16)
             while key in self._items:
-                key = secrets.token_hex(8)
-            self._items[key] = (self._clock() + self._ttl, chat_id, copy.deepcopy(draft))
-            while len(self._items) > self._max:
-                self._items.popitem(last=False)
+                key = secrets.token_hex(16)
+            self._store(key, chat_id, draft)
             return key
+
+    def restore(self, key: str, chat_id: int, draft: dict[str, Any]) -> None:
+        """Puts a claimed draft back under its key, for a write the sheet refused."""
+        with self._lock:
+            self._purge()
+            self._store(key, chat_id, draft)
+
+    def _store(self, key: str, chat_id: int, draft: dict[str, Any]) -> None:
+        self._items[key] = (self._clock() + self._ttl, chat_id, copy.deepcopy(draft))
+        while len(self._items) > self._max:
+            self._items.popitem(last=False)
 
     def peek(self, key: str, chat_id: int | None) -> dict[str, Any] | None:
         with self._lock:
@@ -846,9 +872,12 @@ def _daily_intake(result: dict[str, Any]) -> dict[str, int | float]:
             val = _finite_num(totals.get(src), positive=False)
             if val is not None:
                 out[dst] = val
-    diary = result.get("todayDiary")
-    if isinstance(diary, dict):
-        water = _finite_num(diary.get("waterL"), positive=False)
+    if "todayDiary" in result:
+        # No row or no water yet is a known zero. Without "w" the page does not know the day's
+        # total and offers no incremental water (which would overwrite it).
+        diary = result["todayDiary"]
+        raw = diary.get("waterL") if isinstance(diary, dict) else None
+        water = 0 if raw is None else _finite_num(raw, positive=False)
         if water is not None:
             out["w"] = water
     return out
@@ -907,7 +936,8 @@ def catalog_v1(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def encode_catalog(catalog: dict[str, Any]) -> str:
-    compact = json.dumps(catalog, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    compact = json.dumps(catalog, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    compact = compact.encode("utf-8")
     deflate = zlib.compressobj(9, zlib.DEFLATED, -15)
     packed = deflate.compress(compact) + deflate.flush()
     return base64.urlsafe_b64encode(packed).rstrip(b"=").decode("ascii")
@@ -1002,8 +1032,8 @@ def keyboard_markup(
     return markup, dropped
 
 
-def encode_prefill_food(draft: dict[str, Any]) -> dict[str, Any]:
-    """Compact `df` ({d, m, i}) payload shipped inside a Mini App draft URL fragment."""
+def encode_prefill_food(draft: dict[str, Any], draft_id: str | None = None) -> dict[str, Any]:
+    """Compact `df` ({id, d, m, i}) payload shipped inside a Mini App draft URL fragment."""
     items_out: list[dict[str, Any]] = []
     for item in (draft.get("items") or [])[:20]:
         if not isinstance(item, dict):
@@ -1027,7 +1057,9 @@ def encode_prefill_food(draft: dict[str, Any]) -> dict[str, Any]:
             if item.get("unit"):
                 entry["u"] = item["unit"]
             items_out.append(entry)
-    return {"d": draft["date"], "m": draft["meal"], "i": items_out}
+    out: dict[str, Any] = {"id": draft_id} if draft_id else {}
+    out.update({"d": draft["date"], "m": draft["meal"], "i": items_out})
+    return out
 
 
 def food_draft_markup(
@@ -1036,6 +1068,7 @@ def food_draft_markup(
     draft: dict[str, Any],
     max_len: int = MINIAPP_URL_MAX,
     voice_keys: dict[str, Any] | None = None,
+    draft_id: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Reply keyboard with a one-time Food Mini App button pre-filled with `df` (`draft`)."""
     catalog = catalog_v1(catalog_result)
@@ -1047,7 +1080,7 @@ def food_draft_markup(
         **common,
         "view": "food",
         **{k: v for k, v in catalog.items() if k in food_keys},
-        "df": encode_prefill_food(draft),
+        "df": encode_prefill_food(draft, draft_id),
     }
     dropped: list[str] = []
 

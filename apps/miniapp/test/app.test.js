@@ -860,6 +860,7 @@ test('quick hydration chips accumulate water, switch MainButton when plate is em
   const storage = storageWith(foodDraft(today()));
   const customCatalog = Object.assign({}, SAMPLE, {
     goal: { k: 2400, p: 160, c: 260, g: 70 },
+    today: today(),
     day: { k: 920, p: 72, c: 95, g: 26, w: 1.5 },
   });
   const p = await boot({ loadAvatar: true, view: 'food', catalog: customCatalog, storage });

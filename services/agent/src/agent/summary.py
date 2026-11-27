@@ -240,8 +240,9 @@ def _totals(t: dict[str, Any]) -> str:
 # ---- values --------------------------------------------------------------------------------
 
 
-def food_draft_summary(draft: dict[str, Any]) -> str:
-    """Telegram HTML summary of a non-committed `propose_food` draft."""
+def food_draft_summary(draft: dict[str, Any], *, after_write: bool = False) -> str:
+    """Telegram HTML summary of a non-committed `propose_food` draft. `after_write`: it follows
+    the confirmation of something the same message did write."""
     header = f"Rascunho — {_day(draft['date'])} · {escape(draft['meal'])}:"
     lines = [f"🍽️ {bold(header)}"]
     for item in draft.get("items") or []:
@@ -258,7 +259,13 @@ def food_draft_summary(draft: dict[str, Any]) -> str:
             unit = f" {escape(item['unit'])}" if item.get("unit") else ""
             amount = f" {_value(item['qty'])}{unit}" if item.get("qty") is not None else ""
             lines.append(f"• {escape(item.get('description', ''))}{amount} (sem cálculo)")
-    lines.append("Nada foi gravado ainda. Confirme para registrar ou ajuste no Mini App.")
+    if after_write:
+        lines.append(
+            "Este rascunho ainda não foi gravado. Confira a mensagem acima para não registrar em dobro, "
+            "depois confirme ou ajuste no Mini App."
+        )
+    else:
+        lines.append("Nada foi gravado ainda. Confirme para registrar ou ajuste no Mini App.")
     return "\n".join(lines)
 
 

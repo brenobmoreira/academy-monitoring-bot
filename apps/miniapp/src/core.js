@@ -508,17 +508,29 @@
       }
     });
     if (!items.length) return null;
-    return {
+    var out = {
       date: isDateKey(raw.d) ? raw.d : '',
       meal: str(raw.m).slice(0, LIMITS.MEAL_MAX),
       items: items,
     };
+    // The chat draft's id: sent as this form's submission id, so both write under one request id.
+    if (isSubmissionId(raw.id)) out.id = raw.id;
+    return out;
   }
 
   /* meal arithmetic: Foods.key_, Units.convert and Foods.macros ------------------------------- */
 
   function foodKey(name) {
     return String(name === null || name === undefined ? '' : name).normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  /** The catalog's spelling of `name` (the sheet ignores case and extra spaces), else `name`. */
+  function canonicalFood(name, catalog) {
+    var foods = catalog && catalog.foods;
+    if (!foods || foods.indexOf(name) >= 0) return name;
+    var key = foodKey(name);
+    var hit = foods.filter(function (n) { return foodKey(n) === key; })[0];
+    return hit === undefined ? name : hit;
   }
 
   var UNIT_ALIASES = {
@@ -899,7 +911,7 @@
       return { value: null, errors: [{ path: '', message: 'item sem tipo' }] };
     }
     if (item.kind === 'food') {
-      var name = typeof item.food === 'string' ? item.food.trim() : '';
+      var name = typeof item.food === 'string' ? canonicalFood(item.food.trim(), catalog) : '';
       if (!name) e.push({ path: 'food', message: 'alimento: obrigatório' });
       else if (!catalog.freeFoods && catalog.foods && catalog.foods.indexOf(name) < 0) e.push({ path: 'food', message: 'alimento fora do catálogo; use "sem cálculo"' });
       else if (name.length > LIMITS.DESCRIPTION_MAX) e.push({ path: 'food', message: 'alimento: nome longo demais' });
@@ -1186,9 +1198,11 @@
         set(sKey, list);
         return list;
       },
+      /** t: one type, a list of types, or nothing for all. */
       sent: function (t) {
         var list = get(sKey);
-        return (Array.isArray(list) ? list : []).filter(function (e) { return e && (!t || e.t === t); });
+        var want = t ? [].concat(t) : null;
+        return (Array.isArray(list) ? list : []).filter(function (e) { return e && (!want || want.indexOf(e.t) >= 0); });
       },
     };
   }
@@ -1963,15 +1977,15 @@
     }
     var label = SWAP_CRITERION_LABELS[criterion].toLowerCase();
     if (!(base[criterion] > 0)) {
-      return { ok: false, error: 'O alimento atual não tem ' + label + ' para comparar.' };
+      return { ok: false, reason: 'no_base_value', error: 'O alimento atual não tem ' + label + ' para comparar.' };
     }
     var perUnit = alt[criterion] / alt.baseQty;
     if (!(perUnit > 0)) {
-      return { ok: false, error: targetName + ' não tem ' + label + ': troca impossível por esse critério.' };
+      return { ok: false, reason: 'no_target_value', error: targetName + ' não tem ' + label + ': troca impossível por esse critério.' };
     }
     var qty = round(base[criterion] / perUnit, 1);
     if (!Number.isFinite(qty) || qty < LIMITS.QTY_MIN || qty > LIMITS.QTY_MAX) {
-      return { ok: false, error: 'Quantidade equivalente fora do limite permitido.' };
+      return { ok: false, reason: 'out_of_range', error: 'Quantidade equivalente fora do limite permitido.' };
     }
     var qtyText = formatBR(qty);
     var altNutrition = foodNutrition({ kind: 'food', food: targetName, qty: qtyText, unit: alt.baseUnit }, catalog);
@@ -2049,6 +2063,7 @@
     decodeCatalog: decodeCatalog,
     normalizeCatalog: normalizeCatalog,
     foodKey: foodKey,
+    canonicalFood: canonicalFood,
     normalizeUnit: normalizeUnit,
     foodNutrition: foodNutrition,
     mealNutrition: mealNutrition,

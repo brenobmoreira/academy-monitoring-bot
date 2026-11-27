@@ -1281,8 +1281,24 @@
     return !!(S.today && S.food.date === S.today);
   }
 
+  /** The water already logged on `date`, or null when the page does not know it: the link only
+   *  carries today's, and it can be trimmed. Water is sent as the day's total, so adding to an
+   *  unknown one would overwrite what is in the sheet. */
+  function loggedWater(date) {
+    var c = S.catalog;
+    if (!S.today || date !== S.today || !c || !c.day || (c.today && c.today !== S.today)) return null;
+    return c.day.water;
+  }
+
+  function waterUnknownText() {
+    return isFoodToday()
+      ? 'Água rápida indisponível: o total de hoje não veio no link. Mande /app de novo ou diga o total no chat.'
+      : 'Água rápida indisponível para outro dia: não sei o total já registrado. Diga o total no chat.';
+  }
+
   function baseWaterL() {
-    return isFoodToday() && S.catalog && S.catalog.day && S.catalog.day.water !== null ? S.catalog.day.water : 0;
+    var logged = loggedWater(S.food.date);
+    return logged === null ? 0 : logged;
   }
 
   function currentWaterId() {
@@ -1291,10 +1307,12 @@
   }
 
   function buildWaterState() {
+    if (loggedWater(S.food.date) === null) return { args: null, errors: [{ path: 'waterL', message: waterUnknownText() }] };
     return C.buildWater({ date: S.food.date, baseWaterL: baseWaterL(), addWaterL: S.food.waterAdd }, { today: S.today });
   }
 
   function stepWater(deltaL) {
+    if (loggedWater(S.food.date) === null) return;
     wake();
     cancelReview();
     var base = baseWaterL();
@@ -1365,11 +1383,12 @@
     }));
 
     var waterPct = Math.round(bal.ratio.water * 100);
-    var waterActions = [
+    var waterKnown = loggedWater(S.food.date) !== null;
+    var waterActions = waterKnown ? [
       h('button', { type: 'button', class: 'water-chip', 'data-water-add': '0.25', text: '+250 ml', onclick: function () { stepWater(C.WATER_LIMITS.STEP_SM); } }),
       h('button', { type: 'button', class: 'water-chip', 'data-water-add': '0.5', text: '+500 ml', onclick: function () { stepWater(C.WATER_LIMITS.STEP_LG); } }),
-    ];
-    if (S.food.waterAdd > 0) {
+    ] : [];
+    if (waterKnown && S.food.waterAdd > 0) {
       waterActions.push(
         h('button', { type: 'button', class: 'water-chip water-undo', 'aria-label': 'Tirar 250 ml', text: '−250 ml', onclick: function () { stepWater(-C.WATER_LIMITS.STEP_SM); } }),
         h('button', { type: 'button', class: 'water-send', id: 'water-send', text: 'Registrar água', onclick: goWaterReview })
@@ -1383,7 +1402,9 @@
           S.food.waterAdd > 0 ? ' ' : null,
           S.food.waterAdd > 0 ? h('span', { class: 'water-delta', text: C.formatWaterDelta(S.food.waterAdd) }) : null)),
       h('div', { class: 'water-track' }, h('i', { class: 'water-fill' + (bal.over.water ? ' is-done' : ''), style: 'width:' + waterPct + '%' })),
-      h('div', { class: 'water-actions' }, waterActions));
+      waterKnown
+        ? h('div', { class: 'water-actions' }, waterActions)
+        : h('p', { class: 'hint warn water-note', text: waterUnknownText() }));
 
     box.replaceChildren(
       h('div', { class: 'balance-head' },
@@ -1437,7 +1458,7 @@
       return plateItem(it, i, errs.filter(function (e) { return e.item === i; }));
     })) : h('div', { class: 'empty-plate' }, mascot('idle', 'Prato vazio', 'Busque um alimento, toque numa favorita ou descreva sem cálculo.', 'base'));
 
-    var reset = h('div', { class: 'foot-actions' }, restoreButton('food'), f.items.length ? h('button', {
+    var reset = h('div', { class: 'foot-actions' }, restoreButton(['food', 'water']), f.items.length ? h('button', {
       type: 'button', class: 'btn-text', text: 'Limpar prato',
       onclick: function () { confirmDialog('Tirar todos os itens do prato?', function () { f.items = []; f.id = C.newSubmissionId(); S.showErrors = false; renderFood(); changed(true); }); },
     }) : null);
@@ -1785,7 +1806,7 @@
         'aria-disabled': 'true',
       },
         h('span', { text: fallbackName }),
-        h('span', { class: 'tag', text: 'sem ' + C.SWAP_CRITERION_LABELS[criterion].toLowerCase() })));
+        h('span', { class: 'tag', text: res && res.reason === 'out_of_range' ? 'fora do limite' : 'sem ' + C.SWAP_CRITERION_LABELS[criterion].toLowerCase() })));
     }
 
     function renderResults() {
@@ -1830,7 +1851,16 @@
     if (bad) errEl.setAttribute('role', 'alert');
     errEl.hidden = !bad;
     var right = h('div', { class: 'plate-right' });
-    if (itemQty(it)) right.appendChild(h('span', { class: 'plate-qty', text: itemQty(it) }));
+    var meta = h('span', { class: 'plate-meta', text: itemMeta(it) });
+    if (it.kind === 'food') {
+      // Edited in place (no re-render, the keyboard stays up): macros follow each keystroke.
+      var qtyInput = h('input', {
+        class: 'plate-qty-input', type: 'text', inputmode: 'decimal', autocomplete: 'off', enterkeyhint: 'done',
+        'aria-label': 'Quantidade de ' + itemName(it), value: it.qty,
+        oninput: function () { it.qty = qtyInput.value; meta.textContent = itemMeta(it); changed(false); },
+      });
+      right.appendChild(h('label', { class: 'plate-qty-edit' }, qtyInput, it.unit ? h('span', { text: it.unit }) : null));
+    } else if (itemQty(it)) right.appendChild(h('span', { class: 'plate-qty', text: itemQty(it) }));
     if (it.kind === 'favorite') {
       var out = h('output', { text: C.formatBR(C.parseDecimal(it.portions) || 1) });
       var stepP = function (sign) {
@@ -1858,7 +1888,7 @@
     }));
     var li = h('li', { class: 'plate-item k-' + it.kind + (bad ? ' bad' : '') },
       h('span', { class: 'plate-bar', 'aria-hidden': 'true' }),
-      h('span', {}, h('span', { class: 'plate-name', text: itemName(it) }), h('span', { class: 'plate-meta', text: itemMeta(it) }), errEl),
+      h('span', {}, h('span', { class: 'plate-name', text: itemName(it) }), meta, errEl),
       right);
     li._error = errEl;
     return li;
@@ -2142,6 +2172,11 @@
     var offered = S.dates.map(function (d) { return d.key; });
     var dateOk = offered.indexOf(src.date) >= 0;
     var date = dateOk ? src.date : S.today;
+    if (e.t === 'water' && loggedWater(date) === null) {
+      haptic('error');
+      say('alert', 'Não dá para restaurar essa água: não sei o total já registrado nesse dia. Diga o total no chat.');
+      return;
+    }
     var apply = function () {
       if (e.t === 'workout') {
         if (S.catalog.sessions.indexOf(src.session) < 0) { say('alert', 'A sessão ' + src.session + ' não está mais na ficha.'); return; }
@@ -2169,7 +2204,7 @@
     };
     var busy = e.t === 'workout'
       ? (S.catalog.sessions.indexOf(src.session) >= 0 && !C.workoutFormEmpty(S.workout.forms[formKey(date, src.session)]))
-      : !C.foodFormEmpty({ meal: S.food.meal, items: S.food.items });
+      : e.t === 'water' ? S.food.waterAdd > 0 : !C.foodFormEmpty({ meal: S.food.meal, items: S.food.items });
     if (busy) confirmDialog('Substituir o que está preenchido agora pelo envio restaurado?', apply); else apply();
   }
 
@@ -2856,7 +2891,18 @@
     if (inTelegram) { var e = new Error('link sem catálogo'); e.code = 'no_catalog'; return Promise.reject(e); }
     return fetch('dev/sample-catalog.json', { cache: 'no-store' })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(C.normalizeCatalog);
+      .then(function (raw) {
+        var sample = C.normalizeCatalog(raw);
+        sample.today = ''; // the sample's fixed date is not a stale link
+        return sample;
+      });
+  }
+
+  /** Shows and sends the catalog's spelling of each food (a chat draft may differ in case). */
+  function canonicalizeFoodItems() {
+    S.food.items.forEach(function (it) {
+      if (it.kind === 'food') it.food = C.canonicalFood(it.food, S.catalog);
+    });
   }
 
   function init() {
@@ -2930,7 +2976,7 @@
         var validDate = S.dates.some(function (d) { return d.key === pre.date; });
         S.view = 'food';
         S.food = {
-          id: C.newSubmissionId(),
+          id: C.isSubmissionId(pre.id) ? pre.id : C.newSubmissionId(),
           date: validDate ? pre.date : S.today,
           meal: pre.meal || '',
           items: pre.items.slice(),
@@ -2945,6 +2991,7 @@
         S.food.meal = foodDraft.meal || '';
         S.food.items = foodDraft.items;
       }
+      canonicalizeFoodItems();
       var draft = !!(latest || foodDraft);
       var first = cards()[0];
       if (first && !cards().some(function (c) { return c.open; })) first.open = true;
@@ -2960,6 +3007,7 @@
         });
         Promise.race([C.loadFoodTable(catalog), timeout]).then(function (loaded) {
           S.catalog = loaded;
+          canonicalizeFoodItems();
           if (S.view !== 'food' || S.screen !== 'form' || isVoiceActive()) return;
           var active = document.activeElement;
           var label = active && active.getAttribute('aria-label');

@@ -556,6 +556,20 @@ button { cursor: pointer; border: 0; background: none; padding: 0; touch-action:
 .plate-error { display: block; margin-top: 3px; font-size: 12.5px; }
 .plate-right { display: flex; align-items: center; gap: 2px; }
 .plate-qty { padding: 0 4px; font: 600 15px var(--font-num); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.plate-qty-edit { display: flex; align-items: center; gap: 4px; padding: 0 2px; font: 600 14px var(--font-num); }
+.plate-qty-input {
+  width: 68px;
+  height: 44px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--fill);
+  color: inherit;
+  font: 600 16px var(--font-num);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.plate-item.bad .plate-qty-input { box-shadow: inset 0 0 0 2px var(--alert); }
 .mini-step { display: flex; align-items: center; gap: 2px; background: var(--fill); border-radius: 12px; padding: 2px; }
 .mini-step button { width: 44px; height: 44px; border-radius: 10px; color: var(--accent-text); font-size: 20px; font-weight: 600; }
 .mini-step output { min-width: 34px; text-align: center; font: 700 15px var(--font-num); font-variant-numeric: tabular-nums; }

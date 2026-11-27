@@ -65,6 +65,8 @@ class Reply:
     # The outcome of the write this update attempted (None: it attempted none). `uncertain` means
     # the write may have landed: no retry is offered and the update must not run again.
     write_outcome: WriteOutcome | None = None
+    # A second message sent after this one, with its own buttons (a draft alongside a write).
+    followup: Reply | None = None
 
 
 def _utc_now() -> datetime:

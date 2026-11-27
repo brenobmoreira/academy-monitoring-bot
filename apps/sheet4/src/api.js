@@ -658,9 +658,12 @@ const SheetApi = {
     }
     const todayRow = lap('diary', () => (SheetApi.has_('diary') ? Days.get(today) : null));
     let todayDiary = null;
+    let todayTotals = null;
     if (todayRow) {
       todayDiary = SheetApi.compact_(SheetApi.pick_(todayRow, Object.keys(Diary.FIELDS)));
       if (!Object.keys(todayDiary).length) todayDiary = null;
+      const t = SheetApi.compact_(SheetApi.pick_(todayRow, SheetApi.TOTAL_KEYS));
+      if (Object.keys(t).length) todayTotals = t;
     }
     const foodRows = lap('foodsRead', () => (SheetApi.has_('foods') ? Foods.all() : []));
     const result = {
@@ -675,6 +678,7 @@ const SheetApi = {
       nextSession: next,
       lastWorkout,
       todayDiary,
+      todayTotals,
       progressionSuggestions: lap('suggestions', () => (SheetApi.has_('plans') ? Progression.suggestions(today) : [])),
       recentGroups: lap('recentGroups', () => SheetApi.recentGroups_(all, today)),
       exercises: lap('exercises', () => Exercises.known(today).map((e) => ({ name: e.name, group: e.group }))),

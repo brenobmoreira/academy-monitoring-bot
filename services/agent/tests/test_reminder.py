@@ -83,7 +83,7 @@ async def test_daily_sends_nothing_when_everything_is_there():
     assert (counts, sent) == ((0, 0), [])
 
 
-@pytest.mark.parametrize("kind", ["daily", "weekly"])
+@pytest.mark.parametrize("kind", ["daily", "weekly", "nudge"])
 async def test_a_sheet_failure_sends_nothing(kind, caplog):
     counts, sent, _ = await remind(kind, day_get=[DOWN], week_get=[DOWN])
     assert (counts, sent) == ((0, 0), [])
@@ -361,3 +361,150 @@ async def test_a_delivery_that_fails_outside_the_preparation_is_a_500_logged_by_
     assert await reminder.process("rem", {"kind": "daily"}) == (reminder.FAILED, 500)
     assert [r.getMessage() for r in caplog.records] == ["daily reminder failed: RuntimeError"]
     assert TEXT_SENTINEL not in caplog.text and caplog.records[0].exc_info is None
+
+
+# ---- proactive nudge -----------------------------------------------------------------------
+
+
+def nudge_catalog(**over):
+    base = {
+        "client": {"name": "Luan Filho"},
+        "nextSession": "Superior A",
+        "plan": [
+            {
+                "session": "Superior A",
+                "exercise": "Supino reto",
+                "lastWork": {"text": "80 kg × 8 (RIR 1) · 80 kg × 7"},
+            }
+        ],
+        "todayDiary": {"waterL": 0.5},
+    }
+    base.update(over)
+    return {"ok": True, "result": base}
+
+
+async def test_nudge_includes_next_workout_water_week_missing_and_escapes_html():
+    cat = nudge_catalog(
+        client={"name": "Luan <Pro> & Cia"},
+        nextSession="Push <A>",
+        plan=[{"session": "Push <A>", "exercise": "Supino & Barra", "lastWork": {"text": "80×8 <PR>"}}],
+    )
+    wk = {"ok": True, "result": {"sessions": 2, "sessionsGoal": 4, "progressions": 3}}
+    day_payload = {
+        "ok": True,
+        "result": {
+            "date": TODAY.isoformat(),
+            "diary": {"weightKg": 82.4, "waterL": 1.25},
+            "workout": [],
+        },
+    }
+    counts, sent, calls = await remind(
+        "nudge",
+        day_get=[day_payload],
+        catalog=[cat],
+        week_get=[wk],
+    )
+    assert calls == [
+        ("day.get", {"date": "2026-09-24"}),
+        ("catalog", {}),
+        ("week.get", {"date": "2026-09-24"}),
+    ]
+    assert counts == (1, 1)
+    text, html = sent[0][1], sent[0][2]
+    assert html is True
+    assert "Luan" in text and "&lt;Pro&gt;" not in text  # only first token
+    assert "<b>Push &lt;A&gt;</b>" in text
+    assert "Supino &amp; Barra (80×8 &lt;PR&gt;)" in text
+    assert "1,25 L de 2,5 L (faltam 1,25 L)" in text
+    assert "2 de 4 treinos concluídos (3 progressões)" in text
+    assert "sono, passos" in text
+    assert "/app" in text
+
+    # Also escapes `<>&` inside first token of client name
+    escaped_cat = nudge_catalog(client={"name": "Ana<1>&2 Silva"})
+    _, sent_escaped, _ = await remind("nudge", day_get=[day({})], catalog=[escaped_cat], week_get=[wk])
+    assert "Ana&lt;1&gt;&amp;2" in sent_escaped[0][1]
+
+
+def test_nudge_text_varies_deterministically_by_date():
+    openings = {
+        reminder.nudge_text(date(2026, 9, 24 + d), diary={}, workout_done=False, catalog={}) for d in range(3)
+    }
+    assert len(openings) == 3
+    first_lines = [msg.splitlines()[0] for msg in openings if msg]
+    assert len(set(first_lines)) == 3
+
+
+async def test_nudge_when_workout_is_done_omits_next_session_and_silences_when_all_complete():
+    wk = {"ok": True, "result": {"sessions": 4, "sessionsGoal": 4, "progressions": 1}}
+    done_today = {
+        "ok": True,
+        "result": {
+            "date": TODAY.isoformat(),
+            "diary": {"weightKg": 82.4},
+            "workout": [{"exercise": "Supino"}],
+        },
+    }
+    _, sent, _ = await remind(
+        "nudge",
+        day_get=[done_today],
+        catalog=[nudge_catalog()],
+        week_get=[wk],
+    )
+    msg = sent[0][1]
+    assert "Treino" in msg or "treino" in msg
+    assert "Próximo treino" not in msg
+    assert "4 de 4 treinos fechados (1 progressão)!" in msg
+    assert "0,5 L de 2,5 L (faltam 2 L)" in msg
+
+    # Everything complete (workout done + water >= 2.25 + weight/sleep/steps) -> no spam with week stats
+    counts_done, sent_done, _ = await remind(
+        "nudge",
+        day_get=[
+            {
+                "ok": True,
+                "result": {
+                    "date": TODAY.isoformat(),
+                    "diary": {"weightKg": 82.4, "sleepH": 7.5, "steps": 8000, "waterL": 2.3},
+                    "workout": [{"exercise": "Supino"}],
+                },
+            }
+        ],
+        catalog=[nudge_catalog()],
+        week_get=[wk],
+    )
+    assert (counts_done, sent_done) == ((0, 0), [])
+
+
+async def test_nudge_degrades_gracefully_when_catalog_or_week_is_down():
+    counts, sent, _ = await remind(
+        "nudge",
+        day_get=[day({"steps": 9000})],
+        catalog=[DOWN],
+        week_get=[DOWN],
+    )
+    assert counts == (1, 1)
+    assert "0 L registrados até agora (meta de 2,5 L)" in sent[0][1]
+    assert "peso, sono" in sent[0][1]
+
+
+@pytest.mark.parametrize("call", [functions_framework_call, uvicorn_call])
+def test_nudge_http_endpoint_and_bad_result_log_safety(delivered, call):
+    assert call("rem", {"kind": "nudge"}) == ("sent 1", 200)
+    assert delivered[0] == ["nudge"]
+
+
+@pytest.mark.parametrize("call", [flask_call, starlette_call])
+def test_nudge_malformed_result_is_500_without_content_in_any_log(call, monkeypatch, caplog, capsys):
+    to_telegram = sheet_answering(monkeypatch, {"ok": True, "result": {"diary": [TEXT_SENTINEL]}})
+    caplog.set_level(logging.DEBUG)
+    assert call("rem", {"kind": "nudge"}) == (reminder.FAILED, 500)
+    assert to_telegram == []
+    captured = capsys.readouterr()
+    for record in caplog.records:
+        assert record.exc_info is None and record.exc_text is None
+        assert TEXT_SENTINEL not in record.getMessage() and TEXT_SENTINEL not in repr(record.args)
+    for output in (caplog.text, captured.err, captured.out):
+        assert TEXT_SENTINEL not in output and "Traceback" not in output
+    prepared = [r.getMessage() for r in caplog.records if r.name == "agent.reminder"]
+    assert len(prepared) == 1 and prepared[0].startswith("nudge reminder not prepared: ")

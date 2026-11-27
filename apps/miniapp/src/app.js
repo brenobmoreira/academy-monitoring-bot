@@ -32,7 +32,7 @@
 
   var $ = function (id) { return document.getElementById(id); };
   var els = {
-    banner: $('preview-banner'), shape: $('shape'), say: $('say'), tabs: document.querySelectorAll('.tab'),
+    banner: $('preview-banner'), shape: $('shape'), say: $('say'), restBar: $('rest-bar'), tabs: document.querySelectorAll('.tab'),
     tabBar: document.querySelector('.tabs'), dates: $('dates'), view: $('view'),
     voicePanel: $('voice-panel'), review: $('review'),
     dock: $('dock'), dockPrimary: $('dock-primary'), dockSecondary: $('dock-secondary'), dockMic: $('dock-mic'),
@@ -43,13 +43,14 @@
     catalog: null,
     view: 'workout',
     screen: 'form',
+    reviewView: '',
     today: '',
     dates: [],
     showErrors: false,
     focus: null,
     // One form per (date, session): {complete, cards}. Only the visible one is sent.
     workout: { date: '', session: '', forms: {} },
-    food: { date: '', meal: '', items: [], mode: 'food', compose: null },
+    food: { date: '', meal: '', items: [], mode: 'food', compose: null, waterAdd: 0, waterId: '' },
     sheetOpen: false,
     bodyOpen: false, // the week's muscle map on the workout form
   };
@@ -84,6 +85,9 @@
     chevron: '<path d="m6 9 6 6 6-6"/>',
     mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4M8 21h8"/>',
     star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" fill="currentColor" stroke="none"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    drop: '<path d="M12 2.7 6.3 8.4a8 8 0 1 0 11.4 0L12 2.7z"/>',
+    swap: '<path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/>',
   };
   function icon(name) {
     var span = document.createElement('span');
@@ -127,19 +131,31 @@
   }
   if (Avatar && Avatar.intro) Avatar.intro('Abrindo sua ficha'); // lands in the header on the first say()
 
+  function nowMs() {
+    return typeof window.__shapeNow === 'function' ? window.__shapeNow() : Date.now();
+  }
+
+  // Ephemeral rest timer state (never serialized into drafts or sendData payloads).
+  var rest = {
+    active: false, totalMs: 0, endAt: 0, label: '', warned10: false,
+    timer: null, lastShownSec: -1, timeEl: null, labelEl: null,
+  };
+
   function syncForm(extra) {
     if (!Avatar || !Avatar.setForm) return;
     var ctx = {
       view: S.view,
       screen: sending ? 'sent' : S.screen,
       dozing: !!(Avatar.dozing && Avatar.dozing()),
+      resting: rest.active,
       intro: !S.catalog,
     };
     if (extra) Object.keys(extra).forEach(function (k) { ctx[k] = extra[k]; });
     var nextForm = Avatar.formFor ? Avatar.formFor(ctx)
       : (ctx.dozing ? 'descanso' : (ctx.screen === 'review' || ctx.screen === 'sent') ? 'revisao'
-        : ctx.intro ? 'base' : ctx.view === 'workout' ? 'treino' : ctx.view === 'food' ? 'refeicao'
-          : ctx.view === 'water' ? 'agua' : 'base');
+        : ctx.resting ? 'descanso'
+          : ctx.intro ? 'base' : ctx.view === 'workout' ? 'treino' : ctx.view === 'food' ? 'refeicao'
+            : ctx.view === 'water' ? 'agua' : 'base');
     var currentForm = els.shape && els.shape.getAttribute ? els.shape.getAttribute('data-form') : null;
     if (MM && typeof MM.morph === 'function' && currentForm !== nextForm) {
       try { MM.morph(els.shape, nextForm); } catch (e) { Avatar.setForm(nextForm); }
@@ -167,6 +183,9 @@
   }
 
   function pulsoContext() {
+    if (S.reviewView === 'water') {
+      return { view: 'water', waterTotal: Math.round((baseWaterL() + (S.food.waterAdd || 0)) * 100) / 100 };
+    }
     var compose = S.food.compose;
     return { view: S.view, cards: S.catalog && S.workout.session ? cards() : [], cardIndex: focusedCard, plan: currentPlan(),
       items: S.food.items, compose: compose && S.food.mode === 'description'
@@ -177,11 +196,24 @@
     if (!reaction) return;
     say(reaction.mood, reaction.line);
     if (Avatar && Avatar.pulse) Avatar.pulse(reaction.pulse);
+    if (reaction.pulse === 'full') choreograph('milestone');
+    else if (reaction.pulse === 'celebrate') choreograph('proud');
+    else if (reaction.pulse === 'nod') choreograph('acknowledge');
   }
 
   function glance(target) {
     gazeTarget = target;
     if (Avatar && Avatar.glance) Avatar.glance(target);
+    if (MM && typeof MM.anticipateLook === 'function' && els.shape) {
+      try { MM.anticipateLook(els.shape, target); } catch (e) { /* ignore */ }
+    }
+  }
+
+  function choreograph(name, target, opts) {
+    if (!MM || typeof MM.playSequence !== 'function' || !els.shape) return null;
+    try {
+      return MM.playSequence(els.shape, name, Object.assign({ target: target || gazeTarget }, opts || {}));
+    } catch (e) { return null; }
   }
 
   function perch(target, opts) {
@@ -198,11 +230,11 @@
       if (gazeTarget && Avatar.glance) Avatar.glance(gazeTarget);
     }
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(function rest() {
-      if (C.pulsoDozing(C.PULSO_IDLE_MS, !S.catalog || sending || reviewTimer !== null || S.sheetOpen || isVoiceActive())) {
+    idleTimer = setTimeout(function restIdle() {
+      if (C.pulsoDozing(C.PULSO_IDLE_MS, !S.catalog || sending || reviewTimer !== null || S.sheetOpen || rest.active || isVoiceActive())) {
         if (Avatar && Avatar.setDozing) Avatar.setDozing(true);
         syncForm();
-      } else idleTimer = setTimeout(rest, C.PULSO_IDLE_MS);
+      } else idleTimer = setTimeout(restIdle, C.PULSO_IDLE_MS);
     }, C.PULSO_IDLE_MS);
   }
 
@@ -276,12 +308,147 @@
   }
   function doneSets(card) { return C.filledSets(card).filter(setDone).length; }
 
-  /** Avatar ring: explicit planned sets, otherwise exercises with a set; meal = items / 3. */
+  /* rest timer ------------------------------------------------------------------------------- */
+
+  function ensureRestBar() {
+    if (els.restBar || !els.tabBar || !els.tabBar.parentNode) return els.restBar;
+    var bar = h('div', { class: 'rest-bar', id: 'rest-bar', hidden: true });
+    bar.hidden = true;
+    els.tabBar.parentNode.insertBefore(bar, els.tabBar);
+    els.restBar = bar;
+    return bar;
+  }
+
+  function clearRestTimer() {
+    if (rest.timer !== null) {
+      clearTimeout(rest.timer);
+      rest.timer = null;
+    }
+  }
+
+  function renderRestBar() {
+    var bar = ensureRestBar();
+    if (!bar) return;
+    if (!rest.timeEl) {
+      rest.timeEl = h('b', { class: 'rest-time' });
+      rest.labelEl = h('span', { class: 'rest-label' });
+      bar.replaceChildren(
+        h('div', { class: 'rest-bar-main' }, icon('clock'), rest.timeEl, rest.labelEl),
+        h('div', { class: 'rest-actions' },
+          h('button', { type: 'button', class: 'rest-btn rest-minus', 'aria-label': 'Tirar 15 segundos de descanso', text: '−15s', onclick: function () { adjustRest(-C.REST_LIMITS.STEP); } }),
+          h('button', { type: 'button', class: 'rest-btn rest-plus', 'aria-label': 'Somar 15 segundos de descanso', text: '+15s', onclick: function () { adjustRest(C.REST_LIMITS.STEP); } }),
+          h('button', { type: 'button', class: 'rest-btn rest-skip', text: 'Pular', onclick: function () { stopRest(false); } })));
+    }
+    bar.hidden = !rest.active;
+    var sec = rest.active ? Math.max(0, Math.ceil((rest.endAt - nowMs()) / 1000)) : 0;
+    rest.timeEl.textContent = C.formatRestClock(sec);
+    rest.labelEl.textContent = rest.label || 'Descanso';
+  }
+
+  function syncRestRing(remMs) {
+    if (Avatar && Avatar.setProgress) {
+      Avatar.setProgress(C.restProgress(remMs, rest.totalMs));
+    }
+  }
+
+  function finishRest() {
+    var label = rest.label;
+    clearRestTimer();
+    rest.active = false;
+    rest.lastShownSec = -1;
+    if (els.restBar) els.restBar.hidden = true;
+    syncForm();
+    syncProgress();
+    haptic('success');
+    say('happy', 'Descanso acabou! Próxima série' + (label ? ' de ' + label : '') + '.');
+    if (Avatar && Avatar.pulse) Avatar.pulse('full');
+  }
+
+  function stopRest(silent) {
+    if (!rest.active && rest.timer === null) return;
+    clearRestTimer();
+    rest.active = false;
+    rest.lastShownSec = -1;
+    if (els.restBar) els.restBar.hidden = true;
+    syncForm();
+    syncProgress();
+    if (!silent) {
+      haptic('light');
+      updateMood();
+    }
+  }
+
+  function tickRest() {
+    if (!rest.active) return;
+    var remMs = rest.endAt - nowMs();
+    if (remMs <= 0) {
+      finishRest();
+      return;
+    }
+    var sec = Math.ceil(remMs / 1000);
+    if (sec <= 10 && !rest.warned10) {
+      rest.warned10 = true;
+      haptic('light');
+    }
+    if (sec !== rest.lastShownSec) {
+      rest.lastShownSec = sec;
+      if (rest.timeEl) rest.timeEl.textContent = C.formatRestClock(sec);
+    }
+    syncRestRing(remMs);
+    rest.timer = setTimeout(tickRest, 250);
+  }
+
+  function startRest(seconds, label) {
+    var parsed = Math.round(Number(seconds));
+    var sec = Number.isFinite(parsed)
+      ? Math.min(C.REST_LIMITS.MAX, Math.max(C.REST_LIMITS.MIN, parsed))
+      : C.REST_LIMITS.DEFAULT;
+    clearRestTimer();
+    rest.active = true;
+    rest.totalMs = sec * 1000;
+    rest.endAt = nowMs() + rest.totalMs;
+    rest.label = label || '';
+    rest.warned10 = sec <= 10;
+    rest.lastShownSec = sec;
+    wake();
+    perch(null);
+    haptic('light');
+    renderRestBar();
+    syncForm();
+    syncRestRing(rest.totalMs);
+    say('focused', 'Descanso ' + C.formatRestClock(sec) + (rest.label ? ' · ' + rest.label : ''));
+    choreograph('focus', els.restBar);
+    rest.timer = setTimeout(tickRest, 250);
+  }
+
+  function adjustRest(deltaSec) {
+    if (!rest.active) return;
+    var now = nowMs();
+    var maxMs = C.REST_LIMITS.MAX * 1000;
+    var nextRem = Math.min(maxMs, (rest.endAt - now) + deltaSec * 1000);
+    if (nextRem <= 0) {
+      finishRest();
+      return;
+    }
+    rest.endAt = now + nextRem;
+    rest.totalMs = Math.max(rest.totalMs, nextRem);
+    if (nextRem > 10000) rest.warned10 = false;
+    rest.lastShownSec = Math.ceil(nextRem / 1000);
+    if (rest.timeEl) rest.timeEl.textContent = C.formatRestClock(rest.lastShownSec);
+    haptic('select');
+    syncRestRing(nextRem);
+  }
+
+  /** Avatar ring: rest countdown while active, else explicit planned sets or exercises; meal = items / 3. */
   function syncProgress() {
     if (!S.catalog) return;
     if (S.view === 'workout' && S.workout.session) {
       observedForm = form();
       observedCards = JSON.parse(JSON.stringify(cards()));
+    }
+    if (rest.active && S.view === 'workout' && S.screen === 'form' && !isVoiceActive()) {
+      syncRestRing(Math.max(0, rest.endAt - nowMs()));
+      return;
     }
     if (!Avatar || !Avatar.setProgress) return;
     if (S.view !== 'workout') { Avatar.setProgress(Math.min(S.food.items.length / 3, 1)); return; }
@@ -319,6 +486,7 @@
     } else {
       var k = S.food.items.length;
       if (r.args) say('happy', S.food.meal + ', ' + plural(k, 'item', 'itens') + '. Pode revisar.');
+      else if (!k && S.food.waterAdd > 0) say('happy', C.formatWaterDelta(S.food.waterAdd) + ' de água pronto para revisar.');
       else if (!S.food.meal) say('idle', 'Escolha a refeição.');
       else if (!k) say('idle', S.food.meal + ': adicione o que você comeu.');
       else say('idle', S.food.meal + ' com ' + plural(k, 'item', 'itens') + '.');
@@ -384,6 +552,13 @@
       store.recordSent({ t: t, label: f.session + ', ' + C.weekday(f.date) + ' ' + C.shortDate(f.date), json: json,
         form: JSON.parse(JSON.stringify({ id: f.id, date: f.date, session: f.session, complete: f.complete, cards: f.cards })) });
       store.clearWorkout(f.date, f.session);
+    } else if (t === 'water') {
+      store.recordSent({
+        t: 'water',
+        label: 'Água ' + C.formatLiters(baseWaterL() + (S.food.waterAdd || 0)) + ', ' + C.weekday(S.food.date) + ' ' + C.shortDate(S.food.date),
+        json: json,
+        form: { id: S.food.waterId, date: S.food.date, addWaterL: S.food.waterAdd },
+      });
     } else {
       store.recordSent({ t: t, label: S.food.meal + ', ' + C.weekday(S.food.date) + ' ' + C.shortDate(S.food.date), json: json,
         form: JSON.parse(JSON.stringify({ id: S.food.id, date: S.food.date, meal: S.food.meal, items: S.food.items })) });
@@ -453,14 +628,18 @@
   function updateMainForForm() {
     if (isVoiceActive()) return;
     var label;
+    var handler = goReview;
     if (S.view === 'workout') {
       var n = filledCount();
       label = n ? 'Revisar treino (' + n + ')' : 'Revisar treino';
+    } else if (!S.food.items.length && S.food.waterAdd > 0) {
+      label = 'Revisar água (' + C.formatWaterDelta(S.food.waterAdd) + ')';
+      handler = goWaterReview;
     } else {
       var k = S.food.items.length;
       label = k ? 'Revisar refeição (' + k + ')' : 'Revisar refeição';
     }
-    setMain(label, goReview);
+    setMain(label, handler);
     setSecondary(null);
     syncVoiceDock();
   }
@@ -534,7 +713,8 @@
         type: 'button', role: 'radio', class: 'date-chip', 'aria-checked': String(d.key === current),
         onclick: function () {
           if (isVoiceActive()) return;
-          if (S.view === 'workout') S.workout.date = d.key; else S.food.date = d.key;
+          if (S.view === 'workout') S.workout.date = d.key;
+          else { S.food.date = d.key; S.food.waterAdd = 0; S.food.waterId = ''; }
           haptic('select');
           render();
           motion('settle', els.view);
@@ -550,6 +730,7 @@
       if (isVoiceActive()) return;
       var v = t.getAttribute('data-view');
       if (v === S.view || (S.catalog.view && S.catalog.view !== v)) return;
+      if (v !== 'workout') stopRest(true);
       S.view = v;
       S.showErrors = false;
       haptic('select');
@@ -666,7 +847,12 @@
 
     var sw = h('input', {
       type: 'checkbox', role: 'switch',
-      onchange: function () { form().complete = sw.checked; haptic('select'); changed(true); },
+      onchange: function () {
+        form().complete = sw.checked;
+        haptic('select');
+        changed(true);
+        if (sw.checked) choreograph('milestone');
+      },
     });
     sw.checked = w.session ? !!form().complete : false;
     var complete = h('label', { class: 'switch-row' },
@@ -702,7 +888,14 @@
     var summary = h('span', { class: 'card-summary', text: cardSummary(card) });
     var headBtn = h('button', {
       type: 'button', class: 'card-head', 'aria-expanded': String(!!card.open), 'aria-controls': bodyId,
-      onclick: function () { focusedCard = i; card.open = !card.open; replaceCard(i); perch(card.open ? cardEls[i] : null, { mode: 'card' }); scheduleSave(); },
+      onclick: function () {
+        focusedCard = i;
+        card.open = !card.open;
+        replaceCard(i);
+        perch(card.open ? cardEls[i] : null, { mode: 'card' });
+        if (card.open) choreograph('notice', cardEls[i]);
+        scheduleSave();
+      },
     },
     h('span', { class: 'dot', 'aria-hidden': 'true' }),
     h('span', {}, h('span', { class: 'card-name', text: card.name }), card.group ? h('span', { class: 'card-group', text: card.group }) : null),
@@ -746,6 +939,21 @@
           stepper({ value: s.rir, step: 1, min: C.LIMITS.RIR_MIN, max: C.LIMITS.RIR_MAX, start: hint && hint.rir !== undefined ? hint.rir : null, label: 'RIR da série ' + (j + 1), caption: 'RIR (opcional)',
             path: 'work[' + j + '].rir', say: 'RIR: quantas reps ainda sobravam.', onChange: function (v) { s.rir = v; liveCard(i); } }))));
     });
+
+    var restInfo = C.restPresetsFor(card.p);
+    body.appendChild(h('div', { class: 'rest-row' },
+      h('span', { class: 'rest-row-label' }, icon('clock'), 'Descanso'),
+      h('div', { class: 'rest-chips' }, restInfo.presets.map(function (sec) {
+        var chipLabel = C.formatRestChip(sec);
+        var cls = 'rest-chip' + (sec === restInfo.prescribed ? ' is-suggested' : '');
+        return h('button', {
+          type: 'button',
+          class: cls,
+          'aria-label': 'Descanso de ' + chipLabel + ' para ' + card.name,
+          text: chipLabel,
+          onclick: function () { startRest(sec, card.name); },
+        });
+      }))));
 
     [['warmup', 'Aquecimento'], ['feeder', 'Feeder']].forEach(function (pair) {
       var k = pair[0];
@@ -886,6 +1094,7 @@
 
   function resetWorkout() {
     var go = function () {
+      stopRest(true);
       var f = form();
       f.cards = C.planCards(S.catalog, S.workout.session);
       f.complete = false;
@@ -1068,6 +1277,153 @@
 
   /* food view -------------------------------------------------------------------------------- */
 
+  function isFoodToday() {
+    return !!(S.today && S.food.date === S.today);
+  }
+
+  /** The water already logged on `date`, or null when the page does not know it: the link only
+   *  carries today's, and it can be trimmed. Water is sent as the day's total, so adding to an
+   *  unknown one would overwrite what is in the sheet. */
+  function loggedWater(date) {
+    var c = S.catalog;
+    if (!S.today || date !== S.today || !c || !c.day || (c.today && c.today !== S.today)) return null;
+    return c.day.water;
+  }
+
+  function waterUnknownText() {
+    return isFoodToday()
+      ? 'Água rápida indisponível: o total de hoje não veio no link. Mande /app de novo ou diga o total no chat.'
+      : 'Água rápida indisponível para outro dia: não sei o total já registrado. Diga o total no chat.';
+  }
+
+  function baseWaterL() {
+    var logged = loggedWater(S.food.date);
+    return logged === null ? 0 : logged;
+  }
+
+  function currentWaterId() {
+    if (!C.isSubmissionId(S.food.waterId)) S.food.waterId = C.newSubmissionId();
+    return S.food.waterId;
+  }
+
+  function buildWaterState() {
+    if (loggedWater(S.food.date) === null) return { args: null, errors: [{ path: 'waterL', message: waterUnknownText() }] };
+    return C.buildWater({ date: S.food.date, baseWaterL: baseWaterL(), addWaterL: S.food.waterAdd }, { today: S.today });
+  }
+
+  function stepWater(deltaL) {
+    if (loggedWater(S.food.date) === null) return;
+    wake();
+    cancelReview();
+    var base = baseWaterL();
+    var maxAdd = Math.max(0, Math.round((C.WATER_LIMITS.MAX - base) * 100) / 100);
+    var cur = S.food.waterAdd || 0;
+    var next = Math.round(Math.max(0, Math.min(maxAdd, cur + deltaL)) * 100) / 100;
+    if (next === cur) return;
+    var balBefore = C.dailyBalance(S.catalog, S.food.items, { isToday: isFoodToday(), waterAddL: cur });
+    S.food.waterAdd = next;
+    if (!next) S.food.waterId = '';
+    var balAfter = C.dailyBalance(S.catalog, S.food.items, { isToday: isFoodToday(), waterAddL: next });
+    if (next > 0 && balBefore.total.water < balAfter.targets.water && balAfter.total.water >= balAfter.targets.water) {
+      haptic('success');
+      if (Avatar && Avatar.pulse) Avatar.pulse('full');
+      choreograph('proud', $('daily-balance'));
+      say('happy', 'Meta de água batida: ' + C.formatLiters(balAfter.total.water) + '!');
+    } else {
+      haptic('light');
+      say(next > 0 ? 'happy' : 'idle',
+        next > 0
+          ? C.formatWaterDelta(next) + ' de água (' + C.formatLiters(balAfter.total.water) + ' no dia).'
+          : 'Água zerada para este envio.');
+    }
+    syncDailyBalance();
+    updateMainForForm();
+  }
+
+  function renderDailyBalance(box) {
+    if (!box || !S.catalog) return;
+    var bal = C.dailyBalance(S.catalog, S.food.items, { isToday: isFoodToday(), waterAddL: S.food.waterAdd });
+    var kcalNow = Math.round(bal.total.kcal);
+    var kcalText = bal.targets.kcal ? kcalNow + ' / ' + Math.round(bal.targets.kcal) + ' kcal' : kcalNow + ' kcal';
+    var plateKcal = Math.round(bal.plate.kcal);
+    var deltaEl = bal.isToday && bal.hasLoggedFood && plateKcal > 0
+      ? h('span', { class: 'balance-delta', text: '+' + plateKcal + ' no prato' })
+      : null;
+
+    var remEl = null;
+    var kcalBar = null;
+    if (bal.targets.kcal) {
+      var diff = Math.round(bal.targets.kcal - bal.total.kcal);
+      var pct = Math.round(bal.ratio.kcal * 100);
+      var okBand = bal.total.kcal >= bal.targets.kcal * 0.9 && bal.total.kcal <= bal.targets.kcal * 1.05;
+      var overCap = bal.total.kcal > bal.targets.kcal * 1.05;
+      var cls = overCap ? ' is-over' : okBand ? ' is-ok' : '';
+      remEl = h('span', {
+        class: 'balance-rem' + cls,
+        text: diff >= 0 ? 'Faltam ' + diff + ' kcal' : '+' + Math.abs(diff) + ' kcal',
+      });
+      kcalBar = h('div', { class: 'balance-track' }, h('i', { class: 'balance-fill' + cls, style: 'width:' + pct + '%' }));
+    }
+
+    var macroSpecs = [
+      ['protein', 'Proteína', ' is-protein'],
+      ['carbs', 'Carbo', ''],
+      ['fat', 'Gordura', ''],
+    ];
+    var macrosGrid = h('div', { class: 'balance-macros' }, macroSpecs.map(function (spec) {
+      var key = spec[0];
+      var val = C.formatBR(Math.round(bal.total[key] * 10) / 10);
+      var target = bal.targets[key];
+      var valText = target ? val + ' / ' + C.formatBR(target) + ' g' : val + ' g';
+      var pct = target ? Math.round(bal.ratio[key] * 100) : 0;
+      return h('div', { class: 'macro-cell' + spec[2] + (bal.over[key] ? ' is-over' : '') },
+        h('div', { class: 'macro-head' }, h('span', { text: spec[1] })),
+        h('span', { class: 'macro-val', text: valText }),
+        target ? h('div', { class: 'balance-track' }, h('i', { class: 'balance-fill', style: 'width:' + pct + '%' })) : null);
+    }));
+
+    var waterPct = Math.round(bal.ratio.water * 100);
+    var waterKnown = loggedWater(S.food.date) !== null;
+    var waterActions = waterKnown ? [
+      h('button', { type: 'button', class: 'water-chip', 'data-water-add': '0.25', text: '+250 ml', onclick: function () { stepWater(C.WATER_LIMITS.STEP_SM); } }),
+      h('button', { type: 'button', class: 'water-chip', 'data-water-add': '0.5', text: '+500 ml', onclick: function () { stepWater(C.WATER_LIMITS.STEP_LG); } }),
+    ] : [];
+    if (waterKnown && S.food.waterAdd > 0) {
+      waterActions.push(
+        h('button', { type: 'button', class: 'water-chip water-undo', 'aria-label': 'Tirar 250 ml', text: '−250 ml', onclick: function () { stepWater(-C.WATER_LIMITS.STEP_SM); } }),
+        h('button', { type: 'button', class: 'water-send', id: 'water-send', text: 'Registrar água', onclick: goWaterReview })
+      );
+    }
+    var waterBox = h('div', { class: 'water-box' },
+      h('div', { class: 'water-head' },
+        h('span', { class: 'water-title' }, icon('drop'), 'Água'),
+        h('span', { class: 'water-val' },
+          C.formatLiters(bal.total.water) + ' / ' + C.formatLiters(bal.targets.water),
+          S.food.waterAdd > 0 ? ' ' : null,
+          S.food.waterAdd > 0 ? h('span', { class: 'water-delta', text: C.formatWaterDelta(S.food.waterAdd) }) : null)),
+      h('div', { class: 'water-track' }, h('i', { class: 'water-fill' + (bal.over.water ? ' is-done' : ''), style: 'width:' + waterPct + '%' })),
+      waterKnown
+        ? h('div', { class: 'water-actions' }, waterActions)
+        : h('p', { class: 'hint warn water-note', text: waterUnknownText() }));
+
+    box.replaceChildren(
+      h('div', { class: 'balance-head' },
+        h('div', { class: 'balance-title-wrap' },
+          h('span', { class: 'balance-title', text: bal.isToday ? 'Hoje vs. meta' : 'Nesta refeição' }),
+          h('b', { class: 'balance-kcal', text: kcalText }),
+          deltaEl),
+        remEl),
+      kcalBar,
+      macrosGrid,
+      waterBox
+    );
+  }
+
+  function syncDailyBalance() {
+    var box = $('daily-balance');
+    if (box) renderDailyBalance(box);
+  }
+
   function freshCompose() {
     return { query: '', food: '', qty: '', unit: S.catalog.units[0] || '', measure: '', description: '', dqty: '', dunit: '' };
   }
@@ -1078,6 +1434,7 @@
     var head = h('div', { class: 'view-head' },
       h('h1', { class: 'view-title', text: f.meal || 'Refeição' }),
       h('p', { class: 'view-sub', text: f.items.length ? plural(f.items.length, 'item', 'itens') + ' no prato' : 'Escolha a refeição e monte o prato.' }));
+    var balanceBox = h('section', { id: 'daily-balance', class: 'balance-card', 'aria-label': 'Saldo do dia e hidratação' });
 
     var meals = h('div', { class: 'chip-wrap', role: 'radiogroup', 'aria-label': 'Refeição' }, S.catalog.meals.map(function (m) {
       return h('button', {
@@ -1101,7 +1458,7 @@
       return plateItem(it, i, errs.filter(function (e) { return e.item === i; }));
     })) : h('div', { class: 'empty-plate' }, mascot('idle', 'Prato vazio', 'Busque um alimento, toque numa favorita ou descreva sem cálculo.', 'base'));
 
-    var reset = h('div', { class: 'foot-actions' }, restoreButton('food'), f.items.length ? h('button', {
+    var reset = h('div', { class: 'foot-actions' }, restoreButton(['food', 'water']), f.items.length ? h('button', {
       type: 'button', class: 'btn-text', text: 'Limpar prato',
       onclick: function () { confirmDialog('Tirar todos os itens do prato?', function () { f.items = []; f.id = C.newSubmissionId(); S.showErrors = false; renderFood(); changed(true); }); },
     }) : null);
@@ -1112,7 +1469,7 @@
         : status === 'values_unavailable' ? 'Valores da tabela indisponíveis; soma parcial.' : '' });
     notice.hidden = !status || status === 'ready';
     var total = h('p', { id: 'meal-nutrition', class: 'meal-nutrition', 'aria-live': 'polite', 'aria-atomic': 'true' });
-    els.view.replaceChildren(head, meals, h('h2', { class: 'section-title', text: 'Adicionar' }), notice, panel, plateTitle, plate, total, reset);
+    els.view.replaceChildren(head, balanceBox, meals, h('h2', { class: 'section-title', text: 'Adicionar' }), notice, panel, plateTitle, plate, total, reset);
     syncNutrition();
     if (isVoiceActive()) setFormLocked(true);
   }
@@ -1120,6 +1477,7 @@
   function syncNutrition() {
     var line = $('meal-nutrition');
     if (line) line.textContent = S.food.items.length ? C.nutritionText(C.mealNutrition(S.food.items, S.catalog)) : 'Adicione itens para ver a soma.';
+    syncDailyBalance();
   }
 
   function unitChips(current, onPick, optional) {
@@ -1321,6 +1679,7 @@
     Promise.resolve().then(function () { motion('enter', els.view.querySelector('.plate > :last-child')); });
     changed(true, { quiet: true });
     say(S.food.meal ? 'happy' : 'idle', itemName(item) + ' no prato.' + (S.food.meal ? '' : ' Falta escolher a refeição.'));
+    choreograph('acknowledge');
     return true;
   }
 
@@ -1342,6 +1701,147 @@
     return Number.isFinite(n) ? C.formatBR(n) + (it.unit ? ' ' + it.unit : '') : '';
   }
 
+  function formatSwapMacros(n) {
+    var r1 = function (v) { return Math.round((v || 0) * 10) / 10; };
+    return Math.round(n.kcal) + ' kcal · P ' + C.formatBR(r1(n.protein)) + ' g · C ' + C.formatBR(r1(n.carbs)) + ' g · G ' + C.formatBR(r1(n.fat)) + ' g';
+  }
+  function formatSwapDelta(diffKcal) {
+    var d = Math.round(diffKcal);
+    return d > 0 ? '+' + d + ' kcal' : d < 0 ? '-' + Math.abs(d) + ' kcal' : '= kcal';
+  }
+
+  function openSwapSheet(index) {
+    var it = S.food.items[index];
+    var base = C.foodNutrition(it, S.catalog);
+    if (!it || it.kind !== 'food' || !base) return;
+    var criterion = C.defaultSwapCriterion(base);
+    var query = '';
+    var pickedName = '';
+
+    var curMeta = (it.qty ? it.qty + (it.unit ? ' ' + it.unit : '') + ' · ' : '') + formatSwapMacros(base);
+    var currentEl = h('div', { class: 'swap-current' },
+      h('b', { text: it.food }),
+      h('span', { class: 'swap-sub', text: curMeta }));
+
+    var criteriaButtons = [];
+    var criteriaRow = h('div', { class: 'seg small swap-criteria', role: 'group', 'aria-label': 'Manter equivalente por' },
+      C.SWAP_CRITERIA.map(function (key) {
+        var btn = h('button', {
+          type: 'button',
+          'aria-pressed': String(key === criterion),
+          text: C.SWAP_CRITERION_LABELS[key],
+          onclick: function () {
+            if (criterion === key) return;
+            criterion = key;
+            haptic('select');
+            criteriaButtons.forEach(function (pair) { pair[1].setAttribute('aria-pressed', String(pair[0] === criterion)); });
+            renderResults();
+            renderPreview();
+          },
+        });
+        criteriaButtons.push([key, btn]);
+        return btn;
+      }));
+
+    var searchInput = h('input', {
+      class: 'text-input', type: 'search', placeholder: 'Buscar substituto (ex.: batata, frango)',
+      autocomplete: 'off', enterkeyhint: 'search', 'aria-label': 'Buscar substituto', value: '',
+      oninput: function () { query = searchInput.value; renderResults(); },
+    });
+    var previewEl = h('div', { class: 'swap-preview', hidden: true });
+    var resultsEl = h('ul', { class: 'results swap-results' });
+
+    function applySwap() {
+      var res = C.computeSwap(it, pickedName, criterion, S.catalog);
+      if (!res.ok) return;
+      var nextItem = { kind: 'food', food: res.target.food, qty: res.target.qtyText, unit: res.target.unit };
+      if (it.measure) nextItem.measure = it.measure;
+      S.food.items[index] = nextItem;
+      closeSheet();
+      haptic('success');
+      renderFood();
+      changed(true, { quiet: true });
+      say('happy', 'Troquei ' + res.base.food + ' por ' + res.target.food + ' (' + res.target.qtyText + ' ' + res.target.unit + ').');
+      choreograph('acknowledge');
+    }
+
+    function renderPreview() {
+      if (!pickedName) {
+        previewEl.hidden = true;
+        previewEl.replaceChildren();
+        return;
+      }
+      var res = C.computeSwap(it, pickedName, criterion, S.catalog);
+      previewEl.hidden = false;
+      if (!res.ok) {
+        previewEl.replaceChildren(
+          h('b', { class: 'swap-compare', text: pickedName }),
+          h('p', { class: 'field-error m-0', role: 'alert', text: res.error }),
+          h('button', { type: 'button', class: 'btn-primary', disabled: true, text: 'Aplicar troca' }));
+        return;
+      }
+      previewEl.replaceChildren(
+        h('div', { class: 'swap-preview-head' },
+          h('b', { class: 'swap-compare', text: res.base.food + ' (' + res.base.qty + ' ' + res.base.unit + ') → ' + res.target.food + ' (' + res.target.qtyText + ' ' + res.target.unit + ')' }),
+          h('span', { class: 'swap-diff', text: formatSwapDelta(res.diff.kcal) })),
+        h('p', { class: 'swap-sub m-0', text: formatSwapMacros(res.target.nutrition) }),
+        h('button', { type: 'button', class: 'btn-primary', text: 'Aplicar troca', onclick: applySwap }));
+    }
+
+    function renderCandidate(res, fallbackName) {
+      if (res && res.ok) {
+        var isPicked = pickedName && C.foodKey(pickedName) === C.foodKey(res.target.food);
+        return h('li', {}, h('button', {
+          type: 'button',
+          class: 'result' + (isPicked ? ' is-picked' : ''),
+          onclick: function () { pickedName = res.target.food; haptic('select'); renderPreview(); renderResults(); },
+        },
+          h('span', { text: res.target.food }),
+          h('span', { class: 'tag', text: res.target.qtyText + ' ' + res.target.unit + ' (' + Math.round(res.target.nutrition.kcal) + ' kcal)' })));
+      }
+      return h('li', {}, h('button', {
+        type: 'button',
+        class: 'result is-disabled',
+        disabled: true,
+        'aria-disabled': 'true',
+      },
+        h('span', { text: fallbackName }),
+        h('span', { class: 'tag', text: res && res.reason === 'out_of_range' ? 'fora do limite' : 'sem ' + C.SWAP_CRITERION_LABELS[criterion].toLowerCase() })));
+    }
+
+    function renderResults() {
+      if (!query.trim()) {
+        var list = C.swapSuggestions(it, criterion, S.catalog, 6);
+        resultsEl.replaceChildren.apply(resultsEl, list.length
+          ? list.map(function (res) { return renderCandidate(res, res.target.food); })
+          : [h('li', { class: 'hint', text: 'Nenhum substituto equivalente encontrado neste critério.' })]);
+        return;
+      }
+      var map = S.catalog.nutrition || {};
+      var curKey = C.foodKey(it.food);
+      var seen = Object.create(null);
+      var valued = [];
+      (S.catalog.foods || []).forEach(function (name) {
+        var key = C.foodKey(name);
+        if (!key || seen[key] || key === curKey || !map[key]) return;
+        seen[key] = true;
+        valued.push(name);
+      });
+      var found = C.search(query, valued, 10);
+      resultsEl.replaceChildren.apply(resultsEl, found.length
+        ? found.map(function (name) { return renderCandidate(C.computeSwap(it, name, criterion, S.catalog), name); })
+        : [h('li', { class: 'hint', text: 'Nenhum alimento com tabela encontrado para essa busca.' })]);
+    }
+
+    renderResults();
+    openSheet('Trocar alimento', h('div', { class: 'sheet-col swap-col' },
+      currentEl,
+      criteriaRow,
+      h('label', { class: 'search mt-8' }, icon('search'), searchInput),
+      previewEl,
+      resultsEl), searchInput);
+  }
+
   function plateItem(it, i, itemErrs) {
     var bad = Array.isArray(itemErrs) ? itemErrs.length > 0 : !!itemErrs;
     var errText = Array.isArray(itemErrs) && itemErrs.length
@@ -1351,7 +1851,16 @@
     if (bad) errEl.setAttribute('role', 'alert');
     errEl.hidden = !bad;
     var right = h('div', { class: 'plate-right' });
-    if (itemQty(it)) right.appendChild(h('span', { class: 'plate-qty', text: itemQty(it) }));
+    var meta = h('span', { class: 'plate-meta', text: itemMeta(it) });
+    if (it.kind === 'food') {
+      // Edited in place (no re-render, the keyboard stays up): macros follow each keystroke.
+      var qtyInput = h('input', {
+        class: 'plate-qty-input', type: 'text', inputmode: 'decimal', autocomplete: 'off', enterkeyhint: 'done',
+        'aria-label': 'Quantidade de ' + itemName(it), value: it.qty,
+        oninput: function () { it.qty = qtyInput.value; meta.textContent = itemMeta(it); changed(false); },
+      });
+      right.appendChild(h('label', { class: 'plate-qty-edit' }, qtyInput, it.unit ? h('span', { text: it.unit }) : null));
+    } else if (itemQty(it)) right.appendChild(h('span', { class: 'plate-qty', text: itemQty(it) }));
     if (it.kind === 'favorite') {
       var out = h('output', { text: C.formatBR(C.parseDecimal(it.portions) || 1) });
       var stepP = function (sign) {
@@ -1365,6 +1874,12 @@
         out,
         h('button', { type: 'button', 'aria-label': 'Mais meia porção', text: '+', onclick: function () { stepP(1); } })));
     }
+    if (it.kind === 'food' && C.foodNutrition(it, S.catalog)) {
+      right.appendChild(h('button', {
+        type: 'button', class: 'btn-swap', 'aria-label': 'Trocar ' + itemName(it), title: 'Trocar alimento',
+        onclick: function () { openSwapSheet(i); },
+      }, icon('swap')));
+    }
     right.appendChild(h('button', {
       type: 'button', class: 'btn-x', 'aria-label': 'Tirar ' + itemName(it) + ' do prato', text: '×',
       onclick: function (e) {
@@ -1373,7 +1888,7 @@
     }));
     var li = h('li', { class: 'plate-item k-' + it.kind + (bad ? ' bad' : '') },
       h('span', { class: 'plate-bar', 'aria-hidden': 'true' }),
-      h('span', {}, h('span', { class: 'plate-name', text: itemName(it) }), h('span', { class: 'plate-meta', text: itemMeta(it) }), errEl),
+      h('span', {}, h('span', { class: 'plate-name', text: itemName(it) }), meta, errEl),
       right);
     li._error = errEl;
     return li;
@@ -1387,7 +1902,42 @@
     if (reviewTimer === null) return false;
     clearTimeout(reviewTimer);
     reviewTimer = null;
+    if (S.screen === 'form') S.reviewView = '';
     return true;
+  }
+
+  function goWaterReview() {
+    cancelReview();
+    var r = buildWaterState();
+    if (r.errors.length) {
+      haptic('error');
+      react(C.pulsoError(r.errors));
+      return;
+    }
+    var p = C.serializePayload('water', r.args, currentWaterId());
+    if (!p.ok) {
+      haptic('error');
+      say('alert', 'Passou do limite do Telegram.');
+      return;
+    }
+    S.showErrors = false;
+    stopRest(true);
+    S.reviewView = 'water';
+    say('thinking', 'Conferindo a água');
+    reviewTimer = setTimeout(function () {
+      reviewTimer = null;
+      var now = S.view === 'food' && S.screen === 'form' ? buildWaterState() : null;
+      if (!now || !now.args || C.serializePayload('water', now.args, currentWaterId()).json !== p.json) {
+        S.reviewView = '';
+        updateMood();
+        return;
+      }
+      S.screen = 'review';
+      renderReview(r.args, p, 'water');
+      motion('review', els.review);
+      haptic('success');
+      updateMood();
+    }, 320);
   }
 
   function goReview() {
@@ -1423,6 +1973,8 @@
       return;
     }
     S.showErrors = false;
+    stopRest(true);
+    S.reviewView = view;
     // A short "thinking" beat while the review is built (the avatar sweeps its ring).
     say('thinking', 'Conferindo o registro');
     // Any navigation or edit before it fires cancels it (render, changed, openSheet).
@@ -1430,7 +1982,7 @@
       reviewTimer = null;
       // This also refuses a snapshot that went stale without cancelling the timer.
       var now = S.view === view && S.screen === 'form' ? build() : null;
-      if (!now || !now.args || C.serializePayload(view, now.args, currentId()).json !== p.json) { updateMood(); return; }
+      if (!now || !now.args || C.serializePayload(view, now.args, currentId()).json !== p.json) { S.reviewView = ''; updateMood(); return; }
       S.screen = 'review';
       renderReview(r.args, p, view);
       motion('review', els.review);
@@ -1448,6 +2000,7 @@
   }
 
   function renderReview(args, p, view) {
+    stopRest(true);
     clearCopyTimer();
     els.view.hidden = true;
     els.tabBar.hidden = true;
@@ -1469,6 +2022,12 @@
         if (ex.note) lines.push('Nota: ' + ex.note);
         return h('li', { class: 'review-item' }, h('b', { text: ex.name }), lines.map(function (l) { return h('span', { text: l }); }));
       })) : h('p', { class: 'empty-plate p-16', text: 'Sem exercícios: só marca a sessão como concluída.' });
+    } else if (view === 'water') {
+      facts = h('dl', { class: 'facts' },
+        h('dt', { text: 'Data' }), h('dd', { text: dateLabel(args.date) }),
+        h('dt', { text: 'Água total' }), h('dd', { text: C.formatLiters(args.waterL) }),
+        h('dt', { text: 'Adicionado agora' }), h('dd', { text: C.formatWaterDelta(S.food.waterAdd) }));
+      list = null;
     } else {
       facts = h('dl', { class: 'facts' },
         h('dt', { text: 'Data' }), h('dd', { text: dateLabel(args.date) }),
@@ -1543,6 +2102,7 @@
     clearCopyTimer();
     endSend();
     S.screen = 'form';
+    S.reviewView = '';
     els.review.hidden = true;
     els.view.hidden = false;
     els.tabBar.hidden = !!S.catalog.view;
@@ -1555,15 +2115,17 @@
 
   function send(json) {
     if (sending) return; // a second tap while the first send is in flight
+    var targetView = S.reviewView || S.view;
     // Rebuild right before sending so what goes out is what the review showed.
-    var r = build();
-    var p = r.args ? C.serializePayload(S.view, r.args, currentId()) : null;
-    if (!p || !p.ok || p.json !== json) { showForm(); goReview(); return; }
+    var r = targetView === 'water' ? buildWaterState() : build();
+    var id = targetView === 'water' ? currentWaterId() : currentId();
+    var p = r.args ? C.serializePayload(targetView, r.args, id) : null;
+    if (!p || !p.ok || p.json !== json) { showForm(); if (targetView === 'water') goWaterReview(); else goReview(); return; }
     sending = true;
     syncForm();
     var again = mainHandler;
     setMainActive(false); // off before sendData; back only if it fails
-    recordAndClearSent(S.view, p.json);
+    recordAndClearSent(targetView, p.json);
     say('thinking', 'Enviando para o bot');
     lift = motion('handoff', els.review); // a hand-off, not a confirmation: that is the bot's reply
     try {
@@ -1610,6 +2172,11 @@
     var offered = S.dates.map(function (d) { return d.key; });
     var dateOk = offered.indexOf(src.date) >= 0;
     var date = dateOk ? src.date : S.today;
+    if (e.t === 'water' && loggedWater(date) === null) {
+      haptic('error');
+      say('alert', 'Não dá para restaurar essa água: não sei o total já registrado nesse dia. Diga o total no chat.');
+      return;
+    }
     var apply = function () {
       if (e.t === 'workout') {
         if (S.catalog.sessions.indexOf(src.session) < 0) { say('alert', 'A sessão ' + src.session + ' não está mais na ficha.'); return; }
@@ -1617,6 +2184,11 @@
         S.workout.date = date;
         S.workout.session = src.session;
         S.workout.forms[formKey(date, src.session)] = { id: src.id, date: date, session: src.session, complete: !!src.complete, cards: src.cards || [] };
+      } else if (e.t === 'water') {
+        S.view = 'food';
+        S.food.date = date;
+        S.food.waterId = src.id;
+        S.food.waterAdd = src.addWaterL || 0;
       } else {
         S.view = 'food';
         S.food.id = src.id; // the same id: the resend cannot be written twice
@@ -1632,7 +2204,7 @@
     };
     var busy = e.t === 'workout'
       ? (S.catalog.sessions.indexOf(src.session) >= 0 && !C.workoutFormEmpty(S.workout.forms[formKey(date, src.session)]))
-      : !C.foodFormEmpty({ meal: S.food.meal, items: S.food.items });
+      : e.t === 'water' ? S.food.waterAdd > 0 : !C.foodFormEmpty({ meal: S.food.meal, items: S.food.items });
     if (busy) confirmDialog('Substituir o que está preenchido agora pelo envio restaurado?', apply); else apply();
   }
 
@@ -2096,6 +2668,7 @@
     }
 
     var active = isVoiceActive();
+    if (active) stopRest(true);
     setFormLocked(active);
     if (active) perch(null);
 
@@ -2258,6 +2831,7 @@
 
   function render() {
     cancelReview(); // navigation (tab, date, restore) drops a review being prepared
+    S.reviewView = '';
     focusedCard = null;
     S.focus = null;
     glance(null);
@@ -2317,17 +2891,35 @@
     if (inTelegram) { var e = new Error('link sem catálogo'); e.code = 'no_catalog'; return Promise.reject(e); }
     return fetch('dev/sample-catalog.json', { cache: 'no-store' })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(C.normalizeCatalog);
+      .then(function (raw) {
+        var sample = C.normalizeCatalog(raw);
+        sample.today = ''; // the sample's fixed date is not a stale link
+        return sample;
+      });
+  }
+
+  /** Shows and sends the catalog's spelling of each food (a chat draft may differ in case). */
+  function canonicalizeFoodItems() {
+    S.food.items.forEach(function (it) {
+      if (it.kind === 'food') it.food = C.canonicalFood(it.food, S.catalog);
+    });
   }
 
   function init() {
     applyScheme();
+    ensureRestBar();
     ensureVoiceEls();
     document.addEventListener('visibilitychange', function () {
-      if (document.hidden && voiceCtrl) voiceCtrl.hide();
+      if (document.hidden) {
+        if (voiceCtrl) voiceCtrl.hide();
+      } else if (rest.active) {
+        clearRestTimer();
+        tickRest();
+      }
     });
     if (window.addEventListener) {
       window.addEventListener('pagehide', function () {
+        stopRest(true);
         if (voiceCtrl) voiceCtrl.hide();
         mmOnStream(null); // deterministic meter cleanup
       });
@@ -2363,7 +2955,7 @@
       S.dates = C.dateOptions(catalog.tz);
       S.today = S.dates[0].key;
       S.workout = { date: S.today, session: catalog.next, forms: {} };
-      S.food = { date: S.today, meal: '', items: [], mode: 'food', compose: null };
+      S.food = { date: S.today, meal: '', items: [], mode: 'food', compose: null, waterAdd: 0, waterId: '' };
 
       store = C.draftStore(storage, catalog.client);
       try { if (storage) storage.removeItem(LEGACY_DRAFT_KEY); } catch (e) { /* ignore */ }
@@ -2378,18 +2970,36 @@
       // Reopen where the user was: the most recently edited workout draft.
       var latest = drafts.slice().sort(function (a, b) { return (b.savedAt || 0) - (a.savedAt || 0); })[0];
       if (latest) { S.workout.date = latest.date; S.workout.session = latest.session; }
-      var foodDraft = store.loadFood(S.today);
-      if (foodDraft) {
+      var foodDraft = !catalog.prefillFood ? store.loadFood(S.today) : null;
+      if (catalog.prefillFood) {
+        var pre = catalog.prefillFood;
+        var validDate = S.dates.some(function (d) { return d.key === pre.date; });
+        S.view = 'food';
+        S.food = {
+          id: C.isSubmissionId(pre.id) ? pre.id : C.newSubmissionId(),
+          date: validDate ? pre.date : S.today,
+          meal: pre.meal || '',
+          items: pre.items.slice(),
+          mode: 'food',
+          compose: null,
+          waterAdd: 0,
+          waterId: '',
+        };
+      } else if (foodDraft) {
         S.food.id = foodDraft.id;
         S.food.date = foodDraft.date;
         S.food.meal = foodDraft.meal || '';
         S.food.items = foodDraft.items;
       }
+      canonicalizeFoodItems();
       var draft = !!(latest || foodDraft);
       var first = cards()[0];
       if (first && !cards().some(function (c) { return c.open; })) first.open = true;
       render();
-      if (draft) say('idle', 'Rascunho recuperado. Continue de onde parou.');
+      if (catalog.prefillFood) {
+        say('idle', 'Rascunho carregado! Ajuste as gramas ou troque itens antes de enviar.');
+        choreograph('notice');
+      } else if (draft) say('idle', 'Rascunho recuperado. Continue de onde parou.');
       initVoice();
       if (catalog.ft) {
         var timeout = new Promise(function (resolve) {
@@ -2397,6 +3007,7 @@
         });
         Promise.race([C.loadFoodTable(catalog), timeout]).then(function (loaded) {
           S.catalog = loaded;
+          canonicalizeFoodItems();
           if (S.view !== 'food' || S.screen !== 'form' || isVoiceActive()) return;
           var active = document.activeElement;
           var label = active && active.getAttribute('aria-label');

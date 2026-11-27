@@ -901,7 +901,7 @@ def test_voice_text_payload_validates_required_null_extra_and_src_fields():
         without = {k: v for k, v in TEXT_VOICE.items() if k != field}
         errors = errors_of(without)
         if field == "t":
-            assert errors == ["(raiz): t deve ser workout, food ou text"]
+            assert errors == ["(raiz): t deve ser workout, food, water ou text"]
         else:
             assert errors == [f"{field}: campo obrigatório"]
         assert errors_of({**TEXT_VOICE, field: None})
@@ -976,3 +976,92 @@ def test_voice_keys_survive_all_catalog_trims_and_drop_only_as_last_resort():
     # Below floor_without_voice: even dropping voice is not enough -> CatalogTooLarge!
     with pytest.raises(CatalogTooLarge):
         keyboard_markup(URL, cat, max_len=floor_without_voice - 1, voice_keys=VOICE_KEYS)
+
+
+# ---- daily goal/intake in catalog and quick water payload -----------------------------------
+
+
+WATER: dict[str, Any] = {
+    "v": 1,
+    "t": "water",
+    "id": SID,
+    "args": {"date": "2026-11-09", "waterL": 2.25},
+}
+
+
+def test_water_payload_validation_is_strict_and_bounded():
+    parsed, errors = parse_payload(raw(WATER), TODAY)
+    assert errors == []
+    assert isinstance(parsed, miniapp.WaterPayload)
+    assert parsed.t == "water"
+    assert parsed.args.waterL == 2.25
+
+    assert errors_of(mutated(WATER, ["args", "waterL"], 0))
+    assert errors_of(mutated(WATER, ["args", "waterL"], 20.5))
+    assert errors_of(mutated(WATER, ["args", "waterL"], "2,5"))
+    assert errors_of(mutated(WATER, ["args", "waterL"], None))
+    assert errors_of(mutated(WATER, ["args", "waterL"], True))
+    assert errors_of(mutated(WATER, ["args", "date"], "2026-11-10"))
+    assert errors_of(mutated(WATER, ["args", "extra"], 1))
+
+
+async def test_handle_water_writes_diary_with_request_id_and_retry():
+    ok = {
+        "ok": True,
+        "result": {"writeId": "w3", "date": "2026-11-09", "fields": {"waterL": 2.25}},
+    }
+    sheet = FakeSheet(diary_upsert=[DOWN, DOWN, ok])
+    store = PendingStore()
+    reply = await handle(sheet, raw(WATER), 5, TODAY, store)
+    assert sheet.calls == [("diary.upsert", {"date": "2026-11-09", "fields": {"waterL": 2.25}})] * 3
+    assert len(set(sheet.request_ids)) == 1
+    assert sheet.request_ids[0] == request_id(5, SID, "diary.upsert")
+    assert "Água L 2,25" in reply.text and reply.write_outcome == "committed"
+    assert markup(reply)["inline_keyboard"][0][1]["callback_data"] == "undo:w3"
+
+
+def test_catalog_v1_encodes_daily_goal_and_intake_in_food_button_only_and_trims_under_budget():
+    cat = {
+        **CATALOG,
+        "phase": {
+            "goal": {"kcal": 2400.0, "protein": 160, "carbs": 260, "fat": 70, "fiber": 30},
+        },
+        "todayTotals": {
+            "kcal": 920.5,
+            "protein": 72,
+            "carbs": 95,
+            "fat": 26,
+            "fiber": 12,
+            "noCalcItems": 0,
+            "estimatedItems": 0,
+        },
+        "todayDiary": {"weightKg": 82.4, "waterL": 1.25},
+    }
+    compact = catalog_v1(cat)
+    assert compact["goal"] == {"k": 2400, "p": 160, "c": 260, "g": 70}
+    assert compact["day"] == {"k": 920.5, "p": 72, "c": 95, "g": 26, "w": 1.25}
+
+    mk, dropped = keyboard_markup(URL, cat)
+    assert dropped == []
+    w = decode(mk["keyboard"][0][0]["web_app"]["url"])
+    f = decode(mk["keyboard"][0][1]["web_app"]["url"])
+    assert "goal" not in w and "day" not in w
+    assert f["goal"] == {"k": 2400, "p": 160, "c": 260, "g": 70}
+    assert f["day"] == {"k": 920.5, "p": 72, "c": 95, "g": 26, "w": 1.25}
+
+    # Under tight budget, "day" (plus "goal") is dropped from the food URL before "foods"
+    assert miniapp.DROPPED_LABELS["day"] == "saldo do dia"
+    cat_food = {
+        **big_catalog(),
+        "plan": CATALOG["plan"],
+        "exercises": CATALOG["exercises"],
+        "phase": cat["phase"],
+        "todayTotals": cat["todayTotals"],
+        "todayDiary": cat["todayDiary"],
+    }
+    full_food = len(keyboard_markup(URL, cat_food, max_len=10**6)[0]["keyboard"][0][1]["web_app"]["url"])
+    size, dropped_tight, mk_tight = url_len(cat_food, max_len=full_food - 1)
+    assert size <= full_food - 1 and dropped_tight == ["day"]
+    f_tight = decode(mk_tight["keyboard"][0][1]["web_app"]["url"])
+    assert "day" not in f_tight and "goal" not in f_tight
+    assert len(f_tight["foods"]) == len(cat_food["foods"])

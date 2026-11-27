@@ -1,11 +1,13 @@
 """Scheduled pushes (`POST /remind`), independent of the HTTP server like webhook.py.
 
 A Cloud Scheduler job per kind calls the agent's URL at /remind with the header
-`X-Reminder-Token` and a JSON body `{"kind": "daily" | "weekly"}`:
+`X-Reminder-Token` and a JSON body `{"kind": "daily" | "weekly" | "nudge"}`:
 
   - daily:  today's diary lacks weight, sleep or steps → "Faltou registrar hoje: …" to each
             allowed chat; nothing missing → no message.
   - weekly: the /semana analysis (week.get) of the week containing today.
+  - nudge:  proactive contextual Shaping check-in using today's diary/workout, next planned
+            session + reference lift, water remaining, and weekly consistency.
 
 Without REMINDER_TOKEN the endpoint does not exist (404). The sheet being down never turns into
 a message: the job runs unattended, so a failure is logged and nothing is sent.
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import math
 from collections.abc import Callable, Iterable
 from datetime import date, datetime
 from typing import Any, Protocol
@@ -27,7 +30,7 @@ import httpx
 
 from agent import webhook
 from agent.commands import CommandSheet, Reply, week_text
-from agent.format import escape, split
+from agent.format import bold, escape, split
 from agent.logs import describe, ref
 from agent.settings import Settings
 from agent.sheet_client import SheetClient
@@ -37,9 +40,10 @@ log = logging.getLogger(__name__)
 
 TOKEN_HEADER = "X-Reminder-Token"
 PATH = "/remind"
-KINDS = ("daily", "weekly")
-BAD_BODY = 'body must be {"kind": "daily" | "weekly"}'
+KINDS = ("daily", "weekly", "nudge")
+BAD_BODY = 'body must be {"kind": "daily" | "weekly" | "nudge"}'
 FAILED = "reminder failed"
+WATER_GOAL_L = 2.5
 
 # Diary field → (word in the reminder, example of how to send it), in the order they are listed.
 DAILY_FIELDS = {
@@ -107,6 +111,167 @@ async def weekly(sheet: CommandSheet, today: date) -> Reply:
     return reply
 
 
+def nudge_text(
+    today: date,
+    *,
+    diary: dict[str, Any],
+    workout_done: bool,
+    catalog: dict[str, Any] | None = None,
+    week: dict[str, Any] | None = None,
+) -> str | None:
+    """Contextual Shaping nudge in Telegram HTML, or None when the day is already on track."""
+    if not isinstance(diary, dict):
+        raise TypeError("diary must be a dict")
+    if catalog is not None and not isinstance(catalog, dict):
+        raise TypeError("catalog must be a dict")
+    if week is not None and not isinstance(week, dict):
+        raise TypeError("week must be a dict")
+
+    cat = catalog or {}
+    wk = week or {}
+
+    water_raw = diary.get("waterL")
+    if _blank(water_raw):
+        today_diary = cat.get("todayDiary")
+        if isinstance(today_diary, dict):
+            water_raw = today_diary.get("waterL")
+
+    water_remaining = 0.0
+    water_line: str | None = None
+    if _blank(water_raw):
+        water = 0.0
+    else:
+        parsed_water = _finite_number(water_raw)
+        water = parsed_water if parsed_water is not None and parsed_water >= 0 else None
+    if water is not None:
+        remaining = round(WATER_GOAL_L - water, 2)
+        if remaining >= 0.25:
+            water_remaining = remaining
+            if water == 0:
+                water_line = f"• Água: 0 L registrados até agora (meta de {_liters(WATER_GOAL_L)})."
+            else:
+                water_line = (
+                    f"• Água: {_liters(water)} de {_liters(WATER_GOAL_L)} (faltam {_liters(remaining)})."
+                )
+
+    missing = missing_fields(diary)
+    missing_line: str | None = None
+    if missing:
+        words = ", ".join(DAILY_FIELDS[k][0] for k in missing)
+        example = ", ".join(DAILY_FIELDS[k][1] for k in missing)
+        missing_line = f"• Check-in do dia: faltou {words} (ex.: {example})."
+
+    if workout_done and water_remaining < 0.25 and not missing:
+        return None
+
+    workout_line: str | None = None
+    if not workout_done:
+        next_raw = cat.get("nextSession")
+        if isinstance(next_raw, str) and next_raw.strip():
+            next_session = next_raw.strip()
+            ref_part = ""
+            for row in cat.get("plan") or []:
+                if not isinstance(row, dict) or row.get("session") != next_session:
+                    continue
+                ex_name = row.get("exercise")
+                last = row.get("lastWork")
+                last_text = last.get("text") if isinstance(last, dict) else None
+                if (
+                    isinstance(ex_name, str)
+                    and ex_name.strip()
+                    and isinstance(last_text, str)
+                    and last_text.strip()
+                ):
+                    ref_part = f" — ref. {escape(ex_name.strip())} ({escape(last_text.strip())})"
+                    break
+            if ref_part:
+                workout_line = f"• Próximo treino: {bold(escape(next_session))}{ref_part}."
+            else:
+                workout_line = f"• Próximo treino da rotação: {bold(escape(next_session))}."
+
+    week_line: str | None = None
+    sessions = _finite_number(wk.get("sessions"))
+    goal = _finite_number(wk.get("sessionsGoal"))
+    progressions = _finite_number(wk.get("progressions"))
+    if sessions is not None and goal is not None and sessions >= 0 and goal > 0:
+        s_txt = _count_str(sessions)
+        g_txt = _count_str(goal)
+        prog_n = int(progressions) if progressions is not None and progressions > 0 else 0
+        prog_suffix = f" ({prog_n} {'progressão' if prog_n == 1 else 'progressões'})" if prog_n > 0 else ""
+        if sessions >= goal:
+            week_line = f"• Semana: {s_txt} de {g_txt} treinos fechados{prog_suffix}!"
+        elif sessions > 0:
+            week_line = f"• Semana: {s_txt} de {g_txt} treinos concluídos{prog_suffix}."
+        else:
+            week_line = f"• Semana: 0 de {g_txt} treinos até agora — bora abrir a contagem?"
+
+    bullets = [line for line in (workout_line, water_line, week_line, missing_line) if line]
+    if not bullets:
+        return None
+
+    client = cat.get("client")
+    raw_name = client.get("name") if isinstance(client, dict) else None
+    first_name = raw_name.strip().split()[0] if isinstance(raw_name, str) and raw_name.strip() else ""
+    who = f", {escape(first_name)}" if first_name else ""
+
+    variant = today.toordinal() % 3
+    if workout_done:
+        openings = (
+            f"Treino de hoje pago{who}! Só falta fechar o resto do dia:",
+            f"Boa{who}! Treino já foi — falta pouco para gabaritar hoje:",
+            f"Check no treino{who}! Shaping passando rápido antes de encerrar o dia:",
+        )
+    else:
+        openings = (
+            f"E aí{who}, bora colocar o bloco de hoje na conta?",
+            f"Passando rápido{who}: olha como está o seu dia até aqui:",
+            f"Salve{who}! Resumo rápido do Shaping para fechar o dia forte:",
+        )
+    return "\n".join([openings[variant], *bullets, "Manda áudio ou texto por aqui mesmo, ou abre o /app."])
+
+
+async def nudge(sheet: CommandSheet, today: date) -> Reply | None:
+    day_res = await sheet.day(today.isoformat())
+    if not day_res.get("ok"):
+        raise SheetDown(_code(day_res))
+    day_result = day_res["result"]
+    if not isinstance(day_result, dict):
+        raise TypeError("bad day result")
+    raw_diary = day_result.get("diary")
+    diary = {} if raw_diary is None else raw_diary
+    if not isinstance(diary, dict):
+        raise TypeError("bad diary")
+    raw_workout = day_result.get("workout")
+    workout = [] if raw_workout is None else raw_workout
+    if not isinstance(workout, list):
+        raise TypeError("bad workout")
+
+    cat_res = await sheet.catalog()
+    catalog: dict[str, Any] = {}
+    if cat_res.get("ok"):
+        raw_cat = cat_res.get("result")
+        catalog = {} if raw_cat is None else raw_cat
+        if not isinstance(catalog, dict):
+            raise TypeError("bad catalog")
+
+    week_res = await sheet.week(today.isoformat())
+    week: dict[str, Any] = {}
+    if week_res.get("ok"):
+        raw_week = week_res.get("result")
+        week = {} if raw_week is None else raw_week
+        if not isinstance(week, dict):
+            raise TypeError("bad week")
+
+    text = nudge_text(
+        today,
+        diary=diary,
+        workout_done=len(workout) > 0,
+        catalog=catalog,
+        week=week,
+    )
+    return Reply(text, html=True) if text else None
+
+
 # ---- sending -------------------------------------------------------------------------------
 
 
@@ -117,7 +282,12 @@ async def remind(
     Raises ReminderFailed, sending nothing, when the reminder cannot be prepared for a reason
     other than the sheet being down (an answer the summary cannot read, a bug)."""
     try:
-        reply = await (daily(sheet, today) if kind == "daily" else weekly(sheet, today))
+        if kind == "daily":
+            reply = await daily(sheet, today)
+        elif kind == "weekly":
+            reply = await weekly(sheet, today)
+        else:
+            reply = await nudge(sheet, today)
     except SheetDown as err:
         log.warning("%s reminder skipped, sheet failed: %s", kind, describe(err))
         return 0, 0
@@ -202,3 +372,22 @@ def _code(response: dict[str, Any]) -> object:
     errors = response.get("errors")
     first = errors[0] if isinstance(errors, list) and errors else None
     return first.get("code") if isinstance(first, dict) else None
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
+        return float(value)
+    return None
+
+
+def _liters(value: float) -> str:
+    rounded = round(float(value), 2)
+    if rounded.is_integer():
+        return f"{int(rounded)} L"
+    return f"{rounded:.2f}".rstrip("0").replace(".", ",") + " L"
+
+
+def _count_str(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return str(round(value, 1)).replace(".", ",")

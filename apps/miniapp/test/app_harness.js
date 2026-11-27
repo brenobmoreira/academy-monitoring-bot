@@ -348,6 +348,7 @@ async function boot(opts = {}) {
     console,
     ShapeCore: C,
     Telegram: tg ? { WebApp: tg } : undefined,
+    __shapeNow: () => timers.now(),
   };
   doc.defaultView = ctx;
   Object.assign(ctx, typeof opts.globals === 'function' ? opts.globals(ctx) : opts.globals || {});

@@ -17,6 +17,7 @@ import httpx
 from agent.budget import MemoryBudget
 from agent.handler import UpdateDeduplicator, build_handler, strict_int
 from agent.logs import describe
+from agent.miniapp import FoodDraftStore, PendingStore
 from agent.settings import Settings
 from agent.text_submissions import TextSubmissions
 from agent.voice_confirm import VoiceConfirmations
@@ -27,6 +28,9 @@ SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 _DEDUPLICATOR = UpdateDeduplicator()
 _CONFIRMATIONS = VoiceConfirmations()
 _TEXT_SUBMISSIONS = TextSubmissions()
+# One handler per request: what a later button tap needs must outlive it.
+_FOOD_DRAFTS = FoodDraftStore()
+_PENDING = PendingStore()
 
 
 @functools.cache
@@ -68,6 +72,8 @@ async def handle_update(settings: Settings, update: dict[str, Any]) -> None:
                 confirmations=_CONFIRMATIONS,
                 text_submissions=_TEXT_SUBMISSIONS,
                 budget=budget,
+                food_drafts=_FOOD_DRAFTS,
+                pending=_PENDING,
             )
         except Exception as error:
             raise HandlerNotBuilt from error

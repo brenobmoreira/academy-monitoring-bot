@@ -64,5 +64,7 @@
   ],
   "fav": ["Café da manhã básico", "Lanche da tarde", "Prato feito"],
   "meals": ["Café da manhã", "Lanche da manhã", "Almoço", "Lanche", "Pré-treino", "Pós-treino", "Jantar", "Ceia", "Outro"],
-  "units": ["g", "mg", "kg", "ml", "l", "un", "fatia", "colher", "porção"]
+  "units": ["g", "mg", "kg", "ml", "l", "un", "fatia", "colher", "porção"],
+  "goal": {"k": 2400, "p": 160, "c": 260, "g": 70},
+  "day": {"k": 920, "p": 72, "c": 95, "g": 26, "w": 1.25}
 }

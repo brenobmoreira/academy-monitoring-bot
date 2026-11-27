@@ -9,6 +9,7 @@ every rejected call, reads included, are kept there too, so the bot can tell a s
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
 import json
 from collections.abc import AsyncGenerator, Generator
@@ -189,6 +190,8 @@ class Journal:
     interrupted: bool = False
     # The outcome of each mutating attempt that got an answer, in order (see sheet_client).
     outcomes: list[WriteOutcome] = field(default_factory=list)
+    # Non-writing proposed meal draft for preview/confirmation (Onda 1 #4).
+    food_draft: dict[str, Any] | None = None
     # Serialises the write tools of this message (see write_turn). An asyncio lock, because the
     # tools are coroutines that ADK runs as tasks on the bot's event loop; RunConfig's
     # tool_thread_pool_config, which would move them to threads with their own loops, is not set.
@@ -321,7 +324,9 @@ class Journal:
         return [result["writeId"] for _, result in self.writes if result.get("writeId")]
 
 
-def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
+def build_tools(sheet: SheetApi, journal: Journal, today: dt.date | None = None) -> list[FunctionType]:
+    """`today` is the person's local date: a food draft dated after it is refused."""
+
     async def get_catalog() -> dict[str, Any]:
         """Lê o catálogo da planilha: today; phase (objetivo, meta com alvos e ficha em vigor hoje,
         e a última recomendação); sessions, nextSession (próxima da rotação) e lastWorkout;
@@ -405,6 +410,23 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
             with request_id_scope(req_id), journal.writing():
                 response = await sheet.add_food(date, meal, plain_items)
             return journal.record("food.add", response, token)
+
+    async def propose_food(date: str, meal: str, items: list[FoodItem]) -> dict[str, Any]:
+        """Monta um rascunho revisável de refeição (sem gravar na planilha ainda) para foto de
+        prato ou estimativa aproximada, devolvendo botões de confirmar ou ajustar no Mini App.
+
+        Args:
+            date: dia da refeição, yyyy-MM-dd.
+            meal: refeição (ex.: Café da manhã, Almoço, Jantar), conforme meals do catálogo.
+            items: itens estimados da refeição.
+        """
+        plain_items = _plain(items)
+        errors = _validate_food_draft(date, meal, plain_items, today or dt.date.today())
+        if errors:
+            return {"ok": False, "errors": errors}
+        draft = {"date": date.strip(), "meal": meal.strip(), "items": plain_items}
+        journal.food_draft = draft
+        return {"ok": True, "result": {"draft": True, **draft}}
 
     async def copy_food(date_from: str, date_to: str, meal: str | None = None) -> dict[str, Any]:
         """Copia uma refeição (ou todas as refeições do dia, se meal for omitido) de date_from para
@@ -493,6 +515,7 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         save_diary,
         save_workout,
         save_food,
+        propose_food,
         copy_food,
         save_measures,
         get_exercise_history,
@@ -500,6 +523,15 @@ def build_tools(sheet: SheetApi, journal: Journal) -> list[FunctionType]:
         get_phase,
         get_week,
     ]
+
+
+def _validate_food_draft(date: str, meal: str, items: Any, today: dt.date) -> list[dict[str, str]]:
+    # Imported here: miniapp imports this module (directly and through bot).
+    from agent.miniapp import food_draft_errors
+
+    clean_date = date.strip() if isinstance(date, str) else date
+    clean_meal = meal.strip() if isinstance(meal, str) else meal
+    return food_draft_errors(clean_date, clean_meal, items, today)
 
 
 def _plain(value: Any) -> Any:

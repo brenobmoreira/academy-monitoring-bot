@@ -36,7 +36,7 @@
  *   ShapeAvatar.clampProgress(p)         pure: `p` clamped to `0..1`
  *   ShapeAvatar.litTicks(p, n)           pure: how many of `n` steps are lit for `p`
  *   ShapeAvatar.flip(from, to)           pure: centre-to-centre translate/scale from `from` to `to`
- *   ShapeAvatar.formFor(ctx)             pure: context `{ view, screen, dozing, intro }` -> form
+ *   ShapeAvatar.formFor(ctx)             pure: context `{ view, screen, dozing, resting, intro }` -> form
  *   ShapeAvatar.morphPlan(from, to, red) pure: `{ to, ms, squash }` plan for a form transition
  */
 (function (root) {
@@ -84,13 +84,14 @@
   }
 
   /**
-   * Pure: which form a context asks for. ctx = { view, screen, dozing, intro }.
-   * Priority: dozing > review/sent screen > intro > view > base.
+   * Pure: which form a context asks for. ctx = { view, screen, dozing, resting, intro }.
+   * Priority: dozing > review/sent screen > resting > intro > view > base.
    */
   function formFor(ctx) {
     var c = ctx || {};
     if (c.dozing) return 'descanso';
     if (c.screen === 'review' || c.screen === 'sent') return 'revisao';
+    if (c.resting) return 'descanso';
     if (c.intro) return 'base';
     if (c.view === 'workout') return 'treino';
     if (c.view === 'food') return 'refeicao';

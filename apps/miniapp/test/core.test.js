@@ -676,3 +676,249 @@ test('drafts keep each form\'s own edit time, so the app reopens on the last edi
   const latest = s.loadWorkouts(TODAY).sort((a, b) => b.savedAt - a.savedAt)[0];
   assert.equal(latest.session, 'Push A');
 });
+
+test('parseRestSeconds extracts valid intervals and ignores non-rest tokens and out-of-range durations', () => {
+  assert.equal(C.parseRestSeconds('2×6–10 · RIR 0–1 · 150 s · alt.: Supino'), 150);
+  assert.equal(C.parseRestSeconds('90s'), 90);
+  assert.equal(C.parseRestSeconds('60 seg'), 60);
+  assert.equal(C.parseRestSeconds('60 seg.'), 60);
+  assert.equal(C.parseRestSeconds('2 min'), 120);
+  assert.equal(C.parseRestSeconds('1,5 min'), 90);
+  assert.equal(C.parseRestSeconds('2–3 min'), 120);
+  assert.equal(C.parseRestSeconds('2 a 3 min'), 120);
+  assert.equal(C.parseRestSeconds('5 séries'), null);
+  assert.equal(C.parseRestSeconds('5 séries · 90 s'), 90);
+  assert.equal(C.parseRestSeconds('2×6–8 RIR 1'), null);
+  assert.equal(C.parseRestSeconds('3 s'), null);
+  assert.equal(C.parseRestSeconds('900 s'), null);
+  assert.equal(C.parseRestSeconds(''), null);
+  assert.equal(C.parseRestSeconds(null), null);
+});
+
+test('restPresetsFor, formatRestClock, formatRestChip and restProgress behave deterministically', () => {
+  assert.deepEqual(C.restPresetsFor('2×6–8 RIR 1'), {
+    prescribed: null,
+    suggested: 90,
+    presets: [60, 90, 120],
+  });
+  assert.deepEqual(C.restPresetsFor('2×6–10 · RIR 0–1 · 150 s · alt.: X'), {
+    prescribed: 150,
+    suggested: 150,
+    presets: [60, 90, 120, 150],
+  });
+  assert.deepEqual(C.restPresetsFor('3×12 · 45 s'), {
+    prescribed: 45,
+    suggested: 45,
+    presets: [45, 60, 90, 120],
+  });
+  assert.deepEqual(C.restPresetsFor('3×10 · 90 s'), {
+    prescribed: 90,
+    suggested: 90,
+    presets: [60, 90, 120],
+  });
+
+  assert.equal(C.formatRestClock(150), '2:30');
+  assert.equal(C.formatRestClock(90), '1:30');
+  assert.equal(C.formatRestClock(9), '0:09');
+  assert.equal(C.formatRestClock(0), '0:00');
+  assert.equal(C.formatRestClock(-5), '0:00');
+
+  assert.equal(C.formatRestChip(90), '90s');
+  assert.equal(C.formatRestChip(150.4), '150s');
+
+  assert.equal(C.restProgress(90000, 90000), 1);
+  assert.equal(C.restProgress(45000, 90000), 0.5);
+  assert.equal(C.restProgress(-100, 90000), 0);
+  assert.equal(C.restProgress(120000, 90000), 1);
+  assert.equal(C.restProgress(1000, 0), 0);
+  assert.equal(C.restProgress(NaN, 90000), 0);
+});
+
+test('normalizeCatalog parses goal and day intake and rejects malformed or invalid numbers', () => {
+  const cat = C.normalizeCatalog({
+    v: 1,
+    goal: { k: 2400, p: 160, c: 260, g: 70, w: 3 },
+    day: { k: 920.5, p: 72, c: 0, g: 26, w: 1.25 },
+  });
+  assert.deepEqual(cat.goal, { kcal: 2400, protein: 160, carbs: 260, fat: 70, water: 3 });
+  assert.deepEqual(cat.day, { kcal: 920.5, protein: 72, carbs: 0, fat: 26, water: 1.25 });
+
+  const bad = C.normalizeCatalog({
+    v: 1,
+    goal: { k: 0, p: -10, c: Infinity, g: '20' },
+    day: { k: -5, p: NaN },
+  });
+  assert.equal(bad.goal, null);
+  assert.equal(bad.day, null);
+  assert.equal(C.normalizeCatalog({ v: 1 }).goal, null);
+  assert.equal(C.normalizeCatalog({ v: 1 }).day, null);
+});
+
+test('dailyBalance, formatLiters, formatWaterDelta and buildWater compute targets and validate limits', () => {
+  const ownName = 'Ovo cozido fit';
+  const cat = C.normalizeCatalog({
+    v: 1,
+    foods: [ownName],
+    fv: [[0, 0, 100, 150, 13, 1, 10, null, null]],
+    fu: ['g'],
+    goal: { k: 2000, p: 150, c: 200, g: 60 },
+    day: { k: 1200, p: 90, c: 120, g: 35, w: 1.5 },
+  });
+  const plateItems = [{ kind: 'food', food: ownName, qty: '200', unit: 'g' }]; // +300 kcal, +26P, +2C, +20G
+
+  const todayBal = C.dailyBalance(cat, plateItems, { isToday: true, waterAddL: 0.5 });
+  assert.equal(todayBal.isToday, true);
+  assert.equal(todayBal.hasLoggedFood, true);
+  assert.deepEqual(todayBal.total, { kcal: 1500, protein: 116, carbs: 122, fat: 55, water: 2 });
+  assert.equal(todayBal.targets.water, 2.5);
+  assert.equal(todayBal.ratio.kcal, 0.75);
+  assert.equal(todayBal.over.kcal, false);
+  assert.equal(todayBal.over.water, false);
+
+  const yestBal = C.dailyBalance(cat, plateItems, { isToday: false, waterAddL: 0.75 });
+  assert.equal(yestBal.isToday, false);
+  assert.equal(yestBal.hasLoggedFood, false);
+  assert.deepEqual(yestBal.total, { kcal: 300, protein: 26, carbs: 2, fat: 20, water: 0.75 });
+
+  // Water cap at 20 L
+  const capped = C.dailyBalance(cat, [], { isToday: true, waterAddL: 25 });
+  assert.equal(capped.total.water, 20);
+  assert.equal(capped.over.water, true);
+
+  assert.equal(C.formatLiters(0), '0 L');
+  assert.equal(C.formatLiters(1.25), '1,25 L');
+  assert.equal(C.formatWaterDelta(0.25), '+250 ml');
+  assert.equal(C.formatWaterDelta(1.5), '+1,5 L');
+
+  const okW = C.buildWater({ date: TODAY, baseWaterL: 1.5, addWaterL: 0.5 }, { today: TODAY });
+  assert.deepEqual(okW, { args: { date: TODAY, waterL: 2 }, errors: [] });
+
+  assert.ok(C.buildWater({ date: TODAY, baseWaterL: 1.5, addWaterL: 0 }, { today: TODAY }).errors.length);
+  assert.ok(C.buildWater({ date: TODAY, baseWaterL: 19.75, addWaterL: 0.5 }, { today: TODAY }).errors.length);
+  assert.ok(C.buildWater({ date: '2026-11-10', baseWaterL: 0, addWaterL: 0.5 }, { today: TODAY }).errors.length);
+  assert.equal(C.pulsoSummary({ view: 'water', waterTotal: 1.75 }), 'Água pronta para conferir: 1,75 L.');
+  assert.doesNotMatch(C.pulsoSummary({ view: 'water', waterTotal: 1.75 }), /gravado|salvo/i);
+});
+
+test('defaultSwapCriterion, computeSwap and swapSuggestions match Equivalences.swap', () => {
+  assert.equal(C.defaultSwapCriterion({ kcal: 192, protein: 3.8, carbs: 42.1, fat: 0.3 }), 'carbs');
+  assert.equal(C.defaultSwapCriterion({ kcal: 163, protein: 31.5, carbs: 0, fat: 3.2 }), 'protein');
+  assert.equal(C.defaultSwapCriterion({ kcal: 200, protein: 5, carbs: 5, fat: 18 }), 'fat');
+  assert.equal(C.defaultSwapCriterion({ kcal: 146, protein: 13.3, carbs: 0.6, fat: 9.5 }), 'fat');
+  assert.equal(C.defaultSwapCriterion({ kcal: 200, protein: 20, carbs: 20, fat: 5 }), 'kcal');
+  assert.equal(C.defaultSwapCriterion(null), 'kcal');
+
+  const { FOODS, bootFood } = require('../../sheet4/test/food_helpers');
+  const { Equivalences } = bootFood();
+
+  // Catalog matching FOODS (rice, chicken, bread, egg, oats, milk)
+  const names = FOODS.slice(0, 7).map((f) => f.name);
+  const units = ['g', 'ml', 'un', 'fatia'];
+  const idx = (u) => (u ? units.indexOf(u) : null);
+  const fv = FOODS.slice(0, 7).map((f, i) => [
+    i,
+    idx(f.baseUnit),
+    f.baseQty,
+    f.kcal,
+    f.protein,
+    f.carbs,
+    f.fat,
+    idx(f.householdUnit || null),
+    f.perHousehold || null,
+  ]);
+  const cat = C.normalizeCatalog({ v: 1, foods: names, fv, fu: units });
+
+  // Mass item: Arroz branco cozido 150 g -> Pão integral (by carbs), check parity with sheet Equivalences.swap
+  const riceItem = { kind: 'food', food: 'Arroz branco cozido', qty: '150', unit: 'g' };
+  const swapBread = C.computeSwap(riceItem, 'Pão integral', 'carbs', cat);
+  const sheetBread = Equivalences.swap('Arroz branco cozido', 150, 'Carboidrato', 'Pão integral');
+  assert.equal(swapBread.ok, true);
+  assert.equal(swapBread.target.qty, sheetBread.equivQty);
+  assert.equal(swapBread.target.unit, sheetBread.unit);
+  assert.deepEqual(
+    swapBread.target.nutrition,
+    C.foodNutrition({ kind: 'food', food: 'Pão integral', qty: swapBread.target.qtyText, unit: 'g' }, cat),
+  );
+  assert.ok(Math.abs(swapBread.target.nutrition.kcal - sheetBread.kcalAlt) < 0.2);
+
+  // Household unit: Ovo inteiro cozido 2 un (= 100 g) -> Peito de frango cozido (by protein)
+  const eggItem = { kind: 'food', food: 'Ovo inteiro cozido', qty: '2', unit: 'un' };
+  const swapChicken = C.computeSwap(eggItem, 'Peito de frango cozido', 'protein', cat);
+  const sheetChicken = Equivalences.swap('Ovo inteiro cozido', 100, 'Proteína', 'Peito de frango cozido');
+  assert.equal(swapChicken.ok, true);
+  assert.equal(swapChicken.target.qty, sheetChicken.equivQty);
+  assert.equal(swapChicken.target.unit, 'g');
+
+  // All 4 criteria work when target supplies that nutrient (Aveia em flocos supplies all 4)
+  for (const crit of C.SWAP_CRITERIA) {
+    const res = C.computeSwap(riceItem, 'Aveia em flocos', crit, cat);
+    assert.equal(res.ok, true, `criterion ${crit} should succeed`);
+    assert.ok(res.target.qty > 0);
+  }
+
+  // Zero-nutrient refusal, same-food refusal, out-of-range refusal, and non-catalog refusal
+  const zeroCarb = C.computeSwap(riceItem, 'Peito de frango cozido', 'carbs', cat);
+  assert.equal(zeroCarb.ok, false);
+  assert.match(zeroCarb.error, /carbo/i);
+  assert.equal(C.computeSwap(riceItem, 'Arroz branco cozido', 'kcal', cat).ok, false);
+  assert.equal(C.computeSwap({ kind: 'food', food: 'Arroz branco cozido', qty: '100000', unit: 'g' }, 'Leite desnatado', 'kcal', cat).ok, false);
+  assert.equal(C.computeSwap({ kind: 'description', description: 'pastel' }, 'Pão integral', 'kcal', cat).ok, false);
+
+  // Smart suggestions exclude current food and zero-nutrient substitutes, sorted by closeness
+  const suggestions = C.swapSuggestions(riceItem, 'carbs', cat, 4);
+  assert.ok(suggestions.length >= 2 && suggestions.length <= 4);
+  assert.equal(suggestions.some((s) => s.target.food === 'Arroz branco cozido'), false);
+  assert.equal(suggestions.some((s) => s.target.food === 'Peito de frango cozido'), false);
+});
+
+test('parsePrefillFood and normalizeCatalog unpack compact df food drafts safely', () => {
+  assert.equal(C.parsePrefillFood(null), null);
+  assert.equal(C.parsePrefillFood({ d: '2026-11-20', m: 'Almoço', i: [] }), null);
+  assert.equal(C.parsePrefillFood({ d: '2026-11-20', m: 'Almoço', i: [{ f: 'Arroz', q: 0 }] }), null);
+
+  const parsed = C.parsePrefillFood({
+    d: '2026-11-20',
+    m: 'Almoço',
+    i: [
+      { f: 'Arroz branco cozido', q: 150.5, u: 'g', ms: 'Estimada' },
+      { f: 'Feijão carioca cozido', q: 80, u: 'g', ms: 'Inventada' },
+      { fav: 'Café da manhã básico', p: 1.5 },
+      { fav: 'Lanche', p: 'invalid' },
+      { ds: 'bife grelhado', q: 120, u: 'g' },
+      { ds: 'salada verde' },
+      { f: 'Ignorado', q: -5 },
+    ],
+  });
+  assert.deepEqual(parsed, {
+    date: '2026-11-20',
+    meal: 'Almoço',
+    items: [
+      { kind: 'food', food: 'Arroz branco cozido', qty: '150,5', unit: 'g', measure: 'Estimada' },
+      { kind: 'food', food: 'Feijão carioca cozido', qty: '80', unit: 'g', measure: '' },
+      { kind: 'favorite', favorite: 'Café da manhã básico', portions: '1,5' },
+      { kind: 'favorite', favorite: 'Lanche', portions: '1' },
+      { kind: 'description', description: 'bife grelhado', qty: '120', unit: 'g' },
+      { kind: 'description', description: 'salada verde', qty: '', unit: '' },
+    ],
+  });
+
+  const invalidDateParsed = C.parsePrefillFood({
+    d: '2026-99-01',
+    m: 'X'.repeat(100),
+    i: [{ ds: 'suco natural' }],
+  });
+  assert.equal(invalidDateParsed.date, '');
+  assert.equal(invalidDateParsed.meal.length, C.LIMITS.MEAL_MAX);
+
+  const cat = C.normalizeCatalog({
+    v: 1,
+    foods: ['Pão integral'],
+    df: { d: '2026-11-20', m: 'Café', i: [{ f: 'Pão integral', q: 50, u: 'g', ms: 'Estimada' }] },
+  });
+  assert.deepEqual(cat.prefillFood, {
+    date: '2026-11-20',
+    meal: 'Café',
+    items: [{ kind: 'food', food: 'Pão integral', qty: '50', unit: 'g', measure: 'Estimada' }],
+  });
+  assert.equal(C.normalizeCatalog({ v: 1 }).prefillFood, null);
+});

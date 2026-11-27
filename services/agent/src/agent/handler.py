@@ -30,12 +30,13 @@ from agent.bot import (
     Media,
 )
 from agent.budget import Budget, MemoryBudget
-from agent.commands import COMMANDS, CommandSheet, Context, Reply, parse_command
+from agent.commands import COMMANDS, SHEET_DOWN, CommandSheet, Context, Reply, parse_command
 from agent.format import escape, split
 from agent.llm import build_model
 from agent.logs import describe
 from agent.settings import Settings
 from agent.sheet_client import SheetClient
+from agent.summary import food_draft_summary
 from agent.telegram import TelegramClient
 from agent.text_submissions import TextSubmissions, text_scope_key
 from agent.tools import update_key_scope
@@ -272,6 +273,7 @@ class Handler:
         confirmations: VoiceConfirmations | None = None,
         transcriber: VoiceTranscriber | None = None,
         voice_max_seconds: int = VOICE_MAX_SECONDS,
+        food_drafts: miniapp.FoodDraftStore | None = None,
     ) -> None:
         self._allowed = allowed_chat_ids
         self._bot = bot
@@ -294,6 +296,7 @@ class Handler:
         self._confirmations = confirmations if confirmations is not None else VoiceConfirmations()
         self._transcriber = transcriber
         self._voice_max_seconds = voice_max_seconds
+        self._food_drafts = food_drafts if food_drafts is not None else miniapp.FoodDraftStore()
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         """Never raises: a webhook that errors makes Telegram resend the same update. A malformed
@@ -373,6 +376,11 @@ class Handler:
         except Exception as error:
             log.warning("could not send the reply of update %s: %s", update_id, describe(error))
             return terminal
+        if reply.followup is not None:
+            try:
+                await self._send(chat_id, reply.followup)
+            except Exception as error:
+                log.warning("could not send the follow-up of update %s: %s", update_id, describe(error))
         return terminal or not reply.transient
 
     async def _process_update(self, update: dict[str, Any], update_id: int | None) -> bool:
@@ -414,6 +422,10 @@ class Handler:
                 if self._sheet is None:
                     raise RuntimeError("this handler has no sheet API")
                 sheet = cast(miniapp.MiniappSheet, self._sheet)
+                if isinstance(payload, miniapp.FoodPayload):
+                    # The form carries the draft's id: its version replaces the chat draft, so a
+                    # later tap on that draft cannot write the old items.
+                    self._food_drafts.claim(payload.id, chat_id)
                 return await miniapp.handle(sheet, raw_text, chat_id, today, self._pending)
             decision = self._text_submissions.begin(chat_id, payload.id, payload.text)
         except Exception as error:
@@ -458,6 +470,7 @@ class Handler:
                 failed=True,
                 transient=False,
                 write_outcome="uncertain",
+                followup=reply.followup,
             )
         return reply
 
@@ -486,6 +499,16 @@ class Handler:
                 else:
                     answer = await self._bot.reply(text, user_id=str(chat_id), context=context)
             markup = buttons.keyboard(answer.write_ids) if answer.wrote else None
+            followup = None
+            if answer.food_draft is not None:
+                did = self._food_drafts.put(chat_id, answer.food_draft)
+                draft_markup = buttons.food_draft_keyboard(did, include_miniapp=bool(self._miniapp_url))
+                if answer.wrote:
+                    # The confirmation keeps its undo buttons; the draft gets its own message.
+                    draft_text = food_draft_summary(answer.food_draft, after_write=True)
+                    followup = Reply(draft_text, html=True, reply_markup=draft_markup)
+                else:
+                    markup = draft_markup
             transient = answer.failed and answer.outcome not in ("committed", "uncertain")
             return Reply(
                 answer.text,
@@ -494,6 +517,7 @@ class Handler:
                 failed=answer.failed,
                 transient=transient,
                 write_outcome=answer.outcome,
+                followup=followup,
             )
         except Exception as error:
             log.warning("bot failed on update %s: %s", update_id, describe(error))
@@ -794,6 +818,80 @@ class Handler:
             return await self._deliver(
                 chat_id, Reply(text, reply_markup=markup), update_id, reply_to=message_id
             )
+        if verb == buttons.DRAFT_OK:
+            did = ids[0] if ids else ""
+            draft = self._food_drafts.claim(did, chat_id)
+            await self._remove_keyboard(chat_id, message_id)
+            if draft is None:
+                return await self._deliver(
+                    chat_id, Reply(miniapp.DRAFT_EXPIRED), update_id, reply_to=message_id
+                )
+            if self._sheet is None:
+                raise RuntimeError("this handler has no sheet API")
+            sheet = cast(miniapp.MiniappSheet, self._sheet)
+            reply = await miniapp.commit_food_draft(sheet, draft, chat_id, did, self._pending)
+            # Refused as invalid (nothing written, and trying again as is would not help): the
+            # draft comes back so it can be adjusted. An outage keeps it behind the retry button.
+            rejected = reply.write_outcome == "not_committed" and not reply.transient
+            if rejected and reply.text != miniapp.ALREADY_SAVED:
+                self._food_drafts.restore(did, chat_id, draft)
+                reply = replace(
+                    reply,
+                    text=f"{reply.text}\n\n{miniapp.DRAFT_KEPT}",
+                    reply_markup=buttons.food_draft_keyboard(did, include_miniapp=bool(self._miniapp_url)),
+                )
+            return await self._deliver(chat_id, reply, update_id, reply_to=message_id)
+        if verb == buttons.DRAFT_NO:
+            did = ids[0] if ids else ""
+            draft = self._food_drafts.claim(did, chat_id)
+            await self._remove_keyboard(chat_id, message_id)
+            msg = miniapp.DRAFT_CANCELLED if draft is not None else miniapp.DRAFT_EXPIRED
+            return await self._deliver(chat_id, Reply(msg), update_id, reply_to=message_id)
+        if verb == buttons.DRAFT_MINIAPP:
+            did = ids[0] if ids else ""
+            draft = self._food_drafts.peek(did, chat_id)
+            if draft is None:
+                await self._remove_keyboard(chat_id, message_id)
+                return await self._deliver(
+                    chat_id, Reply(miniapp.DRAFT_EXPIRED), update_id, reply_to=message_id
+                )
+            if not self._miniapp_url or self._sheet is None:
+                return await self._deliver(
+                    chat_id,
+                    Reply("Ajuste no Mini App indisponível no momento. Confirme ou cancele por aqui."),
+                    update_id,
+                    reply_to=message_id,
+                )
+            cat = await self._sheet.catalog()
+            if not cat.get("ok"):
+                return await self._deliver(
+                    chat_id, Reply(SHEET_DOWN, failed=True, transient=True), update_id, reply_to=message_id
+                )
+            voice_keys = self._voice_link.issue_keys(chat_id) if self._voice_link else None
+            try:
+                markup, dropped = miniapp.food_draft_markup(
+                    self._miniapp_url, cat["result"], draft, voice_keys=voice_keys, draft_id=did
+                )
+            except miniapp.CatalogTooLarge as err:
+                return await self._deliver(
+                    chat_id,
+                    Reply(f"Não consegui abrir o Mini App ({err}). Confirme ou cancele por aqui."),
+                    update_id,
+                    reply_to=message_id,
+                )
+            text = (
+                f"Toque em “{miniapp.DRAFT_ADJUST_BUTTON}” abaixo para revisar e ajustar as gramas "
+                "no Mini App:"
+            )
+            if dropped:
+                names = ", ".join(miniapp.DROPPED_LABELS[k] for k in dropped)
+                text = f"{text}\nNão couberam no link: {names}."
+            return await self._deliver(
+                chat_id,
+                Reply(text, reply_markup=markup),
+                update_id,
+                reply_to=message_id,
+            )
         log.warning("unknown button data of %d characters on update %s", len(data), update_id)
         return True
 
@@ -866,6 +964,8 @@ def build_handler(
     confirmations: VoiceConfirmations | None = None,
     budget: Budget | None = None,
     transcriber: VoiceTranscriber | None = None,
+    food_drafts: miniapp.FoodDraftStore | None = None,
+    pending: miniapp.PendingStore | None = None,
 ) -> Handler:
     resolved_voice_link = voice_link
     if resolved_voice_link is None and settings.VOICE_API_URL and settings.APP_AUTH_SECRET is not None:
@@ -928,4 +1028,6 @@ def build_handler(
         confirmations=resolved_confirmations,
         transcriber=resolved_transcriber,
         voice_max_seconds=settings.VOICE_MAX_SECONDS,
+        food_drafts=food_drafts,
+        pending=pending,
     )

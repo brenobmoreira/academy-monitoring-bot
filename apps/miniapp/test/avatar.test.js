@@ -154,28 +154,32 @@ test('flip maps one rect onto another, centre to centre', () => {
   assert.equal(A.flip({ left: 0, top: 0, width: 0, height: 0 }, slot).s, 1);
 });
 
-test('formFor enforces exact priority order: dozing > review/sent > intro > view > base', () => {
-  // 1. dozing wins over every screen, intro and view
-  assert.equal(A.formFor({ dozing: true, screen: 'review', intro: true, view: 'workout' }), 'descanso');
+test('formFor enforces exact priority order: dozing > review/sent > resting > intro > view > base', () => {
+  // 1. dozing wins over every screen, resting, intro and view
+  assert.equal(A.formFor({ dozing: true, screen: 'review', resting: true, intro: true, view: 'workout' }), 'descanso');
   assert.equal(A.formFor({ dozing: true, screen: 'sent', view: 'food' }), 'descanso');
   assert.equal(A.formFor({ dozing: true, view: 'water' }), 'descanso');
 
-  // 2. review / sent screen wins over intro and view
-  assert.equal(A.formFor({ dozing: false, screen: 'review', intro: true, view: 'workout' }), 'revisao');
+  // 2. review / sent screen wins over resting, intro and view
+  assert.equal(A.formFor({ dozing: false, screen: 'review', resting: true, intro: true, view: 'workout' }), 'revisao');
   assert.equal(A.formFor({ screen: 'review', view: 'food' }), 'revisao');
   assert.equal(A.formFor({ screen: 'sent', view: 'workout' }), 'revisao');
 
-  // 3. intro wins over view
+  // 3. resting wins over intro and view (when not review/sent)
+  assert.equal(A.formFor({ view: 'workout', screen: 'form', resting: true }), 'descanso');
+  assert.equal(A.formFor({ resting: true, intro: true, view: 'food' }), 'descanso');
+
+  // 4. intro wins over view
   assert.equal(A.formFor({ intro: true, view: 'workout', screen: 'form' }), 'base');
   assert.equal(A.formFor({ intro: true, view: 'food' }), 'base');
   assert.equal(A.formFor({ intro: true, view: 'water' }), 'base');
 
-  // 4. view maps workout -> treino, food -> refeicao, water -> agua
+  // 5. view maps workout -> treino, food -> refeicao, water -> agua
   assert.equal(A.formFor({ view: 'workout', screen: 'form' }), 'treino');
   assert.equal(A.formFor({ view: 'food', screen: 'form' }), 'refeicao');
   assert.equal(A.formFor({ view: 'water', screen: 'form' }), 'agua');
 
-  // 5. fallback to base
+  // 6. fallback to base
   assert.equal(A.formFor(), 'base');
   assert.equal(A.formFor(null), 'base');
   assert.equal(A.formFor({ view: 'other' }), 'base');

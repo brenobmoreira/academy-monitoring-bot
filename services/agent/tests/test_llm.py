@@ -68,6 +68,7 @@ async def test_tools_are_declared_to_the_provider_in_openai_format():
         "save_diary",
         "save_workout",
         "save_food",
+        "propose_food",
         "copy_food",
         "save_measures",
         "get_exercise_history",

@@ -122,9 +122,10 @@ def test_food_draft_markup_trims_catalog_under_tight_budget_while_preserving_df(
     big_catalog = {
         **CATALOG,
         "foods": [f"Alimento longo número {i:03d}" for i in range(60)],
-        "foodValues": [
-            {"food": f"Alimento longo número {i:03d}", "unit": "g", "qty": 100, "kcal": 120 + i, "protein": 5}
-            for i in range(60)
+        # The sheet's `catalog` rows: name, base unit, base qty, kcal, protein, carbs, fat,
+        # household measure and its quantity.
+        "foodTable": [
+            [f"Alimento longo número {i:03d}", "g", 100, 120 + i, 5, 10, 2, None, None] for i in range(60)
         ],
         "todayTotals": {"kcal": 800, "protein": 60, "carbs": 90, "fat": 20},
         "phase": {"goal": {"kcal": 2400, "protein": 160, "carbs": 260, "fat": 70}},
@@ -146,6 +147,7 @@ def test_food_draft_markup_trims_catalog_under_tight_budget_while_preserving_df(
     assert "fv" in dropped
     decoded = decode_food_fragment(markup["keyboard"][0][0]["web_app"]["url"])
     assert decoded["view"] == "food"
+    assert "fv" not in decoded
     assert decoded["df"] == {
         "d": "2026-09-21",
         "m": "Almoço",
@@ -330,10 +332,15 @@ async def test_dno_discards_draft_without_calling_sheet_and_vok_can_propose_food
     assert len(drafts) == 0
 
 
-async def test_dok_uses_miniapp_retry_pipeline_when_sheet_is_temporarily_unavailable():
+async def test_dok_uses_miniapp_retry_pipeline_when_sheet_is_temporarily_unavailable(monkeypatch):
+    monkeypatch.setattr(miniapp, "RETRY_DELAYS", (0, 0))
+    down = {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": "timeout"}]}
     sheet = FakeSheet(
+        # All 3 automatic attempts fail, so the reply offers the retry button.
         food_add=[
-            {"ok": False, "errors": [{"path": "", "code": "unavailable", "message": "timeout"}]},
+            down,
+            down,
+            down,
             {
                 "ok": True,
                 "result": {
@@ -374,6 +381,6 @@ async def test_dok_uses_miniapp_retry_pipeline_when_sheet_is_temporarily_unavail
     assert retry_data.startswith(f"{buttons.RETRY}:")
 
     await handler.handle_update(tap(retry_data, chat_id=42, message_id=2, update_id=31, query_id="cb_retry"))
-    assert [op for op, _ in sheet.calls] == ["food.add", "food.add"]
-    assert sheet.request_ids[0] is not None and sheet.request_ids[0] == sheet.request_ids[1]
+    assert [op for op, _ in sheet.calls] == ["food.add"] * 4
+    assert sheet.request_ids[0] is not None and len(set(sheet.request_ids)) == 1
     assert "Arroz branco cozido" in tg.sent[-1][1]

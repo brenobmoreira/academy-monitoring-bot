@@ -137,6 +137,7 @@ Pain = Annotated[int, BeforeValidator(_whole), AfterValidator(_range(0, 10))]
 Qty = Annotated[int | float, AfterValidator(_range(0.001, 100000))]
 Portions = Annotated[int | float, AfterValidator(_range(0.01, 50))]
 WaterL = Annotated[int | float, AfterValidator(_range(0.05, 20))]
+WaterDeltaL = Annotated[int | float, AfterValidator(_range(0.05, 20))]
 
 
 class _Model(BaseModel):
@@ -315,7 +316,14 @@ class FoodPayload(_Versioned):
 
 class WaterArgs(_Model):
     date: Day
-    waterL: WaterL
+    waterL: WaterL | None = None
+    waterDeltaL: WaterDeltaL | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_water(self) -> WaterArgs:
+        if (self.waterL is not None) == (self.waterDeltaL is not None):
+            raise ValueError("informe exatamente um de: waterDeltaL ou waterL")
+        return self
 
 
 class WaterPayload(_Versioned):
@@ -688,7 +696,12 @@ async def handle(
         raise ValueError("text payloads must be routed to the agent, not miniapp.handle")
     if isinstance(payload, WaterPayload):
         op = "diary.upsert"
-        args = {"date": payload.args.date, "fields": {"waterL": payload.args.waterL}}
+        fields: dict[str, Any] = (
+            {"waterDeltaL": payload.args.waterDeltaL}
+            if payload.args.waterDeltaL is not None
+            else {"waterL": payload.args.waterL}
+        )
+        args = {"date": payload.args.date, "fields": fields}
     else:
         # What the page sent, now validated field by field (extra="forbid": nothing else is in there).
         args = json.loads(raw)["args"]
@@ -740,14 +753,37 @@ def reply_for(op: str, response: dict[str, Any]) -> Reply:
             lines.append(line)
         return Reply("\n".join(lines), failed=True, write_outcome=outcome)
     result = response.get("result") or {}
+    undone = result.get("undone") is True
+    deduplicated = result.get("deduplicated") is True
     try:
-        text = "\n".join(confirmation([(op, result)]))
+        lines = confirmation([(op, result)])
     except (KeyError, TypeError, ValueError) as error:
         log.warning("could not build the confirmation of %s: %s", op, describe(error))
+        if undone:
+            return Reply(
+                "↩️ Este envio já havia sido desfeito e não foi gravado de novo. Confira com /hoje.",
+                write_outcome=outcome,
+            )
+        if deduplicated:
+            return Reply(
+                "✅ Já estava registrado na planilha (não gravei de novo). Confira com /hoje.",
+                write_outcome=outcome,
+            )
         return Reply(
             "✅ A planilha aceitou, mas não consegui montar o resumo. Confira com /hoje.",
             write_outcome=outcome,
         )
+    if undone:
+        detail = "\n" + "\n".join(lines) if lines else ""
+        return Reply(
+            f"↩️ Este envio já havia sido desfeito e não foi gravado de novo.{detail}",
+            html=True,
+            reply_markup=None,
+            write_outcome=outcome,
+        )
+    if deduplicated:
+        lines = [*lines, "<i>Já estava registrado — não gravei de novo.</i>"]
+    text = "\n".join(lines)
     write_id = result.get("writeId")
     markup = buttons.keyboard([write_id]) if write_id else None
     return Reply(text, html=True, reply_markup=markup, write_outcome=outcome)
@@ -873,8 +909,7 @@ def _daily_intake(result: dict[str, Any]) -> dict[str, int | float]:
             if val is not None:
                 out[dst] = val
     if "todayDiary" in result:
-        # No row or no water yet is a known zero. Without "w" the page does not know the day's
-        # total and offers no incremental water (which would overwrite it).
+        # No row or no water yet is a known zero. Without "w" the page shows only the delta.
         diary = result["todayDiary"]
         raw = diary.get("waterL") if isinstance(diary, dict) else None
         water = 0 if raw is None else _finite_num(raw, positive=False)

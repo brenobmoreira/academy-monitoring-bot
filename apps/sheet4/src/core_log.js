@@ -40,12 +40,34 @@ const Core = {
       throw new Error('Outra alteração está em andamento. Tente de novo em alguns segundos.');
     }
     Core.lockDepth_ = 1;
+    let flushed = false;
+    let pendingErr = null;
+    let hasErr = false;
     try {
-      return fn();
+      const out = fn();
+      flushed = true;
+      if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp && typeof SpreadsheetApp.flush === 'function') {
+        SpreadsheetApp.flush();
+      }
+      return out;
+    } catch (err) {
+      hasErr = true;
+      pendingErr = err;
     } finally {
+      if (hasErr && !flushed) {
+        try {
+          if (typeof SpreadsheetApp !== 'undefined' && SpreadsheetApp && typeof SpreadsheetApp.flush === 'function') {
+            SpreadsheetApp.flush();
+          }
+        } catch (flushErr) {
+          if (flushErr && typeof flushErr === 'object') flushErr.writeState = 'unknown';
+          pendingErr = flushErr;
+        }
+      }
       Core.lockDepth_ = 0;
       lock.releaseLock();
     }
+    throw pendingErr;
   },
 
   /** Subscribes to an event (e.g. 'phase.changed'); listeners run synchronously in order. */

@@ -204,13 +204,31 @@ test('ChangeLog.record logs changes described by the caller as one action', () =
   assert.throws(() => ctx.ChangeLog.record('x', [{ kind: 'move', tab: 'Diário' }]), /Unknown change kind/);
 });
 
-test('Core.withLock takes and releases the script lock, is re-entrant, and reports contention in Portuguese', () => {
+test('Core.withLock takes and releases the script lock, flushes before release, is re-entrant, and reports contention in Portuguese', () => {
   const ctx = boot();
-  const r = ctx.Core.withLock(() => ctx.Core.withLock(() => 42));
+  const order = [];
+  const origLock = ctx.LockService.getScriptLock;
+  ctx.LockService.getScriptLock = () => {
+    const l = origLock();
+    return {
+      waitLock: (ms) => { order.push('wait'); return l.waitLock(ms); },
+      releaseLock: () => { order.push('release'); return l.releaseLock(); },
+      hasLock: () => l.hasLock(),
+    };
+  };
+  const origFlush = ctx.SpreadsheetApp.flush;
+  ctx.SpreadsheetApp.flush = () => { order.push('flush'); return origFlush(); };
+  const r = ctx.Core.withLock(() => ctx.Core.withLock(() => { order.push('fn'); return 42; }));
   assert.equal(r, 42);
   eq(ctx.__locks, ['wait', 'release']);
-  assert.throws(() => ctx.Core.withLock(() => { throw new Error('x'); }), /x/);
+  eq(order, ['wait', 'fn', 'flush', 'release']);
+
+  order.length = 0;
+  assert.throws(() => ctx.Core.withLock(() => { order.push('throw'); throw new Error('x'); }), /x/);
   assert.equal(ctx.__locks.at(-1), 'release');
+  eq(order, ['wait', 'throw', 'flush', 'release']);
+
+  ctx.SpreadsheetApp.flush = origFlush;
   ctx.LockService.getScriptLock = () => ({ waitLock: () => { throw new Error('timeout'); }, releaseLock: () => {} });
   assert.throws(() => ctx.Core.withLock(() => 1), /Outra alteração está em andamento/);
 });

@@ -49,7 +49,14 @@ def confirmation(writes: list[Write]) -> list[str]:
     for op, result in writes:
         if op == "diary.upsert":
             group = groups.setdefault(("diary", result["date"]), {"date": result["date"], "fields": {}})
-            group["fields"].update(result.get("fields") or {})
+            fields = result.get("fields") or {}
+            group["fields"].update(fields)
+            delta = result.get("waterDeltaL")
+            if isinstance(delta, int | float) and not isinstance(delta, bool) and delta > 0:
+                prev_delta = group.get("water_delta")
+                group["water_delta"] = round((prev_delta or 0) + float(delta), 3)
+            elif "waterL" in fields:
+                group.pop("water_delta", None)
         elif op == "measures.upsert":
             group = groups.setdefault(("measures", result["date"]), {"date": result["date"], "fields": {}})
             group["fields"].update(result.get("fields") or {})
@@ -87,10 +94,13 @@ def confirmation(writes: list[Write]) -> list[str]:
 
 
 def _diary(group: dict[str, Any]) -> list[str]:
-    parts = [
-        f"{escape(LABELS.get(k, k))} {'apagado' if v is None else _value(v)}"
-        for k, v in group["fields"].items()
-    ]
+    water_delta = group.get("water_delta")
+    parts = []
+    for k, v in group["fields"].items():
+        text = f"{escape(LABELS.get(k, k))} {'apagado' if v is None else _value(v)}"
+        if k == "waterL" and v is not None and water_delta is not None:
+            text += f" (+{_value(water_delta)} L)"
+        parts.append(text)
     return [" · ".join([bold(_day(group["date"])), *parts])]
 
 

@@ -45,6 +45,13 @@ def test_water_is_labelled_in_litres():
     water = ("diary.upsert", {"date": "2026-09-21", "fields": {"waterL": 2.5}})
     assert confirmation([water]) == ["<b>21/09</b> · Água L 2,5"]
 
+    delta = ("diary.upsert", {"date": "2026-09-21", "fields": {"waterL": 2.25}, "waterDeltaL": 0.5})
+    assert confirmation([delta]) == ["<b>21/09</b> · Água L 2,25 (+0,5 L)"]
+
+    delta2 = ("diary.upsert", {"date": "2026-09-21", "fields": {"waterL": 2.5}, "waterDeltaL": 0.25})
+    assert confirmation([delta, delta2]) == ["<b>21/09</b> · Água L 2,5 (+0,75 L)"]
+    assert confirmation([delta, water]) == ["<b>21/09</b> · Água L 2,5"]
+
 
 def test_merges_repeated_writes_of_the_same_day_and_session():
     fix = ("diary.upsert", {"date": "2026-09-21", "row": 6, "fields": {"weightKg": 82.1, "sleepH": 7.5}})

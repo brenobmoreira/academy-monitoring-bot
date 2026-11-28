@@ -816,6 +816,7 @@ test('rest timer stops cleanly on Pular, tab switch and review without altering 
 test('daily balance updates live vs goal on food tab and date switch isolates yesterday baseline', async () => {
   const ownName = 'Frango grelhado teste';
   const customCatalog = Object.assign({}, SAMPLE, {
+    today: today(),
     foods: [ownName],
     fv: [[0, 0, 100, 160, 32, 0, 3, null, null]],
     fu: ['g'],
@@ -887,11 +888,11 @@ test('quick hydration chips accumulate water, switch MainButton when plate is em
   assert.match(box().querySelector('.water-val').textContent, /^2,25 L \/ 2,5 L/);
   assert.equal(box().querySelector('.water-delta').textContent, '+750 ml');
 
-  // Review via Registrar água button -> emits t: "water" without wiping food draft
+  // Review via Registrar água button -> emits t: "water" with waterDeltaL without wiping food draft
   box().querySelector('#water-send').click();
   p.timers.run(400);
   assert.equal(p.review.hidden, false);
-  assert.match(p.review.textContent, /2,25 L/);
+  assert.match(p.review.textContent, /\+0,75 L \(total estimado: 2,25 L\)/);
   assert.doesNotMatch(p.review.textContent, /gravado|salvo/i);
 
   p.press();
@@ -899,7 +900,7 @@ test('quick hydration chips accumulate water, switch MainButton when plate is em
   const waterPayload = JSON.parse(p.tg.sent[0]);
   assert.equal(waterPayload.t, 'water');
   assert.match(waterPayload.id, ID);
-  assert.deepEqual(waterPayload.args, { date: today(), waterL: 2.25 });
+  assert.deepEqual(waterPayload.args, { date: today(), waterDeltaL: 0.75 });
   const draftKey = [...storage.map.keys()].find((k) => k.indexOf(':f:') > 0);
   assert.ok(draftKey, 'existing food draft stays intact in storage after water send');
 
@@ -910,5 +911,28 @@ test('quick hydration chips accumulate water, switch MainButton when plate is em
   emptyP.press();
   emptyP.timers.run(400);
   emptyP.press();
-  assert.deepEqual(JSON.parse(emptyP.tg.sent[0]).args, { date: today(), waterL: 1.75 });
+  assert.deepEqual(JSON.parse(emptyP.tg.sent[0]).args, { date: today(), waterDeltaL: 0.25 });
+});
+
+test('stale catalog link (c.today !== S.today) hides stale day snapshot from Hoje vs. meta card while keeping atomic waterDeltaL active', async () => {
+  const staleCatalog = Object.assign({}, SAMPLE, {
+    goal: { k: 2400, p: 160, c: 260, g: 70 },
+    today: '2020-01-01',
+    day: { k: 1850, p: 140, c: 210, g: 55, w: 2.25 },
+  });
+  const p = await boot({ view: 'food', catalog: staleCatalog });
+  const box = p.doc.getElementById('daily-balance');
+  assert.equal(box.querySelector('.balance-title').textContent, 'Nesta refeição');
+  assert.equal(box.querySelector('.balance-kcal').textContent, '0 / 2400 kcal');
+  assert.equal(box.querySelector('.balance-rem').textContent, 'Faltam 2400 kcal');
+  assert.deepEqual(box.querySelectorAll('.macro-val').map((el) => el.textContent), ['0 / 160 g', '0 / 260 g', '0 / 70 g']);
+  assert.match(box.querySelector('.water-val').textContent, /^0 L \/ 2,5 L/);
+
+  button(box, '+500 ml').click();
+  p.press();
+  p.timers.run(400);
+  assert.match(p.review.textContent, /\+0,5 L \(será somado ao total já registrado na planilha\)/);
+  assert.doesNotMatch(p.review.textContent, /2,75 L|total estimado/);
+  p.press();
+  assert.deepEqual(JSON.parse(p.tg.sent[0]).args, { date: today(), waterDeltaL: 0.5 });
 });

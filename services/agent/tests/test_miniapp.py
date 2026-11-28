@@ -988,36 +988,149 @@ WATER: dict[str, Any] = {
     "args": {"date": "2026-11-09", "waterL": 2.25},
 }
 
+WATER_DELTA: dict[str, Any] = {
+    "v": 1,
+    "t": "water",
+    "id": SID,
+    "args": {"date": "2026-11-09", "waterDeltaL": 0.5},
+}
+
 
 def test_water_payload_validation_is_strict_and_bounded():
+    # Legacy absolute waterL stays accepted for open links
     parsed, errors = parse_payload(raw(WATER), TODAY)
     assert errors == []
     assert isinstance(parsed, miniapp.WaterPayload)
     assert parsed.t == "water"
     assert parsed.args.waterL == 2.25
+    assert parsed.args.waterDeltaL is None
 
-    assert errors_of(mutated(WATER, ["args", "waterL"], 0))
-    assert errors_of(mutated(WATER, ["args", "waterL"], 20.5))
-    assert errors_of(mutated(WATER, ["args", "waterL"], "2,5"))
-    assert errors_of(mutated(WATER, ["args", "waterL"], None))
-    assert errors_of(mutated(WATER, ["args", "waterL"], True))
-    assert errors_of(mutated(WATER, ["args", "date"], "2026-11-10"))
-    assert errors_of(mutated(WATER, ["args", "extra"], 1))
+    # Incremental waterDeltaL
+    parsed_delta, errors_delta = parse_payload(raw(WATER_DELTA), TODAY)
+    assert errors_delta == []
+    assert isinstance(parsed_delta, miniapp.WaterPayload)
+    assert parsed_delta.t == "water"
+    assert parsed_delta.args.waterDeltaL == 0.5
+    assert parsed_delta.args.waterL is None
+
+    # Boundary values for waterDeltaL and waterL (0.05..20, including past dates like Ontem)
+    assert parse_payload(raw(mutated(WATER_DELTA, ["args", "waterDeltaL"], 0.05)), TODAY)[1] == []
+    assert parse_payload(raw(mutated(WATER_DELTA, ["args", "waterDeltaL"], 20)), TODAY)[1] == []
+    assert parse_payload(raw(mutated(WATER, ["args", "waterL"], 0.05)), TODAY)[1] == []
+    assert parse_payload(raw(mutated(WATER, ["args", "waterL"], 20)), TODAY)[1] == []
+    assert parse_payload(raw(mutated(WATER_DELTA, ["args", "date"], "2026-11-08")), TODAY)[1] == []
+
+    # Invalid waterL and waterDeltaL values (including 0.04 below the 0.05 L minimum)
+    for key in ("waterL", "waterDeltaL"):
+        base = WATER if key == "waterL" else WATER_DELTA
+        assert errors_of(mutated(base, ["args", key], 0))
+        assert errors_of(mutated(base, ["args", key], -0.25))
+        assert errors_of(mutated(base, ["args", key], 0.01))
+        assert errors_of(mutated(base, ["args", key], 0.04))
+        assert errors_of(mutated(base, ["args", key], 20.5))
+        assert errors_of(mutated(base, ["args", key], "0,5"))
+        assert errors_of(mutated(base, ["args", key], None))
+        assert errors_of(mutated(base, ["args", key], True))
+
+    # NaN / Infinity / -Infinity in raw JSON are rejected
+    for non_finite in ("NaN", "Infinity", "-Infinity"):
+        bad_raw = (
+            f'{{"v":1,"t":"water","id":"{SID}","args":{{"date":"2026-11-09","waterDeltaL":{non_finite}}}}}'
+        )
+        assert errors_of(bad_raw) == ["args.waterDeltaL: esperado número finito"]
+
+    # Conflict: both waterL and waterDeltaL, or neither
+    both = {**WATER, "args": {"date": "2026-11-09", "waterL": 2.0, "waterDeltaL": 0.5}}
+    assert "informe exatamente um de: waterDeltaL ou waterL" in errors_of(both)[0]
+    neither = {**WATER, "args": {"date": "2026-11-09"}}
+    assert "informe exatamente um de: waterDeltaL ou waterL" in errors_of(neither)[0]
+
+    assert errors_of(mutated(WATER_DELTA, ["args", "date"], "2026-11-10"))
+    assert errors_of(mutated(WATER_DELTA, ["args", "extra"], 1))
 
 
 async def test_handle_water_writes_diary_with_request_id_and_retry():
-    ok = {
+    # Incremental waterDeltaL: forwards waterDeltaL, retries idempotently, shows delta + total + undo
+    ok_delta = {
         "ok": True,
-        "result": {"writeId": "w3", "date": "2026-11-09", "fields": {"waterL": 2.25}},
+        "result": {
+            "writeId": "w3",
+            "date": "2026-11-09",
+            "fields": {"waterL": 2.25},
+            "waterDeltaL": 0.5,
+        },
     }
-    sheet = FakeSheet(diary_upsert=[DOWN, DOWN, ok])
+    sheet = FakeSheet(diary_upsert=[DOWN, DOWN, ok_delta])
     store = PendingStore()
-    reply = await handle(sheet, raw(WATER), 5, TODAY, store)
-    assert sheet.calls == [("diary.upsert", {"date": "2026-11-09", "fields": {"waterL": 2.25}})] * 3
+    reply = await handle(sheet, raw(WATER_DELTA), 5, TODAY, store)
+    assert sheet.calls == [("diary.upsert", {"date": "2026-11-09", "fields": {"waterDeltaL": 0.5}})] * 3
     assert len(set(sheet.request_ids)) == 1
     assert sheet.request_ids[0] == request_id(5, SID, "diary.upsert")
-    assert "Água L 2,25" in reply.text and reply.write_outcome == "committed"
-    assert markup(reply)["inline_keyboard"][0][1]["callback_data"] == "undo:w3"
+    assert reply.text == "<b>09/11</b> · Água L 2,25 (+0,5 L)"
+    assert reply.write_outcome == "committed"
+    kb = markup(reply)["inline_keyboard"][0]
+    assert kb[1] == {"text": "↩️ Desfazer", "callback_data": "undo:w3"}
+
+    # Handler end-to-end with legacy waterL backward compatibility
+    ok_legacy = {
+        "ok": True,
+        "result": {"writeId": "w4", "date": "2026-11-09", "fields": {"waterL": 2.25}},
+    }
+    tg = FakeTelegram()
+    legacy_sheet = FakeSheet(diary_upsert=[ok_legacy])
+    await Handler({42}, FakeBot(), tg, sheet=legacy_sheet, clock=clock()).handle_update(
+        web_app_update(WATER, update_id=77)
+    )
+    assert legacy_sheet.calls == [("diary.upsert", {"date": "2026-11-09", "fields": {"waterL": 2.25}})]
+    assert legacy_sheet.request_ids == [request_id(42, SID, "diary.upsert")]
+    assert tg.sent[-1][1] == "<b>09/11</b> · Água L 2,25"
+
+    # Deduplicated replay informs clearly that nothing was written again while keeping undo for active writes
+    dedup_active = {
+        "ok": True,
+        "result": {
+            "writeId": "w3",
+            "date": "2026-11-09",
+            "fields": {"waterL": 0.25},
+            "waterDeltaL": 0.25,
+            "deduplicated": True,
+        },
+    }
+    dedup_reply = await handle(
+        FakeSheet(diary_upsert=[dedup_active]),
+        raw(mutated(WATER_DELTA, ["args", "waterDeltaL"], 0.25)),
+        5,
+        TODAY,
+        PendingStore(),
+    )
+    assert "<b>09/11</b> · Água L 0,25 (+0,25 L)" in dedup_reply.text
+    assert "Já estava registrado" in dedup_reply.text
+    assert dedup_reply.write_outcome == "committed"
+    assert markup(dedup_reply)["inline_keyboard"][0][1] == {"text": "↩️ Desfazer", "callback_data": "undo:w3"}
+
+    # Deduplicated replay of an already-undone write states it was undone and NEVER offers ↩️ Desfazer
+    dedup_undone = {
+        "ok": True,
+        "result": {
+            "writeId": "w3",
+            "date": "2026-11-09",
+            "fields": {"waterL": 0.25},
+            "waterDeltaL": 0.25,
+            "deduplicated": True,
+            "undone": True,
+        },
+    }
+    undone_reply = await handle(
+        FakeSheet(diary_upsert=[dedup_undone]),
+        raw(mutated(WATER_DELTA, ["args", "waterDeltaL"], 0.25)),
+        5,
+        TODAY,
+        PendingStore(),
+    )
+    assert "já havia sido desfeito" in undone_reply.text
+    assert "não foi gravado de novo" in undone_reply.text
+    assert undone_reply.reply_markup is None
+    assert undone_reply.write_outcome == "committed"
 
 
 def test_catalog_v1_encodes_daily_goal_and_intake_in_food_button_only_and_trims_under_budget():

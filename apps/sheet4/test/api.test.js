@@ -1146,3 +1146,115 @@ test('catalog includes todayTotals matching day.get totals once food is logged t
   });
   assert.equal(cat.todayTotals.kcal, 192);
 });
+
+test('diary.upsert waterDeltaL: atomic sum on empty/existing day, requestId idempotency, conflict, max cap and write.undo', () => {
+  const ctx = setup();
+
+  // 1. Sum on empty day + idempotent retry with same requestId
+  const w1 = ok(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterDeltaL: 0.25 } }, 'req-water-1'));
+  assert.deepEqual(w1.fields, { waterL: 0.25 });
+  assert.equal(w1.waterDeltaL, 0.25);
+  assert.deepEqual(plain(w1.changed), ['waterL']);
+  assert.ok(w1.writeId);
+  assert.equal(ctx.Days.get('2026-10-19').waterL, 0.25);
+
+  const w1Retry = ok(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterDeltaL: 0.25 } }, 'req-water-1'));
+  assert.equal(w1Retry.deduplicated, true);
+  assert.equal(w1Retry.writeId, w1.writeId);
+  assert.deepEqual(w1Retry.fields, { waterL: 0.25 });
+  assert.equal(w1Retry.waterDeltaL, 0.25);
+  assert.equal(ctx.Days.get('2026-10-19').waterL, 0.25, 'same requestId never adds delta twice');
+
+  // Reusing same requestId with different delta conflicts
+  assert.deepEqual(codes(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterDeltaL: 0.5 } }, 'req-water-1')), ['requestId:conflict']);
+
+  // 2. Sum on day that already has water (0.25 + 0.5 = 0.75); retrying w1 AFTER w2 still returns w1's own 0.25 L snapshot!
+  const w2 = ok(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterDeltaL: 0.5 } }, 'req-water-2'));
+  assert.deepEqual(w2.fields, { waterL: 0.75 });
+  assert.equal(w2.waterDeltaL, 0.5);
+  assert.equal(ctx.Days.get('2026-10-19').waterL, 0.75);
+
+  const w1RetryAfterW2 = ok(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterDeltaL: 0.25 } }, 'req-water-1'));
+  assert.equal(w1RetryAfterW2.deduplicated, true);
+  assert.equal(w1RetryAfterW2.writeId, w1.writeId);
+  assert.deepEqual(w1RetryAfterW2.fields, { waterL: 0.25 }, 'deduplicated response preserves w1 snapshot instead of mixing w2 state');
+  assert.equal(w1RetryAfterW2.waterDeltaL, 0.25);
+  assert.equal(ctx.Days.get('2026-10-19').waterL, 0.75, 'live sheet total stays 0.75 L');
+
+  const u2 = ok(ctx.api('write.undo', { writeId: w2.writeId }));
+  assert.deepEqual(u2.undone.fields, ['waterL']);
+  assert.equal(ctx.Days.get('2026-10-19').waterL, 0.25);
+  const w2Late = ok(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterDeltaL: 0.5 } }, 'req-water-2'));
+  assert.equal(w2Late.deduplicated, true);
+  assert.equal(w2Late.undone, true);
+  assert.deepEqual(w2Late.fields, { waterL: 0.75 });
+  assert.equal(ctx.Days.get('2026-10-19').waterL, 0.25);
+
+  // Existing row without water -> waterDeltaL sets 0.5, and write.undo restores waterL to null while keeping weightKg
+  ok(ctx.api('diary.upsert', { date: '2026-10-18', fields: { weightKg: 82.0 } }));
+  const wExistingNoWater = ok(ctx.api('diary.upsert', { date: '2026-10-18', fields: { waterDeltaL: 0.5 } }, 'req-water-18'));
+  assert.deepEqual(wExistingNoWater.fields, { waterL: 0.5 });
+  assert.equal(ctx.Days.get('2026-10-18').weightKg, 82.0);
+  const u18 = ok(ctx.api('write.undo', { writeId: wExistingNoWater.writeId }));
+  assert.deepEqual(u18.undone.fields, ['waterL']);
+  assert.equal(ctx.Days.get('2026-10-18').waterL, null);
+  assert.equal(ctx.Days.get('2026-10-18').weightKg, 82.0);
+
+  // 3. Validation: conflict when waterL + waterDeltaL come together, non-positive/invalid/null, and max 20 L overflow
+  const conflict = ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterL: 2, waterDeltaL: 0.5 } });
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.writeState, 'none');
+  assert.deepEqual(codes(conflict), ['args.fields.waterDeltaL:conflict']);
+
+  const conflictNull = ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterL: null, waterDeltaL: 0.5 } });
+  assert.deepEqual(codes(conflictNull), ['args.fields.waterDeltaL:conflict']);
+
+  assert.deepEqual(codes(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterDeltaL: 0 } })), ['args.fields.waterDeltaL:out_of_range']);
+  assert.deepEqual(codes(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterDeltaL: 0.04 } })), ['args.fields.waterDeltaL:out_of_range']);
+  assert.deepEqual(codes(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterDeltaL: -0.25 } })), ['args.fields.waterDeltaL:out_of_range']);
+  assert.deepEqual(codes(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterDeltaL: 20.5 } })), ['args.fields.waterDeltaL:out_of_range']);
+  assert.deepEqual(codes(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterDeltaL: null } })), ['args.fields.waterDeltaL:wrong_type']);
+  assert.deepEqual(codes(ctx.api('diary.upsert', { date: '2026-10-19', fields: { waterDeltaL: '0.5' } })), ['args.fields.waterDeltaL:wrong_type']);
+  assert.deepEqual(ok(ctx.api('diary.upsert', { date: '2026-10-17', fields: { waterDeltaL: 0.05 } })).fields, { waterL: 0.05 });
+  assert.deepEqual(ok(ctx.api('diary.upsert', { date: '2026-10-16', fields: { waterL: 0.01 } })).fields, { waterL: 0.01 });
+
+  // Overflow against stored waterL (19.75 + 0.5 = 20.25 > 20) rolls back cleanly with writeState: 'none'
+  ok(ctx.api('diary.upsert', { date: '2026-10-20', fields: { waterL: 19.75, weightKg: 81.0 } }));
+  const overflow = ctx.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: 80.5, waterDeltaL: 0.5 } }, 'req-overflow');
+  assert.equal(overflow.ok, false);
+  assert.equal(overflow.writeState, 'none');
+  assert.deepEqual(codes(overflow), ['args.fields.waterDeltaL:out_of_range']);
+  assert.equal(ctx.Days.get('2026-10-20').waterL, 19.75);
+  assert.equal(ctx.Days.get('2026-10-20').weightKg, 81.0, 'companion field in overflowing upsert was not written');
+
+  // 4. Lock discipline: SpreadsheetApp.flush() runs before lock.releaseLock(), and a flush failure reports writeState: 'unknown'
+  const events = [];
+  const origLock = ctx.LockService.getScriptLock;
+  ctx.LockService.getScriptLock = () => {
+    const l = origLock();
+    return {
+      waitLock: (ms) => { events.push('wait'); return l.waitLock(ms); },
+      releaseLock: () => { events.push('release'); return l.releaseLock(); },
+      hasLock: () => l.hasLock(),
+    };
+  };
+  const origFlush = ctx.SpreadsheetApp.flush;
+  ctx.SpreadsheetApp.flush = () => { events.push('flush'); return origFlush(); };
+  ok(ctx.api('diary.upsert', { date: '2026-10-15', fields: { waterDeltaL: 0.25 } }, 'req-flush-ok'));
+  assert.deepEqual(events, ['wait', 'flush', 'release']);
+
+  events.length = 0;
+  ctx.SpreadsheetApp.flush = () => { events.push('flush_err'); throw new Error('Service Spreadsheets timed out'); };
+  const flushFail = ctx.api('diary.upsert', { date: '2026-10-15', fields: { waterDeltaL: 0.25 } }, 'req-flush-fail');
+  assert.equal(flushFail.ok, false);
+  assert.equal(flushFail.writeState, 'unknown', 'flush failure after write must never claim writeState: none');
+  assert.deepEqual(events, ['wait', 'flush_err', 'release'], 'lock is always released even when flush throws');
+
+  events.length = 0;
+  const rollbackFlushFail = ctx.api('diary.upsert', { date: '2026-10-20', fields: { weightKg: 80.5, waterDeltaL: 0.5 } }, 'req-rollback-flush-fail');
+  assert.equal(rollbackFlushFail.ok, false);
+  assert.equal(rollbackFlushFail.writeState, 'unknown', 'flush failure after rollback must also report writeState: unknown');
+  assert.deepEqual(events, ['wait', 'flush_err', 'release']);
+  ctx.SpreadsheetApp.flush = origFlush;
+  ctx.LockService.getScriptLock = origLock;
+});

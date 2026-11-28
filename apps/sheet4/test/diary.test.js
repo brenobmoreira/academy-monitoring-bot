@@ -128,3 +128,42 @@ test('baselineWeight rounds to 2 decimals and uses analysis.weightTrendDays', ()
   });
   assert.equal(ctx.Diary.baselineWeight('2026-09-29'), 67.15);
 });
+
+test('waterDeltaL sums without float noise, rejects conflict with waterL or max overflow, and Undo restores prior state', () => {
+  const ctx = bootDaily();
+  // Empty day -> creates row with 0.1 L
+  const r1 = run(ctx, () => ctx.Diary.save('2026-09-29', { waterDeltaL: 0.1 }));
+  assert.deepEqual(plain(r1.changed), ['waterL']);
+  assert.equal(ctx.Days.get('2026-09-29').waterL, 0.1);
+
+  // Add 0.2 L -> exact 0.3 L (no 0.30000000000000004 float noise)
+  run(ctx, () => ctx.Diary.save('2026-09-29', { waterDeltaL: 0.2 }));
+  assert.equal(ctx.Days.get('2026-09-29').waterL, 0.3);
+
+  // Undo second add -> restores 0.1 L; Undo first add -> clears appended row
+  ctx.Undo.last();
+  assert.equal(ctx.Days.get('2026-09-29').waterL, 0.1);
+  ctx.Undo.last();
+  assert.equal(ctx.Days.get('2026-09-29'), null);
+
+  // Existing day with weightKg and empty waterL -> Undo restores waterL to null while keeping weightKg
+  run(ctx, () => ctx.Diary.save('2026-09-28', { weightKg: 67.5 }));
+  run(ctx, () => ctx.Diary.save('2026-09-28', { waterDeltaL: 0.5 }));
+  assert.equal(ctx.Days.get('2026-09-28').waterL, 0.5);
+  ctx.Undo.last();
+  assert.equal(ctx.Days.get('2026-09-28').waterL, null);
+  assert.equal(ctx.Days.get('2026-09-28').weightKg, 67.5);
+
+  // Conflict and bounds (waterDeltaL min is 0.05 L, while absolute waterL continues to accept 0..20)
+  assert.throws(() => run(ctx, () => ctx.Diary.save('2026-09-28', { waterL: 2, waterDeltaL: 0.5 })), /waterL e waterDeltaL/);
+  assert.throws(() => run(ctx, () => ctx.Diary.save('2026-09-28', { waterDeltaL: 0 })), /fora da faixa/);
+  assert.throws(() => run(ctx, () => ctx.Diary.save('2026-09-28', { waterDeltaL: 0.04 })), /fora da faixa 0\.05–20/);
+  assert.throws(() => run(ctx, () => ctx.Diary.save('2026-09-28', { waterDeltaL: null })), /valor inválido/);
+  run(ctx, () => ctx.Diary.save('2026-09-28', { waterDeltaL: 0.05 }));
+  assert.equal(ctx.Days.get('2026-09-28').waterL, 0.05);
+  run(ctx, () => ctx.Diary.save('2026-09-28', { waterL: 0.01 }));
+  assert.equal(ctx.Days.get('2026-09-28').waterL, 0.01);
+  run(ctx, () => ctx.Diary.save('2026-09-28', { waterL: 19.8 }));
+  assert.throws(() => run(ctx, () => ctx.Diary.save('2026-09-28', { waterDeltaL: 0.5 })), /fora da faixa 0–20/);
+  assert.equal(ctx.Days.get('2026-09-28').waterL, 19.8);
+});

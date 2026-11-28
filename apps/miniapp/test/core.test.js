@@ -797,8 +797,18 @@ test('dailyBalance, formatLiters, formatWaterDelta and buildWater compute target
     errors: [],
   });
 
+  assert.deepEqual(C.buildWater({ date: TODAY, baseWaterL: 0, addWaterL: 0.05 }, { today: TODAY }), {
+    args: { date: TODAY, waterDeltaL: 0.05 },
+    errors: [],
+  });
+  assert.ok(C.buildWater({ date: TODAY, baseWaterL: 0, addWaterL: 0.04 }, { today: TODAY }).errors.length);
   assert.ok(C.buildWater({ date: TODAY, baseWaterL: 1.5, addWaterL: 0 }, { today: TODAY }).errors.length);
   assert.ok(C.buildWater({ date: TODAY, baseWaterL: 19.75, addWaterL: 0.5 }, { today: TODAY }).errors.length);
+  assert.deepEqual(C.buildWater({ date: TODAY, baseWaterL: 19.75, addWaterL: 0.5 }, { today: TODAY, restored: true }), {
+    args: { date: TODAY, waterDeltaL: 0.5 },
+    errors: [],
+  });
+  assert.ok(C.buildWater({ date: TODAY, baseWaterL: 19.75, addWaterL: 20.5 }, { today: TODAY, restored: true }).errors.length);
   assert.ok(C.buildWater({ date: TODAY, baseWaterL: null, addWaterL: 20.5 }, { today: TODAY }).errors.length);
   assert.ok(C.buildWater({ date: '2026-11-10', baseWaterL: 0, addWaterL: 0.5 }, { today: TODAY }).errors.length);
   assert.equal(C.pulsoSummary({ view: 'water', waterTotal: 1.75 }), 'Água pronta para conferir: 1,75 L.');

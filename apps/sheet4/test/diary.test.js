@@ -154,10 +154,15 @@ test('waterDeltaL sums without float noise, rejects conflict with waterL or max 
   assert.equal(ctx.Days.get('2026-09-28').waterL, null);
   assert.equal(ctx.Days.get('2026-09-28').weightKg, 67.5);
 
-  // Conflict and bounds
+  // Conflict and bounds (waterDeltaL min is 0.05 L, while absolute waterL continues to accept 0..20)
   assert.throws(() => run(ctx, () => ctx.Diary.save('2026-09-28', { waterL: 2, waterDeltaL: 0.5 })), /waterL e waterDeltaL/);
   assert.throws(() => run(ctx, () => ctx.Diary.save('2026-09-28', { waterDeltaL: 0 })), /fora da faixa/);
+  assert.throws(() => run(ctx, () => ctx.Diary.save('2026-09-28', { waterDeltaL: 0.04 })), /fora da faixa 0\.05–20/);
   assert.throws(() => run(ctx, () => ctx.Diary.save('2026-09-28', { waterDeltaL: null })), /valor inválido/);
+  run(ctx, () => ctx.Diary.save('2026-09-28', { waterDeltaL: 0.05 }));
+  assert.equal(ctx.Days.get('2026-09-28').waterL, 0.05);
+  run(ctx, () => ctx.Diary.save('2026-09-28', { waterL: 0.01 }));
+  assert.equal(ctx.Days.get('2026-09-28').waterL, 0.01);
   run(ctx, () => ctx.Diary.save('2026-09-28', { waterL: 19.8 }));
   assert.throws(() => run(ctx, () => ctx.Diary.save('2026-09-28', { waterDeltaL: 0.5 })), /fora da faixa 0–20/);
   assert.equal(ctx.Days.get('2026-09-28').waterL, 19.8);

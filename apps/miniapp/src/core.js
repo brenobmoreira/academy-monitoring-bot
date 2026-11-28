@@ -1911,10 +1911,11 @@
     };
   }
 
-  /** Water state {date, addWaterL, baseWaterL?} → payload args {date, waterDeltaL} for t: "water". */
+  /** Water state {date, addWaterL, baseWaterL?, restored?} → payload args {date, waterDeltaL} for t: "water". */
   function buildWater(state, opts) {
     var errors = [];
     var s = state || {};
+    var isRestored = !!((opts && opts.restored) || s.restored);
     checkDate(errors, s.date, opts && opts.today);
     var add = parseDecimal(s.addWaterL);
     var delta = add !== null && Number.isFinite(add) ? round(add, 3) : null;
@@ -1922,7 +1923,7 @@
       errors.push({ path: 'waterDeltaL', message: 'Adicione alguma quantidade de água' });
     } else if (delta < WATER_LIMITS.MIN || delta > WATER_LIMITS.MAX) {
       errors.push({ path: 'waterDeltaL', message: 'Água deve ficar entre ' + formatBR(WATER_LIMITS.MIN) + ' e ' + formatBR(WATER_LIMITS.MAX) + ' L' });
-    } else if (s.baseWaterL !== null && s.baseWaterL !== undefined && s.baseWaterL !== '') {
+    } else if (!isRestored && s.baseWaterL !== null && s.baseWaterL !== undefined && s.baseWaterL !== '') {
       var rawBase = parseDecimal(s.baseWaterL);
       if (rawBase !== null && Number.isFinite(rawBase) && rawBase >= 0 && round(rawBase + delta, 3) > WATER_LIMITS.MAX) {
         errors.push({ path: 'waterDeltaL', message: 'Água deve ficar entre ' + formatBR(WATER_LIMITS.MIN) + ' e ' + formatBR(WATER_LIMITS.MAX) + ' L' });

@@ -187,7 +187,7 @@
       if (S.food.waterLegacyL !== null) {
         return { view: 'water', waterTotal: S.food.waterLegacyL };
       }
-      var known = loggedWater(S.food.date);
+      var known = S.food.waterRestored ? null : loggedWater(S.food.date);
       return {
         view: 'water',
         waterDeltaL: S.food.waterAdd || 0,
@@ -730,7 +730,7 @@
         onclick: function () {
           if (isVoiceActive()) return;
           if (S.view === 'workout') S.workout.date = d.key;
-          else { S.food.date = d.key; S.food.waterAdd = 0; S.food.waterId = ''; S.food.waterLegacyL = null; }
+          else { S.food.date = d.key; S.food.waterAdd = 0; S.food.waterId = ''; S.food.waterLegacyL = null; S.food.waterRestored = false; }
           haptic('select');
           render();
           motion('settle', els.view);
@@ -1324,14 +1324,19 @@
       }
       return { args: errors.length ? null : { date: S.food.date, waterL: Math.round(legacy * 1000) / 1000 }, errors: errors };
     }
-    return C.buildWater({ date: S.food.date, baseWaterL: loggedWater(S.food.date), addWaterL: S.food.waterAdd }, { today: S.today });
+    return C.buildWater(
+      { date: S.food.date, baseWaterL: loggedWater(S.food.date), addWaterL: S.food.waterAdd },
+      { today: S.today, restored: !!S.food.waterRestored }
+    );
   }
 
   function stepWater(deltaL) {
     wake();
     cancelReview();
+    S.food.waterRestored = false;
     if (S.food.waterLegacyL !== null) {
       S.food.waterLegacyL = null;
+      S.food.waterAdd = 0;
       S.food.waterId = '';
     }
     var known = loggedWater(S.food.date);
@@ -2051,7 +2056,7 @@
       })) : h('p', { class: 'empty-plate p-16', text: 'Sem exercícios: só marca a sessão como concluída.' });
     } else if (view === 'water') {
       if (args.waterDeltaL !== undefined) {
-        var knownBase = loggedWater(args.date);
+        var knownBase = S.food.waterRestored ? null : loggedWater(args.date);
         var deltaText = '+' + C.formatBR(args.waterDeltaL) + ' L';
         var waterDetail = knownBase !== null
           ? deltaText + ' (total estimado: ' + C.formatLiters(knownBase + args.waterDeltaL) + ')'
@@ -2226,12 +2231,13 @@
     var dateOk = offered.indexOf(srcDate) >= 0;
     var date = dateOk ? srcDate : S.today;
     var legacyWaterL = e.t === 'water' ? extractLegacyWaterL(e, src) : null;
-    var rawDelta = src.waterDeltaL !== undefined ? src.waterDeltaL
-      : src.addWaterL !== undefined ? src.addWaterL
-        : (parsedJson && parsedJson.args ? parsedJson.args.waterDeltaL : undefined);
+    var rawDelta = legacyWaterL !== null ? undefined
+      : src.waterDeltaL !== undefined ? src.waterDeltaL
+        : src.addWaterL !== undefined ? src.addWaterL
+          : (parsedJson && parsedJson.args ? parsedJson.args.waterDeltaL : undefined);
     var deltaWaterL = C.parseDecimal(rawDelta);
     var hasDelta = deltaWaterL !== null && Number.isFinite(deltaWaterL) && deltaWaterL > 0;
-    if (e.t === 'water' && legacyWaterL !== null && !dateOk && !hasDelta) {
+    if (e.t === 'water' && legacyWaterL !== null && !dateOk) {
       haptic('error');
       say('alert', 'Esse envio antigo usava água total de outro dia. Use +250 ml ou +500 ml para somar hoje.');
       return;
@@ -2241,28 +2247,31 @@
       say('alert', 'Não consegui recuperar a quantidade de água desse envio.');
       return;
     }
+    var targetId = dateOk ? srcId : C.newSubmissionId();
     var apply = function () {
       if (e.t === 'workout') {
         if (S.catalog.sessions.indexOf(src.session) < 0) { say('alert', 'A sessão ' + src.session + ' não está mais na ficha.'); return; }
         S.view = 'workout';
         S.workout.date = date;
         S.workout.session = src.session;
-        S.workout.forms[formKey(date, src.session)] = { id: srcId, date: date, session: src.session, complete: !!src.complete, cards: src.cards || [] };
+        S.workout.forms[formKey(date, src.session)] = { id: targetId, date: date, session: src.session, complete: !!src.complete, cards: src.cards || [] };
       } else if (e.t === 'water') {
         S.view = 'food';
         S.food.date = date;
-        if (legacyWaterL !== null && dateOk) {
-          S.food.waterId = srcId;
+        if (legacyWaterL !== null) {
+          S.food.waterId = targetId;
           S.food.waterLegacyL = legacyWaterL;
-          S.food.waterAdd = hasDelta ? deltaWaterL : 0;
+          S.food.waterAdd = 0;
+          S.food.waterRestored = true;
         } else {
-          S.food.waterId = legacyWaterL !== null ? C.newSubmissionId() : srcId;
+          S.food.waterId = targetId;
           S.food.waterLegacyL = null;
           S.food.waterAdd = deltaWaterL;
+          S.food.waterRestored = dateOk;
         }
       } else {
         S.view = 'food';
-        S.food.id = srcId; // the same id: the resend cannot be written twice
+        S.food.id = targetId; // same id only when the original date is preserved
         S.food.date = date;
         S.food.meal = src.meal || '';
         S.food.items = src.items || [];
@@ -2271,12 +2280,23 @@
       haptic('success');
       render();
       saveDraft();
-      say('idle', 'Voltou como estava no envio' + (dateOk ? '' : ', com a data de hoje') + '. Revise e envie de novo.');
+      say('idle', dateOk
+        ? 'Voltou como estava no envio. Revise e envie de novo.'
+        : 'Data original (' + (srcDate ? C.shortDate(srcDate) : 'anterior') + ') saiu da lista: preparado como novo lançamento em Hoje. Revise antes de enviar.');
     };
     var busy = e.t === 'workout'
       ? (S.catalog.sessions.indexOf(src.session) >= 0 && !C.workoutFormEmpty(S.workout.forms[formKey(date, src.session)]))
       : e.t === 'water' ? (S.food.waterAdd > 0 || S.food.waterLegacyL !== null) : !C.foodFormEmpty({ meal: S.food.meal, items: S.food.items });
-    if (busy) confirmDialog('Substituir o que está preenchido agora pelo envio restaurado?', apply); else apply();
+    if (!dateOk) {
+      confirmDialog(
+        'A data original (' + (srcDate ? C.shortDate(srcDate) : 'anterior') + ') saiu da lista. Preparar como um novo lançamento em Hoje' + (busy ? ' (substituindo o preenchimento atual)' : '') + '?',
+        apply
+      );
+    } else if (busy) {
+      confirmDialog('Substituir o que está preenchido agora pelo envio restaurado?', apply);
+    } else {
+      apply();
+    }
   }
 
   function copyJson(json) {
@@ -3026,7 +3046,7 @@
       S.dates = C.dateOptions(catalog.tz);
       S.today = S.dates[0].key;
       S.workout = { date: S.today, session: catalog.next, forms: {} };
-      S.food = { date: S.today, meal: '', items: [], mode: 'food', compose: null, waterAdd: 0, waterId: '', waterLegacyL: null };
+      S.food = { date: S.today, meal: '', items: [], mode: 'food', compose: null, waterAdd: 0, waterId: '', waterLegacyL: null, waterRestored: false };
 
       store = C.draftStore(storage, catalog.client);
       try { if (storage) storage.removeItem(LEGACY_DRAFT_KEY); } catch (e) { /* ignore */ }
@@ -3056,6 +3076,7 @@
           waterAdd: 0,
           waterId: '',
           waterLegacyL: null,
+          waterRestored: false,
         };
       } else if (foodDraft) {
         S.food.id = foodDraft.id;

@@ -753,14 +753,37 @@ def reply_for(op: str, response: dict[str, Any]) -> Reply:
             lines.append(line)
         return Reply("\n".join(lines), failed=True, write_outcome=outcome)
     result = response.get("result") or {}
+    undone = result.get("undone") is True
+    deduplicated = result.get("deduplicated") is True
     try:
-        text = "\n".join(confirmation([(op, result)]))
+        lines = confirmation([(op, result)])
     except (KeyError, TypeError, ValueError) as error:
         log.warning("could not build the confirmation of %s: %s", op, describe(error))
+        if undone:
+            return Reply(
+                "↩️ Este envio já havia sido desfeito e não foi gravado de novo. Confira com /hoje.",
+                write_outcome=outcome,
+            )
+        if deduplicated:
+            return Reply(
+                "✅ Já estava registrado na planilha (não gravei de novo). Confira com /hoje.",
+                write_outcome=outcome,
+            )
         return Reply(
             "✅ A planilha aceitou, mas não consegui montar o resumo. Confira com /hoje.",
             write_outcome=outcome,
         )
+    if undone:
+        detail = "\n" + "\n".join(lines) if lines else ""
+        return Reply(
+            f"↩️ Este envio já havia sido desfeito e não foi gravado de novo.{detail}",
+            html=True,
+            reply_markup=None,
+            write_outcome=outcome,
+        )
+    if deduplicated:
+        lines = [*lines, "<i>Já estava registrado — não gravei de novo.</i>"]
+    text = "\n".join(lines)
     write_id = result.get("writeId")
     markup = buttons.keyboard([write_id]) if write_id else None
     return Reply(text, html=True, reply_markup=markup, write_outcome=outcome)

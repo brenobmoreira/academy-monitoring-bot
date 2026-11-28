@@ -94,21 +94,24 @@ test('"Restaurar último envio" on Refeição brings a waterDeltaL send back und
   assert.deepEqual(JSON.parse(p.tg.sent[0]), sent);
 });
 
-test('"Restaurar último envio" preserves legacy waterL history entries and switches to waterDeltaL if edited', async () => {
+test('"Restaurar último envio" preserves legacy waterL history entries (including main addWaterL form) and resets addWaterL if edited', async () => {
   const storage = storageWith();
   const legacyId = 'fedcba9876543210fedcba9876543210';
   const legacyJson = JSON.stringify({ v: 1, t: 'water', id: legacyId, args: { date: today(), waterL: 2 } });
   const store = C.draftStore(storage, SAMPLE.client);
+  // Exact main history format: json had args.waterL=2 while form stored addWaterL=0.5
   store.recordSent({
     t: 'water',
     label: 'Água 2 L, hoje',
     json: legacyJson,
-    form: { id: legacyId, date: today(), waterL: 2 },
+    form: { id: legacyId, date: today(), addWaterL: 0.5 },
   });
 
-  // Untouched resend preserves the exact legacy waterL payload and idempotency id
-  const p = await boot({ view: 'food', catalog: catalog({ day: undefined }), storage });
+  // Untouched resend preserves the exact legacy waterL payload and idempotency id (without showing +500 ml)
+  const p = await boot({ view: 'food', catalog: catalog({ day: { w: 1.5 } }), storage });
   restore(p, /^Água 2 L/);
+  assert.equal(p.doc.getElementById('daily-balance').querySelector('.water-delta'), null);
+  assert.equal(button(p.doc.getElementById('daily-balance'), '−250 ml'), undefined);
   assert.equal(p.tg.MainButton.params.text, 'Revisar água (2 L)');
   p.press();
   p.timers.run(400);
@@ -116,16 +119,73 @@ test('"Restaurar último envio" preserves legacy waterL history entries and swit
   p.press();
   assert.equal(p.tg.sent[0], legacyJson);
 
-  // Restoring legacy waterL and then tapping +250 ml switches to fresh incremental waterDeltaL
+  // Restoring legacy waterL and then tapping +250 ml starts from 0 (0.25 L, NOT 0.5 + 0.25 = 0.75 L) with a new id
   const p2 = await boot({ view: 'food', catalog: catalog(), storage });
   restore(p2, /^Água 2 L/);
   button(p2.doc.getElementById('daily-balance'), '+250 ml').click();
+  assert.equal(p2.tg.MainButton.params.text, 'Revisar água (+250 ml)');
   p2.press();
   p2.timers.run(400);
   p2.press();
   const edited = JSON.parse(p2.tg.sent[0]);
   assert.notEqual(edited.id, legacyId);
   assert.deepEqual(edited.args, { date: today(), waterDeltaL: 0.25 });
+});
+
+test('"Restaurar último envio" with a date older than Ontem asks explicit confirmation and mints a new id instead of reusing the old id on Hoje', async () => {
+  const storage = storageWith();
+  const oldId = '11223344556677889900aabbccddeeff';
+  const oldDate = C.addDays(today(), -3);
+  const store = C.draftStore(storage, SAMPLE.client);
+  store.recordSent({
+    t: 'water',
+    label: `Água +500 ml, ${C.shortDate(oldDate)}`,
+    json: JSON.stringify({ v: 1, t: 'water', id: oldId, args: { date: oldDate, waterDeltaL: 0.5 } }),
+    form: { id: oldId, date: oldDate, waterDeltaL: 0.5 },
+  });
+
+  // Declining confirmation leaves the form untouched
+  const declined = await boot({ view: 'food', catalog: catalog(), storage });
+  const prompts = [];
+  declined.tg.showConfirm = (text, cb) => { prompts.push(text); cb(false); };
+  restore(declined, /^Água \+500 ml/);
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /saiu da lista.*novo lançamento em Hoje/i);
+  assert.equal(declined.tg.MainButton.params.text, 'Revisar refeição');
+
+  // Accepting prepares a brand-new submission on Hoje with a fresh id (never oldId + today)
+  const accepted = await boot({ view: 'food', catalog: catalog(), storage });
+  accepted.tg.showConfirm = (_text, cb) => cb(true);
+  restore(accepted, /^Água \+500 ml/);
+  assert.equal(accepted.tg.MainButton.params.text, 'Revisar água (+500 ml)');
+  accepted.press();
+  accepted.timers.run(400);
+  accepted.press();
+  const resent = JSON.parse(accepted.tg.sent[0]);
+  assert.notEqual(resent.id, oldId);
+  assert.deepEqual(resent.args, { date: today(), waterDeltaL: 0.5 });
+});
+
+test('"Restaurar último envio" allows idempotent resend near the 20 L cap even when day.w already reflects the saved delta', async () => {
+  const storage = storageWith();
+  const first = await boot({ view: 'food', catalog: catalog({ day: { w: 19.25 } }), storage });
+  const sent = sendWater(first);
+  assert.deepEqual(sent.args, { date: today(), waterDeltaL: 0.5 });
+
+  // Reopened with day.w = 19.75 (the previous +0.5 L already landed in the sheet):
+  // fresh +500 ml is clamped to +250 ml, whereas untouched "Restaurar último envio" is allowed to resend with the same id
+  const freshNearCap = await boot({ view: 'food', catalog: catalog({ day: { w: 19.75 } }) });
+  button(freshNearCap.doc.getElementById('daily-balance'), '+500 ml').click();
+  assert.equal(freshNearCap.tg.MainButton.params.text, 'Revisar água (+250 ml)');
+
+  const reopened = await boot({ view: 'food', catalog: catalog({ day: { w: 19.75 } }), storage });
+  restore(reopened, /^Água \+500 ml/);
+  assert.equal(reopened.tg.MainButton.params.text, 'Revisar água (+500 ml)');
+  reopened.press();
+  reopened.timers.run(400);
+  assert.doesNotMatch(reopened.review.textContent, /20,25/);
+  reopened.press();
+  assert.deepEqual(JSON.parse(reopened.tg.sent[0]), sent);
 });
 
 test('the chat draft id becomes the submission id, and foods take the catalog spelling', async () => {

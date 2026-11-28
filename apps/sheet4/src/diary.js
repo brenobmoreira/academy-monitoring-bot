@@ -46,7 +46,7 @@ const Diary = {
   },
 
   /** Atomic increment accepted by Diary.save / diary.upsert (never a Hoje row or Diário column). */
-  WATER_DELTA: { label: 'Acréscimo de água L', type: 'number', min: 0.001, max: 20 },
+  WATER_DELTA: { label: 'Acréscimo de água L', type: 'number', min: 0.05, max: 20 },
 
   STATES: {
     NONE: Tabs.ENUMS.DAY_STATE[0],

@@ -1013,17 +1013,20 @@ def test_water_payload_validation_is_strict_and_bounded():
     assert parsed_delta.args.waterDeltaL == 0.5
     assert parsed_delta.args.waterL is None
 
-    # Boundary values for waterDeltaL (0.05..20, including past dates like Ontem)
+    # Boundary values for waterDeltaL and waterL (0.05..20, including past dates like Ontem)
     assert parse_payload(raw(mutated(WATER_DELTA, ["args", "waterDeltaL"], 0.05)), TODAY)[1] == []
     assert parse_payload(raw(mutated(WATER_DELTA, ["args", "waterDeltaL"], 20)), TODAY)[1] == []
+    assert parse_payload(raw(mutated(WATER, ["args", "waterL"], 0.05)), TODAY)[1] == []
+    assert parse_payload(raw(mutated(WATER, ["args", "waterL"], 20)), TODAY)[1] == []
     assert parse_payload(raw(mutated(WATER_DELTA, ["args", "date"], "2026-11-08")), TODAY)[1] == []
 
-    # Invalid waterL and waterDeltaL values
+    # Invalid waterL and waterDeltaL values (including 0.04 below the 0.05 L minimum)
     for key in ("waterL", "waterDeltaL"):
         base = WATER if key == "waterL" else WATER_DELTA
         assert errors_of(mutated(base, ["args", key], 0))
         assert errors_of(mutated(base, ["args", key], -0.25))
         assert errors_of(mutated(base, ["args", key], 0.01))
+        assert errors_of(mutated(base, ["args", key], 0.04))
         assert errors_of(mutated(base, ["args", key], 20.5))
         assert errors_of(mutated(base, ["args", key], "0,5"))
         assert errors_of(mutated(base, ["args", key], None))
@@ -1081,6 +1084,53 @@ async def test_handle_water_writes_diary_with_request_id_and_retry():
     assert legacy_sheet.calls == [("diary.upsert", {"date": "2026-11-09", "fields": {"waterL": 2.25}})]
     assert legacy_sheet.request_ids == [request_id(42, SID, "diary.upsert")]
     assert tg.sent[-1][1] == "<b>09/11</b> · Água L 2,25"
+
+    # Deduplicated replay informs clearly that nothing was written again while keeping undo for active writes
+    dedup_active = {
+        "ok": True,
+        "result": {
+            "writeId": "w3",
+            "date": "2026-11-09",
+            "fields": {"waterL": 0.25},
+            "waterDeltaL": 0.25,
+            "deduplicated": True,
+        },
+    }
+    dedup_reply = await handle(
+        FakeSheet(diary_upsert=[dedup_active]),
+        raw(mutated(WATER_DELTA, ["args", "waterDeltaL"], 0.25)),
+        5,
+        TODAY,
+        PendingStore(),
+    )
+    assert "<b>09/11</b> · Água L 0,25 (+0,25 L)" in dedup_reply.text
+    assert "Já estava registrado" in dedup_reply.text
+    assert dedup_reply.write_outcome == "committed"
+    assert markup(dedup_reply)["inline_keyboard"][0][1] == {"text": "↩️ Desfazer", "callback_data": "undo:w3"}
+
+    # Deduplicated replay of an already-undone write states it was undone and NEVER offers ↩️ Desfazer
+    dedup_undone = {
+        "ok": True,
+        "result": {
+            "writeId": "w3",
+            "date": "2026-11-09",
+            "fields": {"waterL": 0.25},
+            "waterDeltaL": 0.25,
+            "deduplicated": True,
+            "undone": True,
+        },
+    }
+    undone_reply = await handle(
+        FakeSheet(diary_upsert=[dedup_undone]),
+        raw(mutated(WATER_DELTA, ["args", "waterDeltaL"], 0.25)),
+        5,
+        TODAY,
+        PendingStore(),
+    )
+    assert "já havia sido desfeito" in undone_reply.text
+    assert "não foi gravado de novo" in undone_reply.text
+    assert undone_reply.reply_markup is None
+    assert undone_reply.write_outcome == "committed"
 
 
 def test_catalog_v1_encodes_daily_goal_and_intake_in_food_button_only_and_trims_under_budget():

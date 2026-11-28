@@ -50,7 +50,7 @@
     focus: null,
     // One form per (date, session): {complete, cards}. Only the visible one is sent.
     workout: { date: '', session: '', forms: {} },
-    food: { date: '', meal: '', items: [], mode: 'food', compose: null, waterAdd: 0, waterId: '' },
+    food: { date: '', meal: '', items: [], mode: 'food', compose: null, waterAdd: 0, waterId: '', waterLegacyL: null },
     sheetOpen: false,
     bodyOpen: false, // the week's muscle map on the workout form
   };
@@ -184,7 +184,15 @@
 
   function pulsoContext() {
     if (S.reviewView === 'water') {
-      return { view: 'water', waterTotal: Math.round((baseWaterL() + (S.food.waterAdd || 0)) * 100) / 100 };
+      if (S.food.waterLegacyL !== null) {
+        return { view: 'water', waterTotal: S.food.waterLegacyL };
+      }
+      var known = loggedWater(S.food.date);
+      return {
+        view: 'water',
+        waterDeltaL: S.food.waterAdd || 0,
+        waterTotal: known !== null ? Math.round((known + (S.food.waterAdd || 0)) * 1000) / 1000 : null,
+      };
     }
     var compose = S.food.compose;
     return { view: S.view, cards: S.catalog && S.workout.session ? cards() : [], cardIndex: focusedCard, plan: currentPlan(),
@@ -487,6 +495,7 @@
       var k = S.food.items.length;
       if (r.args) say('happy', S.food.meal + ', ' + plural(k, 'item', 'itens') + '. Pode revisar.');
       else if (!k && S.food.waterAdd > 0) say('happy', C.formatWaterDelta(S.food.waterAdd) + ' de água pronto para revisar.');
+      else if (!k && S.food.waterLegacyL !== null) say('happy', C.formatLiters(S.food.waterLegacyL) + ' de água pronto para revisar.');
       else if (!S.food.meal) say('idle', 'Escolha a refeição.');
       else if (!k) say('idle', S.food.meal + ': adicione o que você comeu.');
       else say('idle', S.food.meal + ' com ' + plural(k, 'item', 'itens') + '.');
@@ -553,11 +562,18 @@
         form: JSON.parse(JSON.stringify({ id: f.id, date: f.date, session: f.session, complete: f.complete, cards: f.cards })) });
       store.clearWorkout(f.date, f.session);
     } else if (t === 'water') {
+      var knownWater = loggedWater(S.food.date);
+      var isLegacyWater = S.food.waterLegacyL !== null;
+      var waterLabel = isLegacyWater
+        ? 'Água ' + C.formatLiters(S.food.waterLegacyL)
+        : 'Água ' + C.formatWaterDelta(S.food.waterAdd) + (knownWater !== null ? ' (' + C.formatLiters(knownWater + (S.food.waterAdd || 0)) + ')' : '');
       store.recordSent({
         t: 'water',
-        label: 'Água ' + C.formatLiters(baseWaterL() + (S.food.waterAdd || 0)) + ', ' + C.weekday(S.food.date) + ' ' + C.shortDate(S.food.date),
+        label: waterLabel + ', ' + C.weekday(S.food.date) + ' ' + C.shortDate(S.food.date),
         json: json,
-        form: { id: S.food.waterId, date: S.food.date, addWaterL: S.food.waterAdd },
+        form: isLegacyWater
+          ? { id: S.food.waterId, date: S.food.date, waterL: S.food.waterLegacyL }
+          : { id: S.food.waterId, date: S.food.date, waterDeltaL: S.food.waterAdd },
       });
     } else {
       store.recordSent({ t: t, label: S.food.meal + ', ' + C.weekday(S.food.date) + ' ' + C.shortDate(S.food.date), json: json,
@@ -632,8 +648,8 @@
     if (S.view === 'workout') {
       var n = filledCount();
       label = n ? 'Revisar treino (' + n + ')' : 'Revisar treino';
-    } else if (!S.food.items.length && S.food.waterAdd > 0) {
-      label = 'Revisar água (' + C.formatWaterDelta(S.food.waterAdd) + ')';
+    } else if (!S.food.items.length && (S.food.waterAdd > 0 || S.food.waterLegacyL !== null)) {
+      label = 'Revisar água (' + (S.food.waterAdd > 0 ? C.formatWaterDelta(S.food.waterAdd) : C.formatLiters(S.food.waterLegacyL)) + ')';
       handler = goWaterReview;
     } else {
       var k = S.food.items.length;
@@ -714,7 +730,7 @@
         onclick: function () {
           if (isVoiceActive()) return;
           if (S.view === 'workout') S.workout.date = d.key;
-          else { S.food.date = d.key; S.food.waterAdd = 0; S.food.waterId = ''; }
+          else { S.food.date = d.key; S.food.waterAdd = 0; S.food.waterId = ''; S.food.waterLegacyL = null; }
           haptic('select');
           render();
           motion('settle', els.view);
@@ -1281,24 +1297,15 @@
     return !!(S.today && S.food.date === S.today);
   }
 
-  /** The water already logged on `date`, or null when the page does not know it: the link only
-   *  carries today's, and it can be trimmed. Water is sent as the day's total, so adding to an
-   *  unknown one would overwrite what is in the sheet. */
+  function hasTodaySnapshot() {
+    return !!(isFoodToday() && !(S.catalog && S.catalog.today && S.catalog.today !== S.today));
+  }
+
+  /** Today's water snapshot from the link, or null when unknown (yesterday, trimmed `day`, or stale link). */
   function loggedWater(date) {
     var c = S.catalog;
-    if (!S.today || date !== S.today || !c || !c.day || (c.today && c.today !== S.today)) return null;
+    if (!S.today || date !== S.today || !c || !c.day || c.day.water === null || (c.today && c.today !== S.today)) return null;
     return c.day.water;
-  }
-
-  function waterUnknownText() {
-    return isFoodToday()
-      ? 'Água rápida indisponível: o total de hoje não veio no link. Mande /app de novo ou diga o total no chat.'
-      : 'Água rápida indisponível para outro dia: não sei o total já registrado. Diga o total no chat.';
-  }
-
-  function baseWaterL() {
-    var logged = loggedWater(S.food.date);
-    return logged === null ? 0 : logged;
   }
 
   function currentWaterId() {
@@ -1307,24 +1314,39 @@
   }
 
   function buildWaterState() {
-    if (loggedWater(S.food.date) === null) return { args: null, errors: [{ path: 'waterL', message: waterUnknownText() }] };
-    return C.buildWater({ date: S.food.date, baseWaterL: baseWaterL(), addWaterL: S.food.waterAdd }, { today: S.today });
+    if (S.food.waterLegacyL !== null) {
+      var errors = [];
+      if (!C.isDateKey(S.food.date)) errors.push({ path: 'date', message: 'Data inválida' });
+      else if (S.today && S.food.date > S.today) errors.push({ path: 'date', message: 'Data no futuro' });
+      var legacy = C.parseDecimal(S.food.waterLegacyL);
+      if (legacy === null || !Number.isFinite(legacy) || legacy < C.WATER_LIMITS.MIN || legacy > C.WATER_LIMITS.MAX) {
+        errors.push({ path: 'waterL', message: 'Água deve ficar entre ' + C.formatBR(C.WATER_LIMITS.MIN) + ' e ' + C.formatBR(C.WATER_LIMITS.MAX) + ' L' });
+      }
+      return { args: errors.length ? null : { date: S.food.date, waterL: Math.round(legacy * 1000) / 1000 }, errors: errors };
+    }
+    return C.buildWater({ date: S.food.date, baseWaterL: loggedWater(S.food.date), addWaterL: S.food.waterAdd }, { today: S.today });
   }
 
   function stepWater(deltaL) {
-    if (loggedWater(S.food.date) === null) return;
     wake();
     cancelReview();
-    var base = baseWaterL();
-    var maxAdd = Math.max(0, Math.round((C.WATER_LIMITS.MAX - base) * 100) / 100);
+    if (S.food.waterLegacyL !== null) {
+      S.food.waterLegacyL = null;
+      S.food.waterId = '';
+    }
+    var known = loggedWater(S.food.date);
+    var maxAdd = known !== null
+      ? Math.max(0, Math.round((C.WATER_LIMITS.MAX - known) * 100) / 100)
+      : C.WATER_LIMITS.MAX;
     var cur = S.food.waterAdd || 0;
     var next = Math.round(Math.max(0, Math.min(maxAdd, cur + deltaL)) * 100) / 100;
     if (next === cur) return;
-    var balBefore = C.dailyBalance(S.catalog, S.food.items, { isToday: isFoodToday(), waterAddL: cur });
+    var hasSnap = hasTodaySnapshot();
+    var balBefore = C.dailyBalance(S.catalog, S.food.items, { isToday: hasSnap, waterAddL: cur });
     S.food.waterAdd = next;
     if (!next) S.food.waterId = '';
-    var balAfter = C.dailyBalance(S.catalog, S.food.items, { isToday: isFoodToday(), waterAddL: next });
-    if (next > 0 && balBefore.total.water < balAfter.targets.water && balAfter.total.water >= balAfter.targets.water) {
+    var balAfter = C.dailyBalance(S.catalog, S.food.items, { isToday: hasSnap, waterAddL: next });
+    if (known !== null && next > 0 && balBefore.total.water < balAfter.targets.water && balAfter.total.water >= balAfter.targets.water) {
       haptic('success');
       if (Avatar && Avatar.pulse) Avatar.pulse('full');
       choreograph('proud', $('daily-balance'));
@@ -1333,7 +1355,9 @@
       haptic('light');
       say(next > 0 ? 'happy' : 'idle',
         next > 0
-          ? C.formatWaterDelta(next) + ' de água (' + C.formatLiters(balAfter.total.water) + ' no dia).'
+          ? (known !== null
+            ? C.formatWaterDelta(next) + ' de água (' + C.formatLiters(balAfter.total.water) + ' no dia).'
+            : C.formatWaterDelta(next) + ' de água para somar na planilha.')
           : 'Água zerada para este envio.');
     }
     syncDailyBalance();
@@ -1342,7 +1366,8 @@
 
   function renderDailyBalance(box) {
     if (!box || !S.catalog) return;
-    var bal = C.dailyBalance(S.catalog, S.food.items, { isToday: isFoodToday(), waterAddL: S.food.waterAdd });
+    var hasTodaySnap = isFoodToday() && !(S.catalog.today && S.catalog.today !== S.today);
+    var bal = C.dailyBalance(S.catalog, S.food.items, { isToday: hasTodaySnap, waterAddL: S.food.waterAdd });
     var kcalNow = Math.round(bal.total.kcal);
     var kcalText = bal.targets.kcal ? kcalNow + ' / ' + Math.round(bal.targets.kcal) + ' kcal' : kcalNow + ' kcal';
     var plateKcal = Math.round(bal.plate.kcal);
@@ -1383,28 +1408,30 @@
     }));
 
     var waterPct = Math.round(bal.ratio.water * 100);
-    var waterKnown = loggedWater(S.food.date) !== null;
-    var waterActions = waterKnown ? [
+    var waterActions = [
       h('button', { type: 'button', class: 'water-chip', 'data-water-add': '0.25', text: '+250 ml', onclick: function () { stepWater(C.WATER_LIMITS.STEP_SM); } }),
       h('button', { type: 'button', class: 'water-chip', 'data-water-add': '0.5', text: '+500 ml', onclick: function () { stepWater(C.WATER_LIMITS.STEP_LG); } }),
-    ] : [];
-    if (waterKnown && S.food.waterAdd > 0) {
+    ];
+    if (S.food.waterAdd > 0) {
       waterActions.push(
-        h('button', { type: 'button', class: 'water-chip water-undo', 'aria-label': 'Tirar 250 ml', text: '−250 ml', onclick: function () { stepWater(-C.WATER_LIMITS.STEP_SM); } }),
+        h('button', { type: 'button', class: 'water-chip water-undo', 'aria-label': 'Tirar 250 ml', text: '−250 ml', onclick: function () { stepWater(-C.WATER_LIMITS.STEP_SM); } })
+      );
+    }
+    if (S.food.waterAdd > 0 || S.food.waterLegacyL !== null) {
+      waterActions.push(
         h('button', { type: 'button', class: 'water-send', id: 'water-send', text: 'Registrar água', onclick: goWaterReview })
       );
     }
+    var waterShown = S.food.waterLegacyL !== null && !(S.food.waterAdd > 0) ? S.food.waterLegacyL : bal.total.water;
     var waterBox = h('div', { class: 'water-box' },
       h('div', { class: 'water-head' },
         h('span', { class: 'water-title' }, icon('drop'), 'Água'),
         h('span', { class: 'water-val' },
-          C.formatLiters(bal.total.water) + ' / ' + C.formatLiters(bal.targets.water),
+          C.formatLiters(waterShown) + ' / ' + C.formatLiters(bal.targets.water),
           S.food.waterAdd > 0 ? ' ' : null,
           S.food.waterAdd > 0 ? h('span', { class: 'water-delta', text: C.formatWaterDelta(S.food.waterAdd) }) : null)),
       h('div', { class: 'water-track' }, h('i', { class: 'water-fill' + (bal.over.water ? ' is-done' : ''), style: 'width:' + waterPct + '%' })),
-      waterKnown
-        ? h('div', { class: 'water-actions' }, waterActions)
-        : h('p', { class: 'hint warn water-note', text: waterUnknownText() }));
+      h('div', { class: 'water-actions' }, waterActions));
 
     box.replaceChildren(
       h('div', { class: 'balance-head' },
@@ -2023,10 +2050,20 @@
         return h('li', { class: 'review-item' }, h('b', { text: ex.name }), lines.map(function (l) { return h('span', { text: l }); }));
       })) : h('p', { class: 'empty-plate p-16', text: 'Sem exercícios: só marca a sessão como concluída.' });
     } else if (view === 'water') {
-      facts = h('dl', { class: 'facts' },
-        h('dt', { text: 'Data' }), h('dd', { text: dateLabel(args.date) }),
-        h('dt', { text: 'Água total' }), h('dd', { text: C.formatLiters(args.waterL) }),
-        h('dt', { text: 'Adicionado agora' }), h('dd', { text: C.formatWaterDelta(S.food.waterAdd) }));
+      if (args.waterDeltaL !== undefined) {
+        var knownBase = loggedWater(args.date);
+        var deltaText = '+' + C.formatBR(args.waterDeltaL) + ' L';
+        var waterDetail = knownBase !== null
+          ? deltaText + ' (total estimado: ' + C.formatLiters(knownBase + args.waterDeltaL) + ')'
+          : deltaText + ' (será somado ao total já registrado na planilha)';
+        facts = h('dl', { class: 'facts' },
+          h('dt', { text: 'Data' }), h('dd', { text: dateLabel(args.date) }),
+          h('dt', { text: 'Água' }), h('dd', { text: waterDetail }));
+      } else {
+        facts = h('dl', { class: 'facts' },
+          h('dt', { text: 'Data' }), h('dd', { text: dateLabel(args.date) }),
+          h('dt', { text: 'Água total' }), h('dd', { text: C.formatLiters(args.waterL) }));
+      }
       list = null;
     } else {
       facts = h('dl', { class: 'facts' },
@@ -2167,14 +2204,41 @@
       h('p', { class: 'hint m-0', text: 'Use se o bot respondeu que não gravou. O formulário volta como estava no envio; revise e envie de novo.' }), ul));
   }
 
+  function extractLegacyWaterL(e, src) {
+    if (src.waterDeltaL !== undefined) return null;
+    var direct = C.parseDecimal(src.waterL);
+    if (direct !== null && Number.isFinite(direct) && direct > 0) return direct;
+    try {
+      var parsed = e && e.json ? JSON.parse(e.json) : null;
+      var fromJson = parsed && parsed.args ? C.parseDecimal(parsed.args.waterL) : null;
+      if (fromJson !== null && Number.isFinite(fromJson) && fromJson > 0) return fromJson;
+    } catch (err) { /* ignore */ }
+    return null;
+  }
+
   function restoreSent(e) {
     var src = JSON.parse(JSON.stringify(e.form || {}));
+    var parsedJson = null;
+    try { parsedJson = e && e.json ? JSON.parse(e.json) : null; } catch (err) { parsedJson = null; }
+    var srcDate = src.date || (parsedJson && parsedJson.args && parsedJson.args.date) || '';
+    var srcId = C.isSubmissionId(src.id) ? src.id : (parsedJson && C.isSubmissionId(parsedJson.id) ? parsedJson.id : C.newSubmissionId());
     var offered = S.dates.map(function (d) { return d.key; });
-    var dateOk = offered.indexOf(src.date) >= 0;
-    var date = dateOk ? src.date : S.today;
-    if (e.t === 'water' && loggedWater(date) === null) {
+    var dateOk = offered.indexOf(srcDate) >= 0;
+    var date = dateOk ? srcDate : S.today;
+    var legacyWaterL = e.t === 'water' ? extractLegacyWaterL(e, src) : null;
+    var rawDelta = src.waterDeltaL !== undefined ? src.waterDeltaL
+      : src.addWaterL !== undefined ? src.addWaterL
+        : (parsedJson && parsedJson.args ? parsedJson.args.waterDeltaL : undefined);
+    var deltaWaterL = C.parseDecimal(rawDelta);
+    var hasDelta = deltaWaterL !== null && Number.isFinite(deltaWaterL) && deltaWaterL > 0;
+    if (e.t === 'water' && legacyWaterL !== null && !dateOk && !hasDelta) {
       haptic('error');
-      say('alert', 'Não dá para restaurar essa água: não sei o total já registrado nesse dia. Diga o total no chat.');
+      say('alert', 'Esse envio antigo usava água total de outro dia. Use +250 ml ou +500 ml para somar hoje.');
+      return;
+    }
+    if (e.t === 'water' && legacyWaterL === null && !hasDelta) {
+      haptic('error');
+      say('alert', 'Não consegui recuperar a quantidade de água desse envio.');
       return;
     }
     var apply = function () {
@@ -2183,15 +2247,22 @@
         S.view = 'workout';
         S.workout.date = date;
         S.workout.session = src.session;
-        S.workout.forms[formKey(date, src.session)] = { id: src.id, date: date, session: src.session, complete: !!src.complete, cards: src.cards || [] };
+        S.workout.forms[formKey(date, src.session)] = { id: srcId, date: date, session: src.session, complete: !!src.complete, cards: src.cards || [] };
       } else if (e.t === 'water') {
         S.view = 'food';
         S.food.date = date;
-        S.food.waterId = src.id;
-        S.food.waterAdd = src.addWaterL || 0;
+        if (legacyWaterL !== null && dateOk) {
+          S.food.waterId = srcId;
+          S.food.waterLegacyL = legacyWaterL;
+          S.food.waterAdd = hasDelta ? deltaWaterL : 0;
+        } else {
+          S.food.waterId = legacyWaterL !== null ? C.newSubmissionId() : srcId;
+          S.food.waterLegacyL = null;
+          S.food.waterAdd = deltaWaterL;
+        }
       } else {
         S.view = 'food';
-        S.food.id = src.id; // the same id: the resend cannot be written twice
+        S.food.id = srcId; // the same id: the resend cannot be written twice
         S.food.date = date;
         S.food.meal = src.meal || '';
         S.food.items = src.items || [];
@@ -2204,7 +2275,7 @@
     };
     var busy = e.t === 'workout'
       ? (S.catalog.sessions.indexOf(src.session) >= 0 && !C.workoutFormEmpty(S.workout.forms[formKey(date, src.session)]))
-      : e.t === 'water' ? S.food.waterAdd > 0 : !C.foodFormEmpty({ meal: S.food.meal, items: S.food.items });
+      : e.t === 'water' ? (S.food.waterAdd > 0 || S.food.waterLegacyL !== null) : !C.foodFormEmpty({ meal: S.food.meal, items: S.food.items });
     if (busy) confirmDialog('Substituir o que está preenchido agora pelo envio restaurado?', apply); else apply();
   }
 
@@ -2955,7 +3026,7 @@
       S.dates = C.dateOptions(catalog.tz);
       S.today = S.dates[0].key;
       S.workout = { date: S.today, session: catalog.next, forms: {} };
-      S.food = { date: S.today, meal: '', items: [], mode: 'food', compose: null, waterAdd: 0, waterId: '' };
+      S.food = { date: S.today, meal: '', items: [], mode: 'food', compose: null, waterAdd: 0, waterId: '', waterLegacyL: null };
 
       store = C.draftStore(storage, catalog.client);
       try { if (storage) storage.removeItem(LEGACY_DRAFT_KEY); } catch (e) { /* ignore */ }
@@ -2984,6 +3055,7 @@
           compose: null,
           waterAdd: 0,
           waterId: '',
+          waterLegacyL: null,
         };
       } else if (foodDraft) {
         S.food.id = foodDraft.id;

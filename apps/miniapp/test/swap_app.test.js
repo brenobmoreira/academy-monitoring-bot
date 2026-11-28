@@ -30,6 +30,7 @@ const button = (root, text) => root.querySelectorAll('button').find((b) => b.tex
 
 const catalog = {
   ...SAMPLE,
+  today: today(),
   view: 'food',
   foods: [own.name, unvaluedOwn],
   fav: ['Café da manhã básico'],

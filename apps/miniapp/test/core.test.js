@@ -791,13 +791,21 @@ test('dailyBalance, formatLiters, formatWaterDelta and buildWater compute target
   assert.equal(C.formatWaterDelta(1.5), '+1,5 L');
 
   const okW = C.buildWater({ date: TODAY, baseWaterL: 1.5, addWaterL: 0.5 }, { today: TODAY });
-  assert.deepEqual(okW, { args: { date: TODAY, waterL: 2 }, errors: [] });
+  assert.deepEqual(okW, { args: { date: TODAY, waterDeltaL: 0.5 }, errors: [] });
+  assert.deepEqual(C.buildWater({ date: '2026-11-08', baseWaterL: null, addWaterL: 0.25 }, { today: TODAY }), {
+    args: { date: '2026-11-08', waterDeltaL: 0.25 },
+    errors: [],
+  });
 
   assert.ok(C.buildWater({ date: TODAY, baseWaterL: 1.5, addWaterL: 0 }, { today: TODAY }).errors.length);
   assert.ok(C.buildWater({ date: TODAY, baseWaterL: 19.75, addWaterL: 0.5 }, { today: TODAY }).errors.length);
+  assert.ok(C.buildWater({ date: TODAY, baseWaterL: null, addWaterL: 20.5 }, { today: TODAY }).errors.length);
   assert.ok(C.buildWater({ date: '2026-11-10', baseWaterL: 0, addWaterL: 0.5 }, { today: TODAY }).errors.length);
   assert.equal(C.pulsoSummary({ view: 'water', waterTotal: 1.75 }), 'Água pronta para conferir: 1,75 L.');
-  assert.doesNotMatch(C.pulsoSummary({ view: 'water', waterTotal: 1.75 }), /gravado|salvo/i);
+  assert.equal(C.pulsoSummary({ view: 'water', waterDeltaL: 0.5, waterTotal: 2.5 }), 'Água pronta para conferir: +0,5 L (total estimado: 2,5 L).');
+  assert.equal(C.pulsoSummary({ view: 'water', waterDeltaL: 0.5, waterTotal: null }), 'Água pronta para conferir: +0,5 L para somar na planilha.');
+  assert.doesNotMatch(C.pulsoSummary({ view: 'water', waterDeltaL: 0.5, waterTotal: 2.5 }), /gravado|salvo/i);
+  assert.doesNotMatch(C.pulsoSummary({ view: 'water', waterDeltaL: 0.5, waterTotal: null }), /gravado|salvo/i);
 });
 
 test('defaultSwapCriterion, computeSwap and swapSuggestions match Equivalences.swap', () => {

@@ -45,6 +45,9 @@ const Diary = {
     waterL: { label: 'Água L', type: 'number', min: 0, max: 20 },
   },
 
+  /** Atomic increment accepted by Diary.save / diary.upsert (never a Hoje row or Diário column). */
+  WATER_DELTA: { label: 'Acréscimo de água L', type: 'number', min: 0.001, max: 20 },
+
   STATES: {
     NONE: Tabs.ENUMS.DAY_STATE[0],
     PARTIAL: Tabs.ENUMS.DAY_STATE[1],
@@ -88,22 +91,66 @@ const Diary = {
     return n;
   },
 
+  /** Validates an atomic water increment (> 0, at most 20 L), rounded to 1 ml (3 decimals). */
+  coerceWaterDelta_(value) {
+    if (value === undefined) return undefined;
+    const f = Diary.WATER_DELTA;
+    if (value === null || (typeof value === 'string' && value.trim() === '')) {
+      throw new Error(`${f.label}: valor inválido (${JSON.stringify(value)}).`);
+    }
+    let n = value;
+    if (typeof n === 'string') n = Number(n.trim().replace(',', '.'));
+    if (!Diary.isNum_(n)) throw new Error(`${f.label}: valor inválido (${JSON.stringify(value)}).`);
+    if (n < f.min || n > f.max) {
+      throw new Error(`${f.label}: ${n} fora da faixa ${f.min}–${f.max}.`);
+    }
+    return Math.round(n * 1000) / 1000;
+  },
+
   /**
    * Saves the measures of `date` (see the file header for absent / null / 0), then refreshes the
-   * day state. Dates after today are refused.
+   * day state. Dates after today are refused. `waterDeltaL` atomically adds to the day's `waterL`.
    * @param {*} date
-   * @param {Object} fields subset of Diary.FIELDS keys
+   * @param {Object} fields subset of Diary.FIELDS keys (plus optional `waterDeltaL`, mutually exclusive with `waterL`)
    * @returns {{row: number|null, changed: string[], dayState: string}}
    */
   save(date, fields) {
     const day = Dates.require(date, 'Data');
     if (Dates.compare(day, Dates.today()) > 0) throw new Error(`Data no futuro: ${Dates.format(day)}.`);
+    const input = fields || {};
+    if (input.waterL !== undefined && input.waterDeltaL !== undefined) {
+      const msg = 'Água L: não envie waterL e waterDeltaL juntos.';
+      const err = new Error(msg);
+      err.apiErrors = [{ path: 'args.fields.waterDeltaL', code: 'conflict', message: msg }];
+      throw err;
+    }
     const patch = {};
-    Object.keys(fields || {}).forEach((k) => {
-      const v = Diary.coerce(k, fields[k]);
+    let waterDelta;
+    Object.keys(input).forEach((k) => {
+      if (k === 'waterDeltaL') {
+        waterDelta = Diary.coerceWaterDelta_(input[k]);
+        return;
+      }
+      const v = Diary.coerce(k, input[k]);
       if (v !== undefined) patch[k] = v;
     });
     const existing = Days.get(day);
+    if (waterDelta !== undefined) {
+      const cur = existing ? existing.waterL : null;
+      if (cur !== null && cur !== undefined && (!Diary.isNum_(cur) || cur < 0)) {
+        throw new Error(`Água L: valor atual inválido na planilha (${JSON.stringify(cur)}).`);
+      }
+      const base = cur === null || cur === undefined ? 0 : cur;
+      const nextWater = Math.round((base + waterDelta) * 1000) / 1000;
+      const spec = Diary.FIELDS.waterL;
+      if (nextWater < spec.min || nextWater > spec.max) {
+        const msg = `${spec.label}: ${nextWater} fora da faixa ${spec.min}–${spec.max} (atual ${base} + ${waterDelta}).`;
+        const err = new Error(msg);
+        err.apiErrors = [{ path: 'args.fields.waterDeltaL', code: 'out_of_range', message: msg }];
+        throw err;
+      }
+      patch.waterL = nextWater;
+    }
     const keys = Object.keys(patch).filter((k) => (existing ? !Tabs.sameCell(existing[k], patch[k]) : patch[k] !== null));
     let row = existing ? existing._row : null;
     if (keys.length) {

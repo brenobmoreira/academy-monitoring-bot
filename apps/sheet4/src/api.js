@@ -56,7 +56,12 @@ const SheetApi = {
     'diary.upsert': {
       write: true,
       validate: (a) => ApiValidator.diaryUpsert(a),
-      meta: (v) => ({ op: 'diary.upsert', date: v.date, fields: Object.keys(v.fields) }),
+      meta: (v) => {
+        const fields = Object.keys(v.fields).map((k) => (k === 'waterDeltaL' ? 'waterL' : k));
+        const out = { op: 'diary.upsert', date: v.date, fields };
+        if (v.fields.waterDeltaL !== undefined) out.waterDeltaL = Math.round(v.fields.waterDeltaL * 1000) / 1000;
+        return out;
+      },
       run: (v) => SheetApi.diaryUpsert_(v),
     },
     'workout.upsert': {
@@ -354,21 +359,23 @@ const SheetApi = {
         Object.assign(fromLog, SheetApi.rowFromAfter_('diary', c.after));
       });
       const source = day || fromLog;
-      const fields = SheetApi.pick_(source, Object.keys(value.fields));
+      const fieldKeys = Object.keys(value.fields).map((k) => (k === 'waterDeltaL' ? 'waterL' : k));
+      const fields = SheetApi.pick_(source, fieldKeys);
       const ids = day ? SheetApi.pick_(day, ['objective', 'goal', 'plan']) : Days.idsOn(Dates.fromKey(value.date));
       const colByKey = {};
       Tabs.columns('diary').forEach((c) => { colByKey[c.key] = c.header; });
-      const changed = Object.keys(value.fields).filter((k) => headers[colByKey[k]]);
+      const changed = fieldKeys.filter((k) => headers[colByKey[k]]);
       const out = {
         date: value.date,
         row: day ? day._row : null,
         fields,
-        changed: changed.length ? changed : Object.keys(value.fields),
+        changed: changed.length ? changed : fieldKeys,
         dayState: Diary.dayState(day || value.date),
         ids,
         writeId: existing.id,
         deduplicated: true,
       };
+      if (value.fields.waterDeltaL !== undefined) out.waterDeltaL = Math.round(value.fields.waterDeltaL * 1000) / 1000;
       if (existing.undone) out.undone = true;
       return out;
     }
@@ -824,9 +831,12 @@ const SheetApi = {
   diaryUpsert_(v) {
     const r = Diary.save(v.date, v.fields);
     const day = Days.get(v.date);
-    const fields = SheetApi.pick_(day, Object.keys(v.fields));
+    const fieldKeys = Object.keys(v.fields).map((k) => (k === 'waterDeltaL' ? 'waterL' : k));
+    const fields = SheetApi.pick_(day, fieldKeys);
     const ids = day ? SheetApi.pick_(day, ['objective', 'goal', 'plan']) : Days.idsOn(Dates.fromKey(v.date));
-    return { date: v.date, row: r.row, fields, changed: r.changed, dayState: r.dayState, ids };
+    const out = { date: v.date, row: r.row, fields, changed: r.changed, dayState: r.dayState, ids };
+    if (v.fields.waterDeltaL !== undefined) out.waterDeltaL = Math.round(v.fields.waterDeltaL * 1000) / 1000;
+    return out;
   },
 
   /** A Diário row: date, ids, the typed fields present, food totals and state. */

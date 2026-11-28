@@ -27,14 +27,22 @@ const ApiValidator = {
     c.onlyKeys(args, 'args', ['date', 'fields']);
     c.date(args.date, 'args.date');
     const fields = args.fields;
-    const names = Object.keys(Diary.FIELDS);
+    const names = Object.keys(Diary.FIELDS).concat(['waterDeltaL']);
     if (fields === undefined) c.add('args.fields', 'required', `campo obrigatório; aceitos: ${names.join(', ')}`);
     else if (c.object(fields, 'args.fields')) {
       const keys = Object.keys(fields);
       if (!keys.length) c.add('args.fields', 'empty', `informe ao menos um campo: ${names.join(', ')}`);
+      if (fields.waterL !== undefined && fields.waterDeltaL !== undefined) {
+        c.add('args.fields.waterDeltaL', 'conflict', 'não envie waterL e waterDeltaL juntos; escolha valor absoluto (waterL) ou acréscimo (waterDeltaL)');
+      }
       keys.forEach((name) => {
-        const spec = Diary.FIELDS[name];
         const path = `args.fields.${name}`;
+        if (name === 'waterDeltaL') {
+          const dspec = Diary.WATER_DELTA;
+          c.value(fields[name], path, { type: dspec.type, min: dspec.min, max: dspec.max });
+          return;
+        }
+        const spec = Diary.FIELDS[name];
         if (!spec) { c.add(path, 'unknown_field', `campo desconhecido; aceitos: ${names.join(', ')}`); return; }
         if (fields[name] === null) return; // explicit clear (não informado)
         if (spec.type === 'text') c.value(fields[name], path, { type: 'text', maxLength: ApiValidator.TEXT_MAX[name] || 200 });

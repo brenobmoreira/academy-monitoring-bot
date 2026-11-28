@@ -20,36 +20,44 @@ const catalog = (extra) => ({
   ...extra,
 });
 
-function assertNoQuickWater(p) {
-  const box = p.doc.getElementById('daily-balance');
-  assert.equal(button(box, '+250 ml'), undefined);
-  assert.equal(button(box, '+500 ml'), undefined);
-  assert.equal(box.querySelector('#water-send'), null);
-  assert.match(box.querySelector('.water-note').textContent, /Água rápida indisponível/);
-}
-
-test('quick water is off on "Ontem": adding to an unknown total would overwrite it', async () => {
+test('quick water works on "Ontem" with atomic waterDeltaL without inventing a fake total, and switching dates clears pending water', async () => {
   const p = await boot({ view: 'food', catalog: catalog() });
+  const yesterday = C.addDays(today(), -1);
   button(p.doc.getElementById('daily-balance'), '+500 ml').click();
   p.doc.getElementById('dates').children[1].click();
-  assertNoQuickWater(p);
   assert.equal(p.tg.MainButton.params.text, 'Revisar refeição', 'the pending water does not follow the date');
 
-  p.doc.getElementById('dates').children[0].click();
-  assert.ok(button(p.doc.getElementById('daily-balance'), '+500 ml'), 'back today the chips return');
+  const yestBox = p.doc.getElementById('daily-balance');
+  assert.ok(button(yestBox, '+250 ml'));
+  assert.ok(button(yestBox, '+500 ml'));
+  button(yestBox, '+500 ml').click();
+  assert.equal(p.tg.MainButton.params.text, 'Revisar água (+500 ml)');
+  p.press();
+  p.timers.run(400);
+  assert.match(p.review.textContent, /\+0,5 L \(será somado ao total já registrado na planilha\)/);
+  assert.doesNotMatch(p.review.textContent, /total estimado|gravado|salvo/i);
+  p.press();
+  assert.deepEqual(JSON.parse(p.tg.sent[0]).args, { date: yesterday, waterDeltaL: 0.5 });
 });
 
-test('quick water is off when the day baseline did not come in the link (trimmed or stale)', async () => {
+test('quick water works when day was trimmed or link is stale, showing honest review copy vs estimated total when fresh', async () => {
   for (const extra of [{ day: undefined }, { day: { k: 200 } }, { today: '2020-01-01' }]) {
     const p = await boot({ view: 'food', catalog: catalog(extra) });
-    assertNoQuickWater(p);
+    const box = p.doc.getElementById('daily-balance');
+    assert.equal(box.querySelector('.water-note'), null);
+    button(box, '+250 ml').click();
     p.press();
     p.timers.run(400);
+    assert.match(p.review.textContent, /\+0,25 L \(será somado ao total já registrado na planilha\)/);
+    assert.doesNotMatch(p.review.textContent, /total estimado|gravado|salvo/i);
     p.press();
-    assert.equal(p.tg.sent.filter((s) => JSON.parse(s).t === 'water').length, 0);
+    assert.deepEqual(JSON.parse(p.tg.sent[0]).args, { date: today(), waterDeltaL: 0.25 });
   }
-  const zero = await boot({ view: 'food', catalog: catalog({ day: { w: 0 } }) });
-  assert.ok(button(zero.doc.getElementById('daily-balance'), '+250 ml'), 'a known zero is a baseline');
+  const fresh = await boot({ view: 'food', catalog: catalog({ day: { w: 2 } }) });
+  button(fresh.doc.getElementById('daily-balance'), '+500 ml').click();
+  fresh.press();
+  fresh.timers.run(400);
+  assert.match(fresh.review.textContent, /\+0,5 L \(total estimado: 2,5 L\)/);
 });
 
 function sendWater(p) {
@@ -65,19 +73,20 @@ function restore(p, label) {
   p.doc.getElementById('sheet').querySelectorAll('.result').find((b) => label.test(b.textContent)).click();
 }
 
-test('"Restaurar último envio" on Refeição brings a water send back under the same id', async () => {
+test('"Restaurar último envio" on Refeição brings a waterDeltaL send back under the same id even without day snapshot', async () => {
   const storage = storageWith();
   const first = await boot({ view: 'food', catalog: catalog(), storage });
   const sent = sendWater(first);
+  assert.deepEqual(sent.args, { date: today(), waterDeltaL: 0.5 });
 
-  // A meal on the plate is not "busy" for water; water already being added is.
-  const p = await boot({ view: 'food', catalog: catalog(), storage });
+  // A meal on the plate is not "busy" for water; water already being added is. Works even when day is trimmed.
+  const p = await boot({ view: 'food', catalog: catalog({ day: undefined }), storage });
   const asked = [];
   p.tg.showConfirm = (text, cb) => { asked.push(text); cb(true); };
-  restore(p, /^Água 2 L/);
+  restore(p, /^Água \+500 ml/);
   assert.equal(asked.length, 0);
   assert.equal(p.tg.MainButton.params.text, 'Revisar água (+500 ml)');
-  restore(p, /^Água 2 L/);
+  restore(p, /^Água \+500 ml/);
   assert.equal(asked.length, 1);
   p.press();
   p.timers.run(400);
@@ -85,13 +94,38 @@ test('"Restaurar último envio" on Refeição brings a water send back under the
   assert.deepEqual(JSON.parse(p.tg.sent[0]), sent);
 });
 
-test('a water send is not restored where the day total is unknown', async () => {
+test('"Restaurar último envio" preserves legacy waterL history entries and switches to waterDeltaL if edited', async () => {
   const storage = storageWith();
-  sendWater(await boot({ view: 'food', catalog: catalog(), storage }));
+  const legacyId = 'fedcba9876543210fedcba9876543210';
+  const legacyJson = JSON.stringify({ v: 1, t: 'water', id: legacyId, args: { date: today(), waterL: 2 } });
+  const store = C.draftStore(storage, SAMPLE.client);
+  store.recordSent({
+    t: 'water',
+    label: 'Água 2 L, hoje',
+    json: legacyJson,
+    form: { id: legacyId, date: today(), waterL: 2 },
+  });
+
+  // Untouched resend preserves the exact legacy waterL payload and idempotency id
   const p = await boot({ view: 'food', catalog: catalog({ day: undefined }), storage });
-  restore(p, /^Água/);
-  assert.match(p.say(), /^Não dá para restaurar essa água/);
-  assert.equal(p.tg.MainButton.params.text, 'Revisar refeição');
+  restore(p, /^Água 2 L/);
+  assert.equal(p.tg.MainButton.params.text, 'Revisar água (2 L)');
+  p.press();
+  p.timers.run(400);
+  assert.match(p.review.textContent, /Água total2 L/);
+  p.press();
+  assert.equal(p.tg.sent[0], legacyJson);
+
+  // Restoring legacy waterL and then tapping +250 ml switches to fresh incremental waterDeltaL
+  const p2 = await boot({ view: 'food', catalog: catalog(), storage });
+  restore(p2, /^Água 2 L/);
+  button(p2.doc.getElementById('daily-balance'), '+250 ml').click();
+  p2.press();
+  p2.timers.run(400);
+  p2.press();
+  const edited = JSON.parse(p2.tg.sent[0]);
+  assert.notEqual(edited.id, legacyId);
+  assert.deepEqual(edited.args, { date: today(), waterDeltaL: 0.25 });
 });
 
 test('the chat draft id becomes the submission id, and foods take the catalog spelling', async () => {

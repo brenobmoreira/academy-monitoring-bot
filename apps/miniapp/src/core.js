@@ -1065,6 +1065,13 @@
 
   function pulsoSummary(context) {
     if (context.view === 'water') {
+      if (context.waterDeltaL !== undefined && context.waterDeltaL !== null) {
+        var dText = '+' + formatBR(round(context.waterDeltaL, 3)) + ' L';
+        if (context.waterTotal !== undefined && context.waterTotal !== null) {
+          return 'Água pronta para conferir: ' + dText + ' (total estimado: ' + formatLiters(context.waterTotal) + ').';
+        }
+        return 'Água pronta para conferir: ' + dText + ' para somar na planilha.';
+      }
       return 'Água pronta para conferir: ' + formatLiters(context.waterTotal) + '.';
     }
     if (context.view === 'food') {
@@ -1904,23 +1911,25 @@
     };
   }
 
-  /** Water state {date, baseWaterL, addWaterL} → payload args {date, waterL} for t: "water". */
+  /** Water state {date, addWaterL, baseWaterL?} → payload args {date, waterDeltaL} for t: "water". */
   function buildWater(state, opts) {
     var errors = [];
     var s = state || {};
     checkDate(errors, s.date, opts && opts.today);
     var add = parseDecimal(s.addWaterL);
-    if (add === null || !Number.isFinite(add) || add <= 0) {
-      errors.push({ path: 'waterL', message: 'Adicione alguma quantidade de água' });
-    }
-    var rawBase = parseDecimal(s.baseWaterL);
-    var base = rawBase !== null && Number.isFinite(rawBase) && rawBase >= 0 ? rawBase : 0;
-    var total = add !== null && Number.isFinite(add) && add > 0 ? round(base + add, 2) : null;
-    if (total !== null && (total < WATER_LIMITS.MIN || total > WATER_LIMITS.MAX)) {
-      errors.push({ path: 'waterL', message: 'Água deve ficar entre ' + formatBR(WATER_LIMITS.MIN) + ' e ' + formatBR(WATER_LIMITS.MAX) + ' L' });
+    var delta = add !== null && Number.isFinite(add) ? round(add, 3) : null;
+    if (delta === null || delta <= 0) {
+      errors.push({ path: 'waterDeltaL', message: 'Adicione alguma quantidade de água' });
+    } else if (delta < WATER_LIMITS.MIN || delta > WATER_LIMITS.MAX) {
+      errors.push({ path: 'waterDeltaL', message: 'Água deve ficar entre ' + formatBR(WATER_LIMITS.MIN) + ' e ' + formatBR(WATER_LIMITS.MAX) + ' L' });
+    } else if (s.baseWaterL !== null && s.baseWaterL !== undefined && s.baseWaterL !== '') {
+      var rawBase = parseDecimal(s.baseWaterL);
+      if (rawBase !== null && Number.isFinite(rawBase) && rawBase >= 0 && round(rawBase + delta, 3) > WATER_LIMITS.MAX) {
+        errors.push({ path: 'waterDeltaL', message: 'Água deve ficar entre ' + formatBR(WATER_LIMITS.MIN) + ' e ' + formatBR(WATER_LIMITS.MAX) + ' L' });
+      }
     }
     return {
-      args: errors.length ? null : { date: s.date, waterL: total },
+      args: errors.length ? null : { date: s.date, waterDeltaL: delta },
       errors: errors,
     };
   }

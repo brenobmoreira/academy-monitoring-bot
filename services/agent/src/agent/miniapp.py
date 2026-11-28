@@ -137,6 +137,7 @@ Pain = Annotated[int, BeforeValidator(_whole), AfterValidator(_range(0, 10))]
 Qty = Annotated[int | float, AfterValidator(_range(0.001, 100000))]
 Portions = Annotated[int | float, AfterValidator(_range(0.01, 50))]
 WaterL = Annotated[int | float, AfterValidator(_range(0.05, 20))]
+WaterDeltaL = Annotated[int | float, AfterValidator(_range(0.05, 20))]
 
 
 class _Model(BaseModel):
@@ -315,7 +316,14 @@ class FoodPayload(_Versioned):
 
 class WaterArgs(_Model):
     date: Day
-    waterL: WaterL
+    waterL: WaterL | None = None
+    waterDeltaL: WaterDeltaL | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_water(self) -> WaterArgs:
+        if (self.waterL is not None) == (self.waterDeltaL is not None):
+            raise ValueError("informe exatamente um de: waterDeltaL ou waterL")
+        return self
 
 
 class WaterPayload(_Versioned):
@@ -688,7 +696,12 @@ async def handle(
         raise ValueError("text payloads must be routed to the agent, not miniapp.handle")
     if isinstance(payload, WaterPayload):
         op = "diary.upsert"
-        args = {"date": payload.args.date, "fields": {"waterL": payload.args.waterL}}
+        fields: dict[str, Any] = (
+            {"waterDeltaL": payload.args.waterDeltaL}
+            if payload.args.waterDeltaL is not None
+            else {"waterL": payload.args.waterL}
+        )
+        args = {"date": payload.args.date, "fields": fields}
     else:
         # What the page sent, now validated field by field (extra="forbid": nothing else is in there).
         args = json.loads(raw)["args"]
@@ -873,8 +886,7 @@ def _daily_intake(result: dict[str, Any]) -> dict[str, int | float]:
             if val is not None:
                 out[dst] = val
     if "todayDiary" in result:
-        # No row or no water yet is a known zero. Without "w" the page does not know the day's
-        # total and offers no incremental water (which would overwrite it).
+        # No row or no water yet is a known zero. Without "w" the page shows only the delta.
         diary = result["todayDiary"]
         raw = diary.get("waterL") if isinstance(diary, dict) else None
         water = 0 if raw is None else _finite_num(raw, positive=False)
